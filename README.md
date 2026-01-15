@@ -54,9 +54,13 @@ This tool contains multiple independent Kiro Powers, each focused on specific co
 # Install CloudFront Functions converter:
 #   Enter: https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-cloudfront-functions-converter
 
-# 4. Start conversion
+# 4. Open workspace in Kiro IDE
+# File → Open Folder → Select the folder containing your Cloudflare configuration files
+# Important: Kiro IDE can only access files within the opened workspace
+
+# 5. Start conversion
 # Open a new chat in Kiro
-# Type: "Please convert the Cloudflare security rules in /path/to/cloudflare-config to AWS WAF configuration"
+# Type: "Please convert the Cloudflare security rules in ./cloudflare-config to AWS WAF configuration"
 ```
 
 ## Prerequisites
