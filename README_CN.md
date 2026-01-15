@@ -2,10 +2,6 @@
 
 **通过AI对话，自动将Cloudflare配置转换为AWS边缘服务配置**
 
-## How to clone this repo
-
-Follow this guide: https://w.amazon.com/bin/view/Users/rayjwil/gitlab/
-
 ## 为什么需要这个工具
 
 从Cloudflare迁移到AWS时，手工转换数百条规则既耗时又容易出错。本工具利用GenAI能力，通过对话式交互自动完成批量配置转换，将迁移时间从数天缩短到数小时。
@@ -52,9 +48,11 @@ Follow this guide: https://w.amazon.com/bin/view/Users/rayjwil/gitlab/
 
 # 3. 在Kiro中安装powers
 # 打开Kiro → Powers面板（👻⚡ 图标）
-# 点击"Add power from GitHub"
-# 输入：https://github.com/chenghit/cloudflare-aws-edge-config-converter
-# 选择并安装两个powers
+# 点击"Add power from GitHub" → "Import power from GitHub"
+# 安装WAF转换器：
+#   输入：https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-aws-waf-converter
+# 安装CloudFront Functions转换器：
+#   输入：https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-cloudfront-functions-converter
 
 # 4. 开始转换
 # 在Kiro中打开新对话
@@ -88,19 +86,21 @@ terraform version
 
 1. 打开Kiro IDE
 2. 点击Powers面板（👻⚡ 图标）
-3. 点击"Add power from GitHub"
-4. 输入仓库URL：`https://github.com/chenghit/cloudflare-aws-edge-config-converter`
-5. 选择要安装的power：
-   - `cloudflare-to-aws-waf-converter`
-   - `cloudflare-to-cloudfront-functions-converter`
+3. 点击"Add power from GitHub" → "Import power from GitHub"
+4. 输入仓库URL及子目录路径：
+   - WAF转换器：`https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-aws-waf-converter`
+   - CloudFront Functions转换器：`https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-cloudfront-functions-converter`
+5. 点击"Install"
 
 ### 从本地路径安装（用于开发）
 
 1. 克隆本仓库
 2. 打开Kiro IDE
 3. 点击Powers面板
-4. 点击"Add power from Local Path"
-5. 选择power目录
+4. 点击"Add power from GitHub" → "Import power from a folder"
+5. 选择power目录：
+   - `cloudflare-to-aws-waf-converter/`
+   - `cloudflare-to-cloudfront-functions-converter/`
 
 ## 使用指南
 
@@ -372,7 +372,3 @@ Kiro: [生成JavaScript代码和部署指南]
 ## 反馈和贡献
 
 如有问题或建议，欢迎提交Issue或Pull Request。
-
----
-
-**AWS内部用户**：可阅读[AI-powered Cloudflare-AWS conversion tool](https://quip-amazon.com/rJQHABEjIsUW)了解设计思想和架构细节。

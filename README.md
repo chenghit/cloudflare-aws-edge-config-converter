@@ -48,9 +48,11 @@ This tool contains multiple independent Kiro Powers, each focused on specific co
 
 # 3. Install powers in Kiro
 # Open Kiro → Powers panel (👻⚡ icon)
-# Click "Add power from GitHub"
-# Enter: https://github.com/chenghit/cloudflare-aws-edge-config-converter
-# Select and install both powers
+# Click "Add power from GitHub" → "Import power from GitHub"
+# Install WAF converter:
+#   Enter: https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-aws-waf-converter
+# Install CloudFront Functions converter:
+#   Enter: https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-cloudfront-functions-converter
 
 # 4. Start conversion
 # Open a new chat in Kiro
@@ -84,19 +86,21 @@ Follow official documentation:
 
 1. Open Kiro IDE
 2. Click Powers panel (👻⚡ icon)
-3. Click "Add power from GitHub"
-4. Enter repository URL: `https://github.com/chenghit/cloudflare-aws-edge-config-converter`
-5. Select power to install:
-   - `cloudflare-to-aws-waf-converter`
-   - `cloudflare-to-cloudfront-functions-converter`
+3. Click "Add power from GitHub" → "Import power from GitHub"
+4. Enter repository URL with subdirectory path:
+   - For WAF converter: `https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-aws-waf-converter`
+   - For CloudFront Functions converter: `https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-cloudfront-functions-converter`
+5. Click "Install"
 
 ### Install from Local Path (for development)
 
 1. Clone this repository
 2. Open Kiro IDE
 3. Click Powers panel
-4. Click "Add power from Local Path"
-5. Select power directory
+4. Click "Add power from GitHub" → "Import power from a folder"
+5. Select power directory:
+   - `cloudflare-to-aws-waf-converter/`
+   - `cloudflare-to-cloudfront-functions-converter/`
 
 ## Usage Guide
 
