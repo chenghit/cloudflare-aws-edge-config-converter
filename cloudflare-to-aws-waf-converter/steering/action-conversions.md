@@ -241,6 +241,12 @@ rule {
 
 ## Rate Limiting Rules
 
+### ⚠️ CRITICAL: ALL Rate-Based Rules Are ALWAYS Convertible
+
+**If you are about to mark a rate-based rule as "cannot convert" due to low calculated limit, STOP. You are making a mistake.**
+
+AWS WAF has a mandatory fallback configuration (`Limit=10, EvaluationWindowSec=600`) that makes ALL rate-based rules convertible, regardless of the original Cloudflare rate limit. See the evaluation window selection algorithm below.
+
 ### Duration (mitigation_timeout)
 
 Cloudflare supports custom block duration. AWS WAF does not.
@@ -266,13 +272,15 @@ AWS_limit = Cloudflare_requests_per_period × (AWS_window / Cloudflare_period)
 
 **Evaluation window selection algorithm:**
 
-1. Try windows in order: [60, 120, 300, 600] seconds
-2. For each window, calculate: `limit = requests_per_period × (window / period)`
-3. Use first window where calculated limit ≥ 10 (AWS minimum)
-4. **MANDATORY FALLBACK**: If all windows result in limit < 10, YOU MUST convert using: `Limit=10, EvaluationWindowSec=600`
-   - This is slightly more permissive than the original Cloudflare configuration
-   - This is ALWAYS convertible - NEVER mark as "cannot convert" due to low limit
-   - The rule will still provide rate limiting protection, just with a slightly higher threshold
+**CRITICAL: ALL rate-based rules are ALWAYS convertible. If calculated limit < 10, use mandatory fallback.**
+
+1. For each window in [60, 120, 300, 600] seconds, calculate: `limit = requests_per_period × (window / period)`
+2. If any window produces limit ≥ 10: Use the first such window
+3. If ALL windows produce limit < 10: **MANDATORY FALLBACK** → `Limit=10, EvaluationWindowSec=600`
+   - This fallback is NOT optional - it MUST be applied
+   - The rule is ALWAYS convertible with this fallback
+   - NEVER mark as "cannot convert" due to low calculated limit
+   - Note in summary: "Converted using fallback configuration (10 req/600s). This is slightly more permissive than the original but provides similar rate limiting protection."
 
 **Example 1:**
 
@@ -287,16 +295,22 @@ Cloudflare: 5 requests per 20 seconds
 - Try 60s: 5 × (60 / 20) = 15 ≥ 10 ✓
 - AWS configuration: Limit=15, EvaluationWindowSec=60
 
-**Example 3:**
+**Example 3: Mandatory Fallback (ALWAYS CONVERTIBLE)**
 
 Cloudflare: 1 request per 100 seconds
+
+**Step 1: Calculate for all windows**
 - Try 60s: 1 × (60 / 100) = 0.6 < 10 ❌
 - Try 120s: 1 × (120 / 100) = 1.2 < 10 ❌
 - Try 300s: 1 × (300 / 100) = 3 < 10 ❌
 - Try 600s: 1 × (600 / 100) = 6 < 10 ❌
-- **MANDATORY FALLBACK APPLIED**: Limit=10, EvaluationWindowSec=600
-- **Status**: ✓ CONVERTIBLE (using fallback configuration)
-- **Note**: This is slightly more permissive than the original (10 req/600s ≈ 1.67 req/100s vs original 1 req/100s)
+
+**Step 2: Apply mandatory fallback**
+- **AWS Configuration**: Limit=10, EvaluationWindowSec=600
+- **Status**: ✓ CONVERTIBLE (using mandatory fallback)
+- **Summary Note**: "Converted using fallback configuration (10 req/600s ≈ 1.67 req/100s). This is slightly more permissive than the original Cloudflare configuration (1 req/100s) but provides similar rate limiting protection."
+
+**Key Point**: This rule is CONVERTIBLE, not "cannot convert". The fallback makes ALL rate-based rules convertible.
 
 **AWS WAF JSON example:**
 ```json
