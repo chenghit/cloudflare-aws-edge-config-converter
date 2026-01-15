@@ -215,9 +215,14 @@ Ask user to confirm completeness and correctness.
 3. Read `steering/field-conversions.md` for IP/ASN/field mapping rules
 4. Read `steering/action-conversions.md` for action and rate limiting conversion rules
 5. Read `steering/aws-managed-rules.md` completely to understand AWS managed rules requirements
-6. Read `steering/common-mistakes.md` to understand common errors and how to avoid them
-7. **CRITICAL for rate-based rules**: AWS WAF `limit` is request count in ONE evaluation window. Use algorithm from action-conversions.md: try windows [60,120,300,600]s in order, use first where calculated limit ≥ 10.
-8. Ask user for custom Web ACL names:
+6. Read `steering/common-mistakes.md` completely, including the "Quick Checklist Before Generating Terraform" at the end
+7. **CRITICAL for rate-based rules**: 
+   - AWS WAF `limit` is request count in ONE evaluation window
+   - Use algorithm from action-conversions.md: try windows [60,120,300,600]s in order, use first where calculated limit ≥ 10
+   - **MANDATORY**: If all windows result in limit < 10, YOU MUST use fallback: `Limit=10, EvaluationWindowSec=600`
+   - NEVER mark a rate-based rule as "cannot convert" solely because the calculated limit is below 10
+8. **Verify your conversion plan** against the checklist in common-mistakes.md before generating Terraform code
+9. Ask user for custom Web ACL names:
    - Web ACL for websites (default: `cloudflare-migrated-waf-website`)
    - Web ACL for APIs and files (default: `cloudflare-migrated-waf-api-and-file`)
 

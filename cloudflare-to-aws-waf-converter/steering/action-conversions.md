@@ -269,7 +269,10 @@ AWS_limit = Cloudflare_requests_per_period × (AWS_window / Cloudflare_period)
 1. Try windows in order: [60, 120, 300, 600] seconds
 2. For each window, calculate: `limit = requests_per_period × (window / period)`
 3. Use first window where calculated limit ≥ 10 (AWS minimum)
-4. If all windows result in limit < 10, convert using fallback: 600s window with limit = 10 (slightly more permissive than original, but convertible)
+4. **MANDATORY FALLBACK**: If all windows result in limit < 10, YOU MUST convert using: `Limit=10, EvaluationWindowSec=600`
+   - This is slightly more permissive than the original Cloudflare configuration
+   - This is ALWAYS convertible - NEVER mark as "cannot convert" due to low limit
+   - The rule will still provide rate limiting protection, just with a slightly higher threshold
 
 **Example 1:**
 
@@ -291,7 +294,9 @@ Cloudflare: 1 request per 100 seconds
 - Try 120s: 1 × (120 / 100) = 1.2 < 10 ❌
 - Try 300s: 1 × (300 / 100) = 3 < 10 ❌
 - Try 600s: 1 × (600 / 100) = 6 < 10 ❌
-- AWS configuration: Limit=10, EvaluationWindowSec=600 (fallback, slightly more permissive than original)
+- **MANDATORY FALLBACK APPLIED**: Limit=10, EvaluationWindowSec=600
+- **Status**: ✓ CONVERTIBLE (using fallback configuration)
+- **Note**: This is slightly more permissive than the original (10 req/600s ≈ 1.67 req/100s vs original 1 req/100s)
 
 **AWS WAF JSON example:**
 ```json
