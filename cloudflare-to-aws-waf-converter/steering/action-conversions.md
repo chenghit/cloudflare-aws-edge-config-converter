@@ -269,7 +269,7 @@ AWS_limit = Cloudflare_requests_per_period × (AWS_window / Cloudflare_period)
 1. Try windows in order: [60, 120, 300, 600] seconds
 2. For each window, calculate: `limit = requests_per_period × (window / period)`
 3. Use first window where calculated limit ≥ 10 (AWS minimum)
-4. If all windows result in limit < 10, use 600s with limit = 10 (fallback)
+4. If all windows result in limit < 10, convert using fallback: 600s window with limit = 10 (slightly more permissive than original, but convertible)
 
 **Example 1:**
 
@@ -332,9 +332,7 @@ AWS WAF rate-based rules don't support Response code or Response headers.
 
 **Conversion strategy:**
 
-1. **If ≤10 rate-limiting rules AND all scope_down_statements ≤3 nesting levels**: Convert directly to rate-based rules
-   - Preserve original matching logic in scope_down_statement
-   - Do NOT split rules (splitting causes independent rate tracking and semantic changes)
+1. **If ≤10 rate-limiting rules AND all scope_down_statements ≤3 nesting levels**: Convert directly to rate-based rules, preserve original matching logic in scope_down_statement, and do NOT split rules (splitting causes independent rate tracking and semantic changes)
 
 2. **If >10 rate-limiting rules OR any scope_down_statement >3 nesting levels**: Mark as "Cannot convert - too complex"
    - Document in summary: "This rate-limiting rule cannot be converted because [reason]"

@@ -88,10 +88,7 @@ For lists referenced by name (e.g., `$office_network`):
 
 AWS WAF IP sets must specify IP version. Cloudflare lists can contain both.
 
-**Strategy:**
-- Create 2 IP sets: `<name>-ipv4` and `<name>-ipv6`
-- Create 2 AWS WAF rules: one for IPv4, one for IPv6
-- Both rules use the same action and RuleLabels (for skip rules)
+**Strategy:** Create 2 IP sets (`<name>-ipv4` and `<name>-ipv6`), create 2 AWS WAF rules (one for IPv4, one for IPv6), and both rules use the same action and RuleLabels (for skip rules)
 
 **Example:**
 
@@ -132,12 +129,7 @@ rule {
 - No risk of exceeding 3-level limit
 - Clear, maintainable code
 
-**For negative matching:**
-- Still split into 2 rules
-- Each rule applies De Morgan's Law to its own IP set
-- Example: `not ip.src in {list}` becomes:
-  - Rule 1: `NOT ipv4_set`
-  - Rule 2: `NOT ipv6_set`
+**For negative matching:** Still split into 2 rules where each rule applies De Morgan's Law to its own IP set (e.g., `not ip.src in {list}` becomes Rule 1: `NOT ipv4_set` and Rule 2: `NOT ipv6_set`)
 
 **WRONG - Do NOT attempt to combine IPv4/IPv6 in one rule:**
 

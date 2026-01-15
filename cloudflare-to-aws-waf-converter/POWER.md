@@ -244,7 +244,7 @@ Ask user to confirm completeness and correctness.
 - This is the PRIMARY splitting strategy that must be applied first
 
 **Phase 2: Split by IPv4/IPv6 SECOND (apply to each rule from Phase 1)**
-- **ALWAYS split rules with mixed IPv4/IPv6 IP lists** - Each becomes 2 rules (IPv4 variant + IPv6 variant)
+- **ALWAYS split rules with mixed IPv4/IPv6 IP lists** - Each becomes 2 rules (IPv4 variant + IPv6 variant), but ONLY for branches that contain IP matching conditions (not ASN, user-agent, headers, or other non-IP fields)
 - Apply this to EVERY rule (including those already split in Phase 1)
 - Even if a rule was already split by OR, each resulting rule must be further split if it contains mixed IPv4/IPv6
 
