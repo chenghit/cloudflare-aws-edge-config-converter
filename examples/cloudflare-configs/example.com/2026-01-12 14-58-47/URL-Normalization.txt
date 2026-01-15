@@ -1,0 +1,9 @@
+{
+  "result": {
+    "scope": "incoming",
+    "type": "rfc3986"
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

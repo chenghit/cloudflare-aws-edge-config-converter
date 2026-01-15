@@ -1,0 +1,53 @@
+{
+  "result": [
+    {
+      "description": "Created by the Cloudflare security team, this ruleset is designed to provide protection for free zones",
+      "id": "77454fe2d30c4220b5701f6fdfb893ba",
+      "kind": "managed",
+      "last_updated": "2025-12-11T19:19:14.790941Z",
+      "name": "Cloudflare Managed Free Ruleset",
+      "phase": "http_request_firewall_managed",
+      "source": "firewall_managed",
+      "version": "66"
+    },
+    {
+      "description": "This is the Managed Cloudflare L3/4 DDoS Ruleset. Cloudflare routinely adds signatures to address new attack vectors. Additional configuration allows you to customize the sensitivity of each rule and the performed mitigation action.",
+      "id": "3b64149bfa6e4220bbbc2bd6db589552",
+      "kind": "managed",
+      "last_updated": "2026-01-09T23:26:02.875911Z",
+      "name": "Cloudflare L3/4 DDoS Ruleset",
+      "phase": "ddos_l4",
+      "version": "3023"
+    },
+    {
+      "description": "Automatic mitigation of HTTP-based DDoS attacks. Cloudflare routinely adds signatures to address new attack vectors. Additional configuration allows you to customize the sensitivity of each rule and the performed mitigation action.",
+      "id": "4d21379b4f9f4bb088e0729962c8b3cf",
+      "kind": "managed",
+      "last_updated": "2026-01-09T23:26:04.845582Z",
+      "name": "DDoS L7 ruleset",
+      "phase": "ddos_l7",
+      "version": "3139"
+    },
+    {
+      "description": "",
+      "id": "d6d858f2ebd94c698e6bc2116931714f",
+      "kind": "root",
+      "last_updated": "2023-04-07T17:06:28.476799Z",
+      "name": "root",
+      "phase": "ddos_l4",
+      "version": "5"
+    },
+    {
+      "description": "",
+      "id": "2e6a2fa5fbbd4bb6a3cc92c621c57eab",
+      "kind": "root",
+      "last_updated": "2025-12-26T05:48:10.773962Z",
+      "name": "default",
+      "phase": "http_request_redirect",
+      "version": "2"
+    }
+  ],
+  "success": true,
+  "errors": [],
+  "messages": []
+}

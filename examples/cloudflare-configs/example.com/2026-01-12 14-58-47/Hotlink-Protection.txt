@@ -1,0 +1,1 @@
+{"result":{"id":"hotlink_protection","modified_on":null,"value":"off","editable":true},"success":true,"errors":[],"messages":[]}

@@ -1,0 +1,86 @@
+{
+  "result": {
+    "description": "",
+    "id": "bae0c39fc6684b9484d6a92096c4144b",
+    "kind": "zone",
+    "last_updated": "2026-01-12T06:58:19.007305Z",
+    "name": "default",
+    "phase": "http_request_firewall_custom",
+    "rules": [
+      {
+        "action": "block",
+        "description": "Create IP-based rule [Template]",
+        "enabled": true,
+        "expression": "(ip.src in $block_list_1) or (ip.src.asnum in $block_list_2)",
+        "id": "bf309b4dc0bb4b12b543dd164587db5c",
+        "last_updated": "2025-12-15T07:24:56.434792Z",
+        "ref": "bf309b4dc0bb4b12b543dd164587db5c",
+        "version": "2"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "phases": [
+            "http_request_firewall_managed"
+          ],
+          "ruleset": "current"
+        },
+        "description": "skip-rule-1",
+        "enabled": true,
+        "expression": "(ip.src.country eq \"DZ\" and ip.src in {200.1.1.1 200.1.1.2 200.2.1.1 200.2.1.2 2000::1 2000::2}) or (ip.src.country eq \"CO\" and not ip.src in {100.1.1.1 100.1.1.2 100.2.1.1 100.2.1.2 2001::1 2001::2}) or (http.user_agent contains \"Googlebot\" and ip.src.asnum in {16001 16002 16003})",
+        "id": "54d4eb33465e4cba966a8812d09ba7a0",
+        "last_updated": "2026-01-09T07:07:10.220839Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "54d4eb33465e4cba966a8812d09ba7a0",
+        "version": "1"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "phases": [
+            "http_ratelimit",
+            "http_request_firewall_managed"
+          ],
+          "ruleset": "current"
+        },
+        "description": "skip-rule-2",
+        "enabled": true,
+        "expression": "(ip.src.country eq \"CN\" and ip.src in {200.1.1.1 200.1.1.2 200.2.1.1 200.2.1.2 2000::1 2000::2}) or (ip.src.country eq \"MR\" and not ip.src in {100.1.1.1 100.1.1.2 100.2.1.1 100.2.1.2 2001::1 2001::2})",
+        "id": "6e2b8b43c9364222af14365ca7505b9e",
+        "last_updated": "2026-01-12T06:58:19.007305Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "6e2b8b43c9364222af14365ca7505b9e",
+        "version": "1"
+      },
+      {
+        "action": "block",
+        "description": "Block specified user agents",
+        "enabled": true,
+        "expression": "(http.user_agent eq \"BadBot/1.0.2 (+http://bad.bot)\")",
+        "id": "d41b113b0c744f7694cf8032aa8fae8c",
+        "last_updated": "2025-12-15T07:24:56.434792Z",
+        "ref": "d41b113b0c744f7694cf8032aa8fae8c",
+        "version": "2"
+      },
+      {
+        "action": "managed_challenge",
+        "description": "block-low-attack-score",
+        "enabled": true,
+        "expression": "(cf.waf.score le 10)",
+        "id": "3ca10fc8be4b47d6aa6fec71a950becb",
+        "last_updated": "2025-12-15T07:24:56.434792Z",
+        "ref": "3ca10fc8be4b47d6aa6fec71a950becb",
+        "version": "2"
+      }
+    ],
+    "source": "firewall_custom",
+    "version": "6"
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

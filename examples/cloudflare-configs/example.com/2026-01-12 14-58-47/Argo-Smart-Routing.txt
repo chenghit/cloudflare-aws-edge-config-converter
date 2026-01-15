@@ -1,0 +1,11 @@
+{
+  "result": {
+    "id": "smart_routing",
+    "value": "off",
+    "editable": true,
+    "modified_on": "0001-01-01T00:00:00Z"
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

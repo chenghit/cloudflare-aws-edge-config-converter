@@ -1,0 +1,19 @@
+{
+  "result": [
+    {
+      "id": "e8e20459de1746d5a4c17d33a31b5017",
+      "asn": 15000,
+      "created_on": "2025-12-15T06:47:06Z",
+      "modified_on": "2025-12-15T06:47:06Z"
+    },
+    {
+      "id": "13354fec042247e68faa619a9cc2d861",
+      "asn": 15001,
+      "created_on": "2025-12-15T06:47:06Z",
+      "modified_on": "2025-12-15T06:47:06Z"
+    }
+  ],
+  "success": true,
+  "errors": [],
+  "messages": []
+}

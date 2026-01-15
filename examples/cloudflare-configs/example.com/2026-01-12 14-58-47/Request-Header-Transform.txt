@@ -1,0 +1,87 @@
+{
+  "result": {
+    "description": "",
+    "id": "621e9cac6dd840f8b76ff38038599f80",
+    "kind": "zone",
+    "last_updated": "2025-12-29T03:54:12.683099Z",
+    "name": "default",
+    "phase": "http_request_late_transform",
+    "rules": [
+      {
+        "action": "rewrite",
+        "action_parameters": {
+          "headers": {
+            "X-CDN-Vendor": {
+              "operation": "set",
+              "value": "Cloudflare"
+            }
+          }
+        },
+        "description": "Add HTTP header to request",
+        "enabled": true,
+        "expression": "true",
+        "id": "09bad50b1e294955b998a7ea8578d6c5",
+        "last_updated": "2025-12-29T03:06:45.148233Z",
+        "ref": "09bad50b1e294955b998a7ea8578d6c5",
+        "version": "2"
+      },
+      {
+        "action": "rewrite",
+        "action_parameters": {
+          "headers": {
+            "X-Forward-For": {
+              "operation": "remove"
+            }
+          }
+        },
+        "description": "Remove HTTP header from request [Template]",
+        "enabled": true,
+        "expression": "true",
+        "id": "d515b2bbf558423299ece5162954fad0",
+        "last_updated": "2025-12-29T03:29:41.431198Z",
+        "ref": "d515b2bbf558423299ece5162954fad0",
+        "version": "1"
+      },
+      {
+        "action": "rewrite",
+        "action_parameters": {
+          "headers": {
+            "X-Is-Mobile": {
+              "operation": "set",
+              "value": "true"
+            }
+          }
+        },
+        "description": "Add Mobile Device Header_true",
+        "enabled": true,
+        "expression": "(http.user_agent contains \"Mobi\")",
+        "id": "0b92a4692af944fc86b2f95e1b398352",
+        "last_updated": "2025-12-29T03:53:45.531262Z",
+        "ref": "0b92a4692af944fc86b2f95e1b398352",
+        "version": "1"
+      },
+      {
+        "action": "rewrite",
+        "action_parameters": {
+          "headers": {
+            "X-Is-Mobile": {
+              "operation": "set",
+              "value": "false"
+            }
+          }
+        },
+        "description": "Duplicate of Add Mobile Device Header_false",
+        "enabled": true,
+        "expression": "(not http.user_agent contains \"Mobi\")",
+        "id": "71b425e77711453fb414c0f3704271b2",
+        "last_updated": "2025-12-29T03:54:12.683099Z",
+        "ref": "71b425e77711453fb414c0f3704271b2",
+        "version": "1"
+      }
+    ],
+    "version": "5"
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

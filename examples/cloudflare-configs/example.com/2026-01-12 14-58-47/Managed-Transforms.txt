@@ -1,0 +1,52 @@
+{
+  "result": {
+    "managed_request_headers": [
+      {
+        "enabled": false,
+        "has_conflict": false,
+        "id": "add_client_certificate_headers"
+      },
+      {
+        "enabled": true,
+        "has_conflict": false,
+        "id": "add_visitor_location_headers"
+      },
+      {
+        "conflicts_with": [
+          "remove_visitor_ip_headers"
+        ],
+        "enabled": true,
+        "has_conflict": false,
+        "id": "add_true_client_ip_headers"
+      },
+      {
+        "conflicts_with": [
+          "add_true_client_ip_headers"
+        ],
+        "enabled": false,
+        "has_conflict": true,
+        "id": "remove_visitor_ip_headers"
+      },
+      {
+        "enabled": false,
+        "has_conflict": false,
+        "id": "add_waf_credential_check_status_header"
+      }
+    ],
+    "managed_response_headers": [
+      {
+        "enabled": false,
+        "has_conflict": false,
+        "id": "remove_x-powered-by_header"
+      },
+      {
+        "enabled": true,
+        "has_conflict": false,
+        "id": "add_security_headers"
+      }
+    ]
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

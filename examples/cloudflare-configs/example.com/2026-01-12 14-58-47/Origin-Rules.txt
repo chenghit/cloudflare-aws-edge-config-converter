@@ -1,0 +1,32 @@
+{
+  "result": {
+    "description": "",
+    "id": "8c4d0050da6644d996e8efafd6515a73",
+    "kind": "zone",
+    "last_updated": "2025-12-29T02:59:24.048928Z",
+    "name": "default",
+    "phase": "http_request_origin",
+    "rules": [
+      {
+        "action": "route",
+        "action_parameters": {
+          "host_header": "www.example.com",
+          "sni": {
+            "value": "www.example.com"
+          }
+        },
+        "description": "Rewrites Host and SNI",
+        "enabled": true,
+        "expression": "(http.request.full_uri wildcard \"https://cdn.example.com/host/*\")",
+        "id": "c62f825bc0564567acc261f877fbce50",
+        "last_updated": "2025-12-29T02:59:24.048928Z",
+        "ref": "c62f825bc0564567acc261f877fbce50",
+        "version": "2"
+      }
+    ],
+    "version": "2"
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

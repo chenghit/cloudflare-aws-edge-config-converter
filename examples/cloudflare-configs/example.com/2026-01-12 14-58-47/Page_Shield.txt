@@ -1,0 +1,11 @@
+{
+  "result": {
+    "enabled": false,
+    "updated_at": "0001-01-01T00:00:00Z",
+    "use_cloudflare_reporting_endpoint": true,
+    "use_connection_url_path": false
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

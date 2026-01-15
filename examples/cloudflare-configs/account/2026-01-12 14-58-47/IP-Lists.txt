@@ -1,0 +1,52 @@
+{
+  "result": [
+    {
+      "id": "cf3e86f3ece844f585979dd3a59549c9",
+      "name": "block_list_1",
+      "kind": "ip",
+      "num_items": 3,
+      "num_referencing_filters": 0,
+      "created_on": "2025-12-15T06:45:48Z",
+      "modified_on": "2025-12-15T06:46:35Z"
+    },
+    {
+      "id": "f5b29dfcf69d47cd8b28a6b885ebe0f9",
+      "name": "block_list_2",
+      "kind": "asn",
+      "num_items": 2,
+      "num_referencing_filters": 0,
+      "created_on": "2025-12-15T06:46:55Z",
+      "modified_on": "2025-12-15T06:47:06Z"
+    },
+    {
+      "id": "7916a3ba608245a6811fa2004dc2fe76",
+      "name": "bulk_redirects_2",
+      "kind": "redirect",
+      "num_items": 2,
+      "num_referencing_filters": 0,
+      "created_on": "2025-12-26T05:40:14Z",
+      "modified_on": "2025-12-26T05:47:31Z"
+    },
+    {
+      "id": "3d636658862045d488f6933204788771",
+      "name": "bulk_redirects_test",
+      "kind": "redirect",
+      "num_items": 3,
+      "num_referencing_filters": 0,
+      "created_on": "2025-12-15T11:48:19Z",
+      "modified_on": "2025-12-26T05:39:26Z"
+    },
+    {
+      "id": "ef362313cd284327a675453b571470f6",
+      "name": "reject_ip",
+      "kind": "ip",
+      "num_items": 0,
+      "num_referencing_filters": 0,
+      "created_on": "2022-10-19T03:08:46Z",
+      "modified_on": "2022-10-19T03:08:46Z"
+    }
+  ],
+  "success": true,
+  "errors": [],
+  "messages": []
+}

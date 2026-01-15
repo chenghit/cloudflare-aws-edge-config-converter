@@ -1,0 +1,590 @@
+---
+name: "cloudflare-to-aws-waf-converter"
+displayName: "Cloudflare to AWS WAF Converter"
+description: "Converts Cloudflare security configurations (WAF custom rules, rate limiting, IP access rules) to AWS WAF Terraform configuration for CloudFront distributions"
+keywords: ["cloudflare", "aws waf", "waf", "security rules", "rate limiting", "ip access", "firewall rules", "cloudfront waf"]
+---
+
+# Cloudflare to AWS WAF Converter
+
+Convert Cloudflare security configurations to AWS WAF Terraform configuration for CloudFront distributions.
+
+## Path Resolution
+
+**Steering files**: Reference files in this power's `steering/` directory
+- `steering/nesting-and-splitting.md`
+- `steering/field-conversions.md`
+- `steering/action-conversions.md`
+- `steering/terraform-architecture.md`
+- `steering/aws-managed-rules.md`
+- `steering/common-mistakes.md`
+- `steering/non-convertible-rules.md`
+
+**User data**: Cloudflare configuration files provided by user (e.g., `./cloudflare_config/`)
+
+When reading reference documentation, use relative paths like `steering/xxx.md`.
+When reading user's Cloudflare configs, use the path provided by user.
+
+## Scope
+
+Convert **security rules only**, not transformation rules:
+
+**In Scope:**
+- WAF custom rules
+- Rate limiting rules
+- IP access rules
+- IP lists and ASN lists
+
+**Out of Scope (use Cloudflare to CloudFront Functions power instead):**
+- Redirect rules
+- URL rewrite rules
+- Request/response header transforms
+- Bulk redirects
+- Page rules
+- Managed transforms
+
+## Workflow
+
+### 1. Obtain Cloudflare Configuration
+
+Ask user to provide Cloudflare configuration directory path.
+
+**If user doesn't have configuration files yet:**
+
+Recommend using the standalone backup tool: https://github.com/chenghit/CloudflareBackup
+
+This tool safely exports Cloudflare configuration to local JSON files. Once backed up, user should provide the directory path.
+
+**If a summary file already exists** in the user's Cloudflare configuration directory (e.g., `cloudflare-security-rules-summary.md`), ask the user:
+> "I found an existing summary file. Would you like to:
+> 1. Use the existing summary and proceed directly to AWS WAF conversion
+> 2. Re-analyze the Cloudflare configuration files and generate a new summary"
+
+### 2. Discover and Read Configuration Files
+
+**CRITICAL: Do NOT assume file locations. Always search the entire directory tree.**
+
+**Step 2.1: Search for all required configuration files**
+
+Use glob to recursively search for these files in the user-provided directory:
+
+```bash
+# Search for each required file type
+glob pattern="**/IP-Lists.txt"
+glob pattern="**/List-Items-ip-*.txt"
+glob pattern="**/List-Items-asn-*.txt"
+glob pattern="**/IP-Access-Rules.txt"
+glob pattern="**/WAF-Custom-Rules.txt"
+glob pattern="**/Rate-limits.txt"
+```
+
+**Step 2.2: Check for duplicate files**
+
+If any file type appears in multiple locations (e.g., two `WAF-Custom-Rules.txt` files in different subdirectories):
+1. **STOP the conversion process immediately**
+2. List all duplicate files with their full paths
+3. Ask user: "I found duplicate configuration files. Please remove duplicates and keep only one copy of each file, then restart the conversion."
+
+**Step 2.3: Read all discovered files**
+
+After confirming no duplicates exist:
+1. Read `IP-Lists.txt` to get list of all IP/ASN lists
+2. For each list in `IP-Lists.txt`:
+   - If `kind` is "ip": Read corresponding `List-Items-ip-<list_name>.txt`
+   - If `kind` is "asn": Read corresponding `List-Items-asn-<list_name>.txt`
+   - If list file not found: Note as missing and mark rules using this list as "partially convertible"
+3. Read `IP-Access-Rules.txt` (zone-level IP access rules)
+4. Read `WAF-Custom-Rules.txt` (WAF custom rules)
+5. Read `Rate-limits.txt` (rate limiting rules)
+
+**Step 2.4: Handle missing files gracefully**
+
+If any required file is not found:
+- `IP-Lists.txt` missing: Assume no account-level IP/ASN lists exist
+- `IP-Access-Rules.txt` missing: Assume no zone-level IP access rules exist
+- `WAF-Custom-Rules.txt` missing: Assume no WAF custom rules exist
+- `Rate-limits.txt` missing: Assume no rate limiting rules exist
+- `List-Items-*` missing: Mark rules referencing this list as "partially convertible - list items missing"
+
+### 3. Parse Cloudflare Configuration
+
+Parse JSON configurations to Cloudflare rule expressions following [Cloudflare Rules Language](https://developers.cloudflare.com/ruleset-engine/rules-language/) specifications.
+
+**Ignore:**
+
+- Managed rules
+- DDoS protection
+
+**Non-convertible fields** (require manual intervention):
+
+The following fields are not supported in AWS WAF and require manual configuration:
+- `Client Certificate Verified` - Not supported in AWS WAF
+- `MIME Type` - Not supported in AWS WAF
+- `European Union` - Not supported in AWS WAF (use CloudFront Function workaround)
+- `Fallthrough detected` (API abuse) - Not supported in AWS WAF
+- Any bot-related fields (`cf.verified_bot_category`, `cf.bot_management.score`, etc.)
+- Any fraud prevention fields (`cf.waf.credential_check.*`)
+- Any attack score fields (`cf.waf.score`, `cf.waf.score.sqli`, etc.)
+
+**Conversion strategy for rules with non-convertible fields:**
+
+- **If entire expression uses only non-convertible fields**: Mark as fully non-convertible
+  - Example: `(cf.waf.score le 10)` → Cannot convert
+  
+- **If expression combines convertible and non-convertible fields with OR**: Partial conversion possible
+  - Example: `(http.request.uri.path wildcard "/api/*") or (cf.verified_bot_category eq "Search Engine")`
+  - Convert the convertible parts, document the non-convertible parts in manual intervention section
+  - Mark as "Partially Convertible"
+  
+- **If expression combines convertible and non-convertible fields with AND**: Cannot convert
+  - Example: `(http.request.uri.path wildcard "/api/*") and (cf.verified_bot_category eq "Search Engine")`
+  - The AND logic requires both conditions, so removing non-convertible field changes behavior
+  - Mark as fully non-convertible
+
+### 4. Generate Markdown Summary
+
+**Before generating summary, you MUST:**
+- Read `steering/non-convertible-rules.md` completely to understand which rules cannot be converted and why
+
+**CRITICAL: Preserve Rule Order**
+
+Both Cloudflare and AWS WAF execute rules sequentially. **Maintain the exact order from original configuration files** in all sections.
+
+**For skip action rules:** Extract and document the COMPLETE `action_parameters` JSON from Cloudflare configuration:
+- Copy the entire `action_parameters` object verbatim in a code block
+- Explicitly list which `phases` array values are present
+- Note if `ruleset: "current"` is present
+- **CRITICAL**: Only document phases that actually exist in the configuration - do NOT assume or add phases
+- Explicitly state which phases are NOT being skipped to prevent errors
+- This information is critical for correct AWS WAF RuleLabels generation in step 5
+
+**Example format for skip rule documentation:**
+
+```markdown
+### Rule: `skip-example`
+- **Action**: `skip`
+- **Expression**: `(ip.src.country eq "US")`
+- **Action Parameters** (complete):
+  ```json
+  {
+    "phases": ["http_request_firewall_managed"],
+    "ruleset": "current"
+  }
+  ```
+- **Phases Being Skipped**: `http_request_firewall_managed` ONLY (does NOT skip `http_ratelimit`)
+- **Convertible**: ✓ Yes
+  - Will be converted to COUNT action with RuleLabels:
+    - `skip:http_request_firewall_managed` (because `"http_request_firewall_managed"` is in phases)
+    - `skip:all_remaining_custom_rules` (because `"ruleset": "current"` is present)
+  - **Note**: Does NOT add `skip:http_ratelimit` RuleLabel because `"http_ratelimit"` is NOT in phases
+```
+
+Output a Markdown file with five sections:
+
+1. **IP Lists and their items**
+2. **IP Access Rules** - Zone-level IP access rules (execute before WAF custom rules in Cloudflare)
+3. **WAF Custom Rules** - Preserve array order from `WAF-Custom-Rules.txt`
+4. **Rate limiting rules** - Preserve array order from `Rate-limits.txt`
+5. **Notes on Rules Requiring Manual Intervention** - For rules that cannot be automatically converted or are partially convertible, use the information from non-convertible-rules.md to provide detailed explanations. Clearly state: **"These rules require manual intervention because AWS WAF implements these features differently from Cloudflare, requiring manual configuration of managed rule groups. This is NOT because AWS WAF lacks these capabilities."**
+
+**CRITICAL**: IP Access Rules must be in a separate section before WAF Custom Rules because they execute earlier in Cloudflare's request processing pipeline and should NOT be affected by skip rules from WAF Custom Rules.
+
+**For each rule, mark convertibility status:**
+
+- **✓ Yes** - Fully convertible
+- **⚠️ Partial** - Partially convertible (some conditions can be converted, others require manual intervention)
+  - Document which parts are convertible and which require manual intervention
+  - Example: Rate limit rule with `(path match) OR (bot field)` → Convert path match, document bot field in Section 5
+- **❌ No** - Not convertible (entire rule requires manual intervention)
+
+For each non-convertible or partially convertible rule found, explain:
+- What Cloudflare feature it uses
+- What AWS WAF equivalent exists
+- Why automatic conversion is not feasible (or only partial)
+- What manual configuration is needed
+
+Save the summary as `cloudflare-security-rules-summary.md` to avoid conflicts with other Cloudflare conversion skills.
+
+Ask user to confirm completeness and correctness.
+
+### 5. Convert to AWS WAF Terraform
+
+**Before conversion, you MUST:**
+1. Read `steering/terraform-architecture.md` completely to understand the module structure and IP set sharing pattern
+2. Read `steering/nesting-and-splitting.md` completely to understand Terraform nesting constraints and default splitting strategy
+3. Read `steering/field-conversions.md` for IP/ASN/field mapping rules
+4. Read `steering/action-conversions.md` for action and rate limiting conversion rules
+5. Read `steering/aws-managed-rules.md` completely to understand AWS managed rules requirements
+6. Read `steering/common-mistakes.md` to understand common errors and how to avoid them
+7. **CRITICAL for rate-based rules**: AWS WAF `limit` is request count in ONE evaluation window. Use algorithm from action-conversions.md: try windows [60,120,300,600]s in order, use first where calculated limit ≥ 10.
+8. Ask user for custom Web ACL names:
+   - Web ACL for websites (default: `cloudflare-migrated-waf-website`)
+   - Web ACL for APIs and files (default: `cloudflare-migrated-waf-api-and-file`)
+
+**Generate conversion plan first:**
+
+**CRITICAL**: Process rules in this exact order to match Cloudflare execution sequence:
+1. IP Access Rules (if any)
+2. WAF Custom Rules
+3. Rate Limiting Rules
+
+**STEP 1: Identify rules that need splitting**
+
+**CRITICAL: Rate-limiting rules NEVER split** - Splitting causes independent rate tracking (semantic change).
+
+**For rate-limiting rules:**
+- If ≤10 rules AND all scope_down_statements ≤3 nesting levels: Convert directly without splitting
+- If >10 rules OR any scope_down_statement >3 levels: Mark as "Cannot convert - too complex"
+- See `steering/action-conversions.md` section "Rate-Based Rule Limit and Complexity Constraints" for details
+
+**For IP Access Rules and WAF Custom Rules only**, apply splitting in this order:
+
+**Phase 1: Split by top-level OR expressions FIRST**
+- **ALWAYS split rules with top-level OR expressions** - Each OR branch becomes a separate rule
+- This is the PRIMARY splitting strategy that must be applied first
+
+**Phase 2: Split by IPv4/IPv6 SECOND (apply to each rule from Phase 1)**
+- **ALWAYS split rules with mixed IPv4/IPv6 IP lists** - Each becomes 2 rules (IPv4 variant + IPv6 variant)
+- Apply this to EVERY rule (including those already split in Phase 1)
+- Even if a rule was already split by OR, each resulting rule must be further split if it contains mixed IPv4/IPv6
+
+**Phase 3: Verify nesting depth**
+- **ALWAYS split rules that would exceed 3 nesting levels** - Even after Phases 1 and 2
+
+**Example of cascading splits:**
+
+Original rule: `(country eq "DZ" and ip.src in {ipv4, ipv6}) OR (country eq "CO" and ip.src in {ipv4, ipv6})`
+
+Phase 1 (split by OR):
+- Rule A: `country eq "DZ" and ip.src in {ipv4, ipv6}`
+- Rule B: `country eq "CO" and ip.src in {ipv4, ipv6}`
+
+Phase 2 (split each by IPv4/IPv6):
+- Rule A-IPv4: `country eq "DZ" and ip.src in {ipv4}`
+- Rule A-IPv6: `country eq "DZ" and ip.src in {ipv6}`
+- Rule B-IPv4: `country eq "CO" and ip.src in {ipv4}`
+- Rule B-IPv6: `country eq "CO" and ip.src in {ipv6}`
+
+**Final result: 4 rules** (not 2)
+
+**STEP 2: Document conversion plan for each rule (or split rule)**
+
+For each rule (including split variants) in the summary file, document:
+- Rule name and Cloudflare expression
+- **If split**: Note which variant this is (e.g., "Branch 1 IPv4 variant" or "Branch 2 IPv6 variant")
+  - Use naming format: `<rule-name>-branch-<N>-ipv4` / `<rule-name>-branch-<N>-ipv6`
+  - For rules split only by IPv4/IPv6: `<rule-name>-ipv4` / `<rule-name>-ipv6`
+- Rule type (IP Access Rule, WAF Custom Rule, or Rate Limiting Rule)
+- AWS WAF statement type to use (geo_match_statement, ip_set_reference_statement, byte_match_statement, asn_match_statement, etc.)
+- **For rules with inline IP lists**: Identify each distinct inline IP list and assign a unique, descriptive name
+  - If rule has multiple inline IP lists (e.g., different conditions with different IPs), create separate IP sets with context-specific names
+  - Example: `skip-rule-1-branch-1-dz-ipv4` for Branch 1 DZ condition, `skip-rule-1-branch-2-co-ipv4` for Branch 2 CO condition
+  - **NEVER combine different inline IP lists into one IP set**
+- Any RuleLabels that need to be created
+- **For split rules**: ALL variants of the same original rule must add the SAME RuleLabels (especially critical for skip rules)
+- Special handling notes (skip RuleLabels, scope-down statements, etc.)
+- **For skip rules**: Explicitly state which RuleLabels will be added based on the actual `action_parameters.phases` from the summary
+- **For IP Access Rules**: Note that they should NOT have scope-down statements (they execute before skip rules)
+- **Maximum nesting depth** for this rule (must be ≤ 3)
+
+Present the plan to user and ask for confirmation before generating Terraform.
+
+**VALIDATION CHECKPOINT before generating Terraform:**
+
+Before writing any Terraform code, verify:
+1. Review the summary file's skip rule `action_parameters`
+2. Confirm which RuleLabels will actually be added to skip rules
+3. **CRITICAL - Verify cascading split strategy**:
+   - Phase 1: All rules with top-level OR are split into separate rules (one per OR branch)
+   - Phase 2: EACH rule from Phase 1 with mixed IPv4/IPv6 is further split into IPv4 and IPv6 variants
+   - Example: Rule with 3 OR branches and mixed IPv4/IPv6 → 6 final rules (3 branches × 2 IP versions)
+   - All split variants of the same rule have the same action and RuleLabels
+4. Confirm which rules will have scope-down statements:
+   - IP Access Rules: NO scope-down statements (execute before skip rules)
+   - WAF Custom Rules after skip rules: Check `skip:all_remaining_custom_rules` if it exists
+   - Rate Limiting Rules after skip rules: Check `skip:http_ratelimit` if it exists (NEVER check `skip:all_remaining_custom_rules`)
+   - Managed Rules: Check `skip:http_request_firewall_managed` if it exists
+5. **CRITICAL**: Do NOT add scope-down statements for RuleLabels that were not added to any skip rule
+6. **CRITICAL - Verify nesting depth**:
+   - Each rule (including split variants) must not exceed 3 nesting levels
+   - If any rule would exceed 3 levels, STOP and revise split strategy
+
+**After user confirms plan, generate Terraform files using module structure:**
+
+**File Structure:**
+```
+waf-terraform/
+├── versions.tf
+├── ip_sets.tf (shared IP sets)
+├── main.tf (calls module twice)
+└── modules/
+    └── waf/
+        ├── main.tf (Web ACL definition only)
+        ├── variables.tf
+        └── outputs.tf
+```
+
+**Generation Steps:**
+
+**Step 1: Generate `versions.tf`** (root directory)
+```hcl
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.2"
+    }
+  }
+}
+```
+
+**Step 2: Generate `ip_sets.tf`** (root directory)
+
+**CRITICAL: IP sets must be created at root level to be shared between both Web ACLs.**
+
+Create all IP set resources here with their full definitions. These will be referenced by both Web ACL modules via ARN variables.
+
+**Step 3: Generate `modules/waf/variables.tf`**
+
+Define these input variables:
+- `web_acl_name` (string) - Web ACL name
+- `anti_ddos_use_advanced_config` (bool) - Whether to use advanced Anti-DDoS config
+- `anti_ddos_challenge_action` (string) - "ENABLED" or "DISABLED"
+- `anti_ddos_block_sensitivity` (string) - "LOW" or "MEDIUM"
+- `ip_set_arns` (map(string)) - Map of IP set names to ARNs, passed from root module
+
+**Step 4: Generate `modules/waf/main.tf`**
+
+**CRITICAL: This file contains ONLY the Web ACL resource, NO IP sets.**
+
+The Web ACL resource includes:
+- Anti-DDoS managed rule (priority 0) - Use conditional logic based on `var.anti_ddos_use_advanced_config`:
+  - If true: Include `managed_rule_group_configs` block with challenge and sensitivity settings
+  - If false: Basic configuration without `managed_rule_group_configs`
+- All converted Cloudflare rules (priority 1, 2, 3, ...) - Reference IP sets via `var.ip_set_arns["set_name"]`
+- 4 AWS managed rule groups (sequential priorities after converted rules)
+
+**Step 5: Generate `modules/waf/outputs.tf`**
+
+Output the Web ACL ARN and ID for reference.
+
+**Step 6: Generate root `main.tf`**
+
+Create IP set ARN map and call the module twice:
+
+```hcl
+locals {
+  ip_set_arns = {
+    block_list_1_ipv4           = aws_wafv2_ip_set.block_list_1_ipv4.arn
+    block_list_1_ipv6           = aws_wafv2_ip_set.block_list_1_ipv6.arn
+    rule_name_branch_1_ipv4     = aws_wafv2_ip_set.rule_name_branch_1_ipv4.arn
+    rule_name_branch_1_ipv6     = aws_wafv2_ip_set.rule_name_branch_1_ipv6.arn
+    # ... all other IP sets
+  }
+}
+
+module "waf_website" {
+  source = "./modules/waf"
+  
+  web_acl_name                   = "<USER_CONFIRMED_WEBSITE_NAME>"
+  anti_ddos_use_advanced_config  = false
+  anti_ddos_challenge_action     = "ENABLED"
+  anti_ddos_block_sensitivity    = "LOW"
+  ip_set_arns                    = local.ip_set_arns
+}
+
+module "waf_api_file" {
+  source = "./modules/waf"
+  
+  web_acl_name                   = "<USER_CONFIRMED_API_FILE_NAME>"
+  anti_ddos_use_advanced_config  = true
+  anti_ddos_challenge_action     = "DISABLED"
+  anti_ddos_block_sensitivity    = "MEDIUM"
+  ip_set_arns                    = local.ip_set_arns
+}
+
+output "website_web_acl_arn" {
+  value = module.waf_website.web_acl_arn
+}
+
+output "api_file_web_acl_arn" {
+  value = module.waf_api_file.web_acl_arn
+}
+```
+
+Replace `<USER_CONFIRMED_WEBSITE_NAME>` and `<USER_CONFIRMED_API_FILE_NAME>` with the actual names confirmed in the "Before conversion" step.
+
+**After generating Terraform files:**
+- Count total number of IP sets created
+- Display message: "Generated X IP sets. AWS WAF default quota: 100 IP sets per Region (CloudFront scope counts as 1 Region)."
+- Proceed to Step 6 for validation
+
+**CRITICAL: Rule Ordering in Web ACL**
+
+The generated `modules/waf/main.tf` MUST include rules in this exact order to match Cloudflare's execution sequence:
+
+1. **First**: Anti-DDoS managed rule (priority 0)
+2. **Second**: IP Access Rules (priority 1, 2, ...) - Converted from zone-level IP Access Rules
+3. **Middle**: WAF Custom Rules (priority N, N+1, ...) - Preserve original Cloudflare order
+4. **Then**: Rate Limiting Rules (priority M, M+1, ...) - Preserve original Cloudflare order
+5. **Last**: 4 AWS managed rule groups (sequential priorities after all converted rules)
+   - IP Reputation List
+   - Common Rule Set (with SizeRestrictions_BODY override)
+   - Known Bad Inputs Rule Set
+   - SQLi Rule Set
+
+**Rationale**: In Cloudflare, IP Access Rules execute before WAF Custom Rules. This ordering must be preserved in AWS WAF to maintain equivalent behavior. IP Access Rules should NOT be affected by skip rules from WAF Custom Rules because they execute earlier in the request processing pipeline.
+
+See `steering/aws-managed-rules.md` for complete Terraform HCL templates.
+
+**Skip Action Implementation:**
+
+**CRITICAL ARCHITECTURAL DIFFERENCE:**
+
+- **Cloudflare**: Rate-limiting is a separate module with its own phase (`http_ratelimit`), independent from WAF custom rules (`http_request_firewall_custom`)
+- **AWS WAF**: Rate-based rules are part of the custom rules system, not a separate module
+
+**Impact on skip rule conversion:**
+
+When Cloudflare skip rule has `"ruleset": "current"` (skip remaining custom rules), it does NOT skip rate-limiting rules in Cloudflare because they are in a different phase. Therefore, in AWS WAF conversion, the `skip:all_remaining_custom_rules` RuleLabel should NOT apply to rate-based rules, even though AWS WAF treats them as custom rules.
+
+**Conversion steps:**
+
+1. **Identify skip RuleLabels from summary:** Review the summary file to see which phases each skip rule actually skips. Only add RuleLabels that correspond to phases present in the Cloudflare `action_parameters`:
+   - If `phases` contains `"http_ratelimit"` → Add RuleLabel `skip:http_ratelimit`
+   - If `phases` contains `"http_request_firewall_managed"` → Add RuleLabel `skip:http_request_firewall_managed`
+   - If `"ruleset": "current"` exists → Add RuleLabel `skip:all_remaining_custom_rules`
+
+2. **Apply scope-down statements:** For each rule positioned **after** a skip action rule, add scope-down statement ONLY if the corresponding RuleLabel was actually added to the skip rule:
+   
+   - **Rate-based rules:** 
+     - If `skip:http_ratelimit` RuleLabel exists: Add scope-down statement combining skip label check AND original matching conditions
+     - Structure: `rate_based_statement { scope_down_statement { and_statement { not(label_match), original_conditions } } }`
+     - **NEVER** check `skip:all_remaining_custom_rules` (Cloudflare rate-limiting is independent from custom rules)
+   
+   - **Managed rules:** 
+     - If `skip:http_request_firewall_managed` RuleLabel exists: Add scope-down statement with NOT logic
+     - Structure: `managed_rule_group_statement { scope_down_statement { not_statement { label_match } } }`
+   
+   - **Custom rules (non-rate-based, excluding skip action rules):** 
+     - If `skip:all_remaining_custom_rules` RuleLabel exists: Wrap original statement in and_statement with NOT logic for label
+     - Structure: `and_statement { not_statement { label_match }, original_statement }`
+   
+   - **Skip action rules:** Do NOT add any scope-down statements. Skip rules should always be evaluated independently, matching Cloudflare's behavior where skip rules do not skip other skip rules.
+
+**CRITICAL:** Do NOT add scope-down statements for RuleLabels that were not added to the skip rule. Only reference RuleLabels that actually exist based on the Cloudflare configuration. Rate-based rules should NEVER check for `skip:all_remaining_custom_rules` RuleLabel.
+
+**Key considerations:**
+
+- **Preserve original rule order** from Cloudflare configuration when assigning priorities
+- IP sets must specify v4 or v6 (split mixed lists)
+- ASN lists use AsnMatchStatement (see reference for example)
+- Scope must be CLOUDFRONT for CloudFront distributions
+- Rate-based rules limited to 10 per web ACL
+- **Rate limit conversion** (CRITICAL - read action-conversions.md for algorithm):
+  - AWS WAF `limit` = requests allowed in ONE evaluation window (NOT per hour)
+  - Try windows [60, 120, 300, 600]s in order, use first where calculated limit ≥ 10
+  - Formula: `Cloudflare_requests_per_period × (window / Cloudflare_period)`
+  - Example: Cloudflare 1 req/10s → Try 60s (6<10), try 120s (12≥10) → Use limit=12, window=120s
+- Some fields require manual intervention (see reference)
+- **Challenge action conversion:**
+  - Cloudflare `interactive_challenge` → AWS WAF `Captcha` action
+  - Cloudflare `js_challenge`, `managed_challenge`, or other challenge types → AWS WAF `Challenge` action
+  - These are standalone actions, not requiring Bot Control managed rule group
+- **All AWS managed rules use `override_action { count {} }` for monitoring**
+
+### 6. Validate Generated Terraform
+
+**MUST complete these checks before proceeding to Step 7:**
+
+**File Structure Verification:**
+- [ ] `versions.tf` exists in root directory
+- [ ] `ip_sets.tf` exists in root directory with all IP set resources
+- [ ] `main.tf` exists in root directory with locals block and two module calls
+- [ ] `modules/waf/main.tf` exists with Web ACL definition ONLY (no IP sets)
+- [ ] `modules/waf/variables.tf` exists with required variables including `ip_set_arns`
+- [ ] `modules/waf/outputs.tf` exists
+
+**Conversion Mapping Verification:**
+Generate a table showing each Cloudflare rule and its AWS WAF conversion:
+
+| Cloudflare Rule | Expression Type | AWS WAF Statement | IP Sets Created | RuleLabels Used | Notes |
+|----------------|-----------------|-------------------|-----------------|-----------------|-------|
+| Rule 1 name | geo + IP | geo_match + ip_set_reference | rule1-ipv4, rule1-ipv6 | - | Split by IPv4/IPv6 |
+| Rule 2 name | skip with OR and mixed IP | count with RuleLabels | rule2-branch-1-ipv4, rule2-branch-1-ipv6, rule2-branch-2-ipv4, rule2-branch-2-ipv6 | skip:http_request_firewall_managed, skip:all_remaining_custom_rules | Cascading split: 2 OR branches × 2 IP versions = 4 rules |
+
+**Self-Check Checklist:**
+
+- [ ] **Module structure**:
+  - Root `ip_sets.tf` contains all IP set resources (shared between Web ACLs)
+  - Root `main.tf` creates `locals.ip_set_arns` map and calls module twice with correct user-confirmed names
+  - Module `variables.tf` includes `ip_set_arns` map variable
+  - Module `main.tf` references IP sets via `var.ip_set_arns["set_name"]`, NOT direct resource references
+  - Anti-DDoS config uses conditional logic based on `var.anti_ddos_use_advanced_config`
+- [ ] **Terraform nesting depth** (CRITICAL):
+  - **ALL statements must not exceed 3 nesting levels**
+  - Count nesting levels for each rule's statement block
+  - **NO AND-in-AND or OR-in-OR nesting** (logically redundant and causes errors)
+  - When applying De Morgan's Law, transformed NOT statements added as **siblings**, not nested
+  - Example: `A AND NOT (B OR C)` → `A AND NOT B AND NOT C` (all siblings in one `and_statement`)
+- [ ] **Geo rules**: All country-based rules use `geo_match_statement`, NOT IP sets
+- [ ] **IP sets**: 
+  - All IP set resources are in root `ip_sets.tf`, NOT in module
+  - Each inline IP list has corresponding IP set resource in `ip_sets.tf`
+  - IPv4 and IPv6 correctly separated into different IP sets
+  - **For negative matching** (`not ip.src in {list}`): Both NOT statements added as siblings, NOT wrapped in nested `and_statement`
+  - IP set names follow naming convention
+  - Module references IP sets via `var.ip_set_arns["set_name"]`
+- [ ] **ASN rules**: Use `asn_match_statement` with inline list, NOT separate resources
+- [ ] **Skip RuleLabels**:
+  - RuleLabels only added based on actual `action_parameters` in Cloudflare config
+  - Scope-down statements only reference RuleLabels that actually exist
+  - No `skip:http_ratelimit` RuleLabel if skip rule doesn't skip that phase
+  - **CRITICAL**: IP Access Rules NEVER have scope-down statements (execute before skip rules)
+  - **CRITICAL**: Rate-based rules NEVER check `skip:all_remaining_custom_rules` (Cloudflare rate-limiting is independent from custom rules)
+- [ ] **Rule priorities**: Sequential (0, 1, 2, 3...) with no gaps
+- [ ] **Rule ordering** in `modules/waf/main.tf`:
+  - Priority 0: Anti-DDoS managed rule
+  - Priority 1-X: IP Access Rules (if any)
+  - Priority X+1 to Y: WAF Custom Rules (in original order)
+  - Priority Y+1 to Z: Rate Limiting Rules (in original order)
+  - Priority Z+1 to Z+4: AWS managed rule groups
+  - **CRITICAL**: IP Access Rules must come before WAF Custom Rules (Cloudflare execution order)
+- [ ] **Rate-based rules**: 
+  - Limit calculated correctly from Cloudflare period
+  - EvaluationWindowSec is valid (60, 120, 300, or 600)
+  - If skip label exists: scope_down_statement contains and_statement with NOT(label_match) and original matching logic as sibling statements
+  - **NEVER** checks `skip:all_remaining_custom_rules` RuleLabel (Cloudflare architectural difference)
+  - **Structure**: `rate_based_statement { scope_down_statement { and_statement { not_statement{label}, original_statement } } }` (max 3 levels)
+- [ ] **Challenge actions**: 
+  - `js_challenge` → `challenge {}`
+  - `managed_challenge` → `challenge {}`
+  - `interactive_challenge` → `captcha {}`
+
+**Output validation report:**
+- Total rules converted: X
+- Total IP sets created: X
+- Total RuleLabels used: X
+- Any rules requiring manual intervention: [list]
+
+Ask user to review the validation report. If issues found, fix and regenerate Terraform before proceeding to Step 7.
+
+### 7. Generate Deployment README
+
+Create `README_aws-waf-terraform-deployment.md` with:
+- Prerequisites: Terraform >= 1.0, AWS Provider >= 6.2.0
+- Deployment: `terraform init && terraform apply`
+- CloudFront association: Console or CLI command
+- Two Web ACLs: website (challenge enabled) vs api-and-file (challenge disabled)
+- IP sets quota: X created (limit: 100/region)
+- Non-converted rules (if any): List rule name, Cloudflare feature used, AWS WAF equivalent, and why manual intervention is needed. Do NOT provide deployment instructions (CLI/console/Terraform code) - users requiring manual intervention will configure based on their specific needs
+
+## Reference
+
+- `steering/terraform-architecture.md` - Terraform module architecture and IP set sharing pattern
+- `steering/nesting-and-splitting.md` - Terraform nesting constraints and cascading split strategy
+- `steering/field-conversions.md` - IP/ASN/field mapping and conversion rules
+- `steering/action-conversions.md` - Action conversions and rate limiting rules
+- `steering/non-convertible-rules.md` - Rules that require manual intervention and why
+- `steering/aws-managed-rules.md` - AWS managed rules configuration templates and ordering requirements
+- `steering/common-mistakes.md` - Common conversion errors and how to avoid them
