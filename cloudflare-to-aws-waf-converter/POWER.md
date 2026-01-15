@@ -11,139 +11,48 @@ Convert Cloudflare security configurations to AWS WAF Terraform configuration fo
 
 ## Path Resolution
 
-**Steering files**: Reference files in this power's `steering/` directory
-- `steering/nesting-and-splitting.md`
-- `steering/field-conversions.md`
-- `steering/action-conversions.md`
-- `steering/terraform-architecture.md`
-- `steering/aws-managed-rules.md`
-- `steering/common-mistakes.md`
-- `steering/non-convertible-rules.md`
-
-**User data**: Cloudflare configuration files provided by user (e.g., `./cloudflare_config/`)
-
-When reading reference documentation, use relative paths like `steering/xxx.md`.
-When reading user's Cloudflare configs, use the path provided by user.
+Steering files in `steering/` directory. User data from path provided by user.
 
 ## Scope
 
-Convert **security rules only**, not transformation rules:
+**⚠️ CRITICAL: ALL rate-based rules are ALWAYS convertible.** If marking as "cannot convert" due to limit < 10, you're wrong. Read `steering/common-mistakes.md` Mistake 0.
 
-**⚠️ CRITICAL REMINDER BEFORE YOU START:**
+**In Scope:** WAF custom rules, rate limiting rules, IP access rules, IP/ASN lists
 
-**ALL rate-based rules are ALWAYS convertible.** If you're about to mark a rate-based rule as "cannot convert" because the calculated limit is below 10, you are making a mistake. Read `steering/common-mistakes.md` Mistake 0 immediately.
-
-**In Scope:**
-- WAF custom rules
-- Rate limiting rules
-- IP access rules
-- IP lists and ASN lists
-
-**Out of Scope (use Cloudflare to CloudFront Functions power instead):**
-- Redirect rules
-- URL rewrite rules
-- Request/response header transforms
-- Bulk redirects
-- Page rules
-- Managed transforms
+**Out of Scope:** Redirect/rewrite rules, header transforms, bulk redirects, page rules (use CloudFront Functions power)
 
 ## Workflow
 
 ### 1. Obtain Cloudflare Configuration
 
-Ask user to provide Cloudflare configuration directory path.
+Ask user for configuration directory path.
 
-**If user doesn't have configuration files yet:**
+**If no files yet:** Recommend https://github.com/chenghit/CloudflareBackup
 
-Recommend using the standalone backup tool: https://github.com/chenghit/CloudflareBackup
-
-This tool safely exports Cloudflare configuration to local JSON files. Once backed up, user should provide the directory path.
-
-**If a summary file already exists** in the user's Cloudflare configuration directory (e.g., `cloudflare-security-rules-summary.md`), ask the user:
-> "I found an existing summary file. Would you like to:
-> 1. Use the existing summary and proceed directly to AWS WAF conversion
-> 2. Re-analyze the Cloudflare configuration files and generate a new summary"
+**If summary exists:** Ask user: "Found existing summary. Use it (skip to step 5) or regenerate?"
 
 ### 2. Discover and Read Configuration Files
 
-**CRITICAL: Do NOT assume file locations. Always search the entire directory tree.**
+**CRITICAL: Search entire directory tree, don't assume locations.**
 
-**Step 2.1: Search for all required configuration files**
+**Step 2.1:** Use glob to find: `**/IP-Lists.txt`, `**/List-Items-*.txt`, `**/IP-Access-Rules.txt`, `**/WAF-Custom-Rules.txt`, `**/Rate-limits.txt`
 
-Use glob to recursively search for these files in the user-provided directory:
+**Step 2.2:** If duplicates found, STOP and ask user to remove duplicates.
 
-```bash
-# Search for each required file type
-glob pattern="**/IP-Lists.txt"
-glob pattern="**/List-Items-ip-*.txt"
-glob pattern="**/List-Items-asn-*.txt"
-glob pattern="**/IP-Access-Rules.txt"
-glob pattern="**/WAF-Custom-Rules.txt"
-glob pattern="**/Rate-limits.txt"
-```
+**Step 2.3:** Read all discovered files. For each list in `IP-Lists.txt`, read corresponding `List-Items-ip-<name>.txt` or `List-Items-asn-<name>.txt`.
 
-**Step 2.2: Check for duplicate files**
-
-If any file type appears in multiple locations (e.g., two `WAF-Custom-Rules.txt` files in different subdirectories):
-1. **STOP the conversion process immediately**
-2. List all duplicate files with their full paths
-3. Ask user: "I found duplicate configuration files. Please remove duplicates and keep only one copy of each file, then restart the conversion."
-
-**Step 2.3: Read all discovered files**
-
-After confirming no duplicates exist:
-1. Read `IP-Lists.txt` to get list of all IP/ASN lists
-2. For each list in `IP-Lists.txt`:
-   - If `kind` is "ip": Read corresponding `List-Items-ip-<list_name>.txt`
-   - If `kind` is "asn": Read corresponding `List-Items-asn-<list_name>.txt`
-   - If list file not found: Note as missing and mark rules using this list as "partially convertible"
-3. Read `IP-Access-Rules.txt` (zone-level IP access rules)
-4. Read `WAF-Custom-Rules.txt` (WAF custom rules)
-5. Read `Rate-limits.txt` (rate limiting rules)
-
-**Step 2.4: Handle missing files gracefully**
-
-If any required file is not found:
-- `IP-Lists.txt` missing: Assume no account-level IP/ASN lists exist
-- `IP-Access-Rules.txt` missing: Assume no zone-level IP access rules exist
-- `WAF-Custom-Rules.txt` missing: Assume no WAF custom rules exist
-- `Rate-limits.txt` missing: Assume no rate limiting rules exist
-- `List-Items-*` missing: Mark rules referencing this list as "partially convertible - list items missing"
+**Step 2.4:** Missing files = assume no rules of that type. Missing list items = mark rules using that list as "partially convertible".
 
 ### 3. Parse Cloudflare Configuration
 
-Parse JSON configurations to Cloudflare rule expressions following [Cloudflare Rules Language](https://developers.cloudflare.com/ruleset-engine/rules-language/) specifications.
+Parse JSON to Cloudflare rule expressions. Ignore managed rules and DDoS protection.
 
-**Ignore:**
+**Non-convertible fields** (require manual intervention): Client Certificate Verified, MIME Type, European Union, bot fields (`cf.verified_bot_category`, `cf.bot_management.*`), fraud fields (`cf.waf.credential_check.*`), attack score fields (`cf.waf.score*`)
 
-- Managed rules
-- DDoS protection
-
-**Non-convertible fields** (require manual intervention):
-
-The following fields are not supported in AWS WAF and require manual configuration:
-- `Client Certificate Verified` - Not supported in AWS WAF
-- `MIME Type` - Not supported in AWS WAF
-- `European Union` - Not supported in AWS WAF (use CloudFront Function workaround)
-- `Fallthrough detected` (API abuse) - Not supported in AWS WAF
-- Any bot-related fields (`cf.verified_bot_category`, `cf.bot_management.score`, etc.)
-- Any fraud prevention fields (`cf.waf.credential_check.*`)
-- Any attack score fields (`cf.waf.score`, `cf.waf.score.sqli`, etc.)
-
-**Conversion strategy for rules with non-convertible fields:**
-
-- **If entire expression uses only non-convertible fields**: Mark as fully non-convertible
-  - Example: `(cf.waf.score le 10)` → Cannot convert
-  
-- **If expression combines convertible and non-convertible fields with OR**: Partial conversion possible
-  - Example: `(http.request.uri.path wildcard "/api/*") or (cf.verified_bot_category eq "Search Engine")`
-  - Convert the convertible parts, document the non-convertible parts in manual intervention section
-  - Mark as "Partially Convertible"
-  
-- **If expression combines convertible and non-convertible fields with AND**: Cannot convert
-  - Example: `(http.request.uri.path wildcard "/api/*") and (cf.verified_bot_category eq "Search Engine")`
-  - The AND logic requires both conditions, so removing non-convertible field changes behavior
-  - Mark as fully non-convertible
+**Conversion strategy:**
+- Only non-convertible fields: Fully non-convertible
+- Convertible OR non-convertible: Partial (convert convertible parts)
+- Convertible AND non-convertible: Fully non-convertible (AND requires both conditions)
 
 ### 4. Generate Markdown Summary (Initial Draft)
 
