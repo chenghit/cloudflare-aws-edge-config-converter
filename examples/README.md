@@ -26,8 +26,12 @@ These serve as:
 ### Testing Powers with Example Configs
 
 1. Open Kiro IDE
-2. Start a new chat
-3. Reference the example configs in your message:
+2. Open the workspace folder:
+   - File → Open Folder
+   - Select the root directory of this repository (or the folder containing your Cloudflare configs)
+   - Important: Kiro IDE can only access files within the opened workspace
+3. Start a new chat
+4. Reference the example configs in your message:
    ```
    Convert Cloudflare security rules to AWS WAF using configs in ./examples/cloudflare-configs/example.com/
    ```

@@ -54,9 +54,13 @@
 # 安装CloudFront Functions转换器：
 #   输入：https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-cloudfront-functions-converter
 
-# 4. 开始转换
+# 4. 在Kiro IDE中打开工作区
+# 文件 → 打开文件夹 → 选择包含Cloudflare配置文件的文件夹
+# 重要：Kiro IDE只能访问已打开工作区内的文件
+
+# 5. 开始转换
 # 在Kiro中打开新对话
-# 输入："请将 /path/to/cloudflare-config 目录中的Cloudflare安全规则转换为AWS WAF配置"
+# 输入："请将 ./cloudflare-config 目录中的Cloudflare安全规则转换为AWS WAF配置"
 ```
 
 ## 前置条件
