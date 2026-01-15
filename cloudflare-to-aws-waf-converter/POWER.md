@@ -2,7 +2,7 @@
 name: "cloudflare-to-aws-waf-converter"
 displayName: "Cloudflare to AWS WAF Converter"
 description: "Converts Cloudflare security configurations (WAF custom rules, rate limiting, IP access rules) to AWS WAF Terraform configuration for CloudFront distributions"
-keywords: ["cloudflare", "aws waf", "waf", "security rules", "rate limiting", "ip access", "firewall rules", "cloudfront waf"]
+keywords: ["cloudflare security", "aws waf", "waf", "rate limiting", "ip access", "firewall rules", "cloudflare waf"]
 ---
 
 # Cloudflare to AWS WAF Converter

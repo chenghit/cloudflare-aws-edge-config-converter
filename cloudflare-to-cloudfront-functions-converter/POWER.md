@@ -2,7 +2,7 @@
 name: "cloudflare-to-cloudfront-functions-converter"
 displayName: "Cloudflare to CloudFront Functions Converter"
 description: "Converts Cloudflare transformation rules (redirects, URL rewrites, header modifications, bulk redirects) to AWS CloudFront Functions JavaScript Runtime 2.0"
-keywords: ["cloudflare", "cloudfront functions", "cloudfront", "redirect rules", "url rewrite", "header transform", "transformation rules", "bulk redirects"]
+keywords: ["cloudflare transform", "cloudfront function", "redirect", "url rewrite", "header modification", "header transform", "bulk redirects"]
 ---
 
 # Cloudflare to CloudFront Functions Converter
