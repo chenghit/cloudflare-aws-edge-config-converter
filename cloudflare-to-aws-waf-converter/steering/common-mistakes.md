@@ -2,6 +2,41 @@
 
 This document lists common mistakes when converting Cloudflare rules to AWS WAF and how to avoid them.
 
+---
+
+## ⚠️ MISTAKE 0: Marking Rate-Based Rules as "Cannot Convert" Due to Low Limit
+
+**THIS IS THE MOST COMMON AND CRITICAL MISTAKE. READ THIS FIRST.**
+
+**WRONG Approach:**
+
+Cloudflare rule: 1 request per 100 seconds
+
+Calculation:
+- Try 60s: 1 × (60/100) = 0.6 < 10 ❌
+- Try 120s: 1 × (120/100) = 1.2 < 10 ❌
+- Try 300s: 1 × (300/100) = 3 < 10 ❌
+- Try 600s: 1 × (600/100) = 6 < 10 ❌
+
+**Incorrect conclusion:** "❌ Cannot convert - calculated limit is below AWS WAF minimum of 10 requests"
+
+**Problem:** This completely ignores the mandatory fallback rule in action-conversions.md.
+
+**CORRECT Approach:**
+
+When all evaluation windows result in limit < 10, YOU MUST apply the fallback:
+- **AWS Configuration**: `Limit=10, EvaluationWindowSec=600`
+- **Status**: ✓ CONVERTIBLE (using mandatory fallback)
+- **Summary Note**: "Converted using fallback configuration (10 req/600s ≈ 1.67 req/100s). This is slightly more permissive than the original Cloudflare configuration (1 req/100s) but provides similar rate limiting protection."
+
+**Key Point:** 
+- **ALL rate-based rules are ALWAYS convertible**
+- The fallback configuration is MANDATORY, not optional
+- NEVER mark a rate-based rule as "cannot convert" solely because the calculated limit is below 10
+- Even if the rule has other non-convertible conditions (like bot detection), the rate limiting part is still convertible using the fallback
+
+---
+
 ## Mistake 1: Not Applying Cascading Splits
 
 **WRONG Approach:**
@@ -204,34 +239,18 @@ Count all split rules:
 
 ---
 
-## Mistake 9: Marking Low-Limit Rate Rules as "Cannot Convert"
+## Quick Checklist for Summary Verification (Step 4.5)
 
-**WRONG Approach:**
+Use this checklist when verifying the summary document before user confirmation:
 
-Cloudflare rule: 1 request per 100 seconds
+- [ ] **CRITICAL**: No rate-based rules marked as "cannot convert" due to low calculated limit?
+- [ ] All rate-based rules with limit < 10 show fallback configuration (Limit=10, Window=600s)?
+- [ ] Rules with top-level OR properly identified for Phase 1 splitting?
+- [ ] Rules with mixed IPv4/IPv6 properly identified for Phase 2 splitting?
 
-Calculation:
-- Try 60s: 1 × (60/100) = 0.6 < 10 ❌
-- Try 120s: 1 × (120/100) = 1.2 < 10 ❌
-- Try 300s: 1 × (300/100) = 3 < 10 ❌
-- Try 600s: 1 × (600/100) = 6 < 10 ❌
+## Quick Checklist Before Generating Terraform (Step 5)
 
-**Incorrect conclusion:** "Cannot convert - calculated limit is below AWS WAF minimum of 10 requests"
-
-**Problem:** This ignores the mandatory fallback rule in action-conversions.md.
-
-**CORRECT Approach:**
-
-When all evaluation windows result in limit < 10, YOU MUST apply the fallback:
-- **AWS Configuration**: `Limit=10, EvaluationWindowSec=600`
-- **Status**: ✓ CONVERTIBLE (using mandatory fallback)
-- **Note in summary**: "Converted using fallback configuration (10 req/600s ≈ 1.67 req/100s). This is slightly more permissive than the original Cloudflare configuration (1 req/100s) but provides similar rate limiting protection."
-
-**Key Point:** NEVER mark a rate-based rule as "cannot convert" solely because the calculated limit is below 10. The fallback configuration is MANDATORY and ALWAYS makes the rule convertible.
-
----
-
-## Quick Checklist Before Generating Terraform
+Use this checklist when generating Terraform code:
 
 - [ ] Applied Phase 1 split (top-level OR)?
 - [ ] Applied Phase 2 split (IPv4/IPv6) to EACH rule from Phase 1?

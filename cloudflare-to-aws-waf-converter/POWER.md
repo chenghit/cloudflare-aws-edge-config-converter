@@ -29,6 +29,10 @@ When reading user's Cloudflare configs, use the path provided by user.
 
 Convert **security rules only**, not transformation rules:
 
+**⚠️ CRITICAL REMINDER BEFORE YOU START:**
+
+**ALL rate-based rules are ALWAYS convertible.** If you're about to mark a rate-based rule as "cannot convert" because the calculated limit is below 10, you are making a mistake. Read `steering/common-mistakes.md` Mistake 0 immediately.
+
 **In Scope:**
 - WAF custom rules
 - Rate limiting rules
@@ -141,7 +145,9 @@ The following fields are not supported in AWS WAF and require manual configurati
   - The AND logic requires both conditions, so removing non-convertible field changes behavior
   - Mark as fully non-convertible
 
-### 4. Generate Markdown Summary
+### 4. Generate Markdown Summary (Initial Draft)
+
+**This is a draft that will be verified in step 4.5. Do not ask user to confirm yet.**
 
 **Before generating summary, you MUST:**
 - Read `steering/non-convertible-rules.md` completely to understand which rules cannot be converted and why
@@ -205,6 +211,33 @@ For each non-convertible or partially convertible rule found, explain:
 
 Save the summary as `cloudflare-security-rules-summary.md` to avoid conflicts with other Cloudflare conversion skills.
 
+### 4.5. Verify Summary Against Steering Rules
+
+**MANDATORY VERIFICATION STEP - DO NOT SKIP**
+
+Before asking user to confirm, you MUST verify the summary against steering rules and fix any mistakes:
+
+1. **Read `steering/common-mistakes.md` completely** - Pay special attention to Mistake 0 (rate-based rules)
+
+2. **Verify each rate-based rule in the summary:**
+   - Search for any rate-based rule marked as "❌ Cannot convert" or "cannot convert" due to low calculated limit
+   - **If found**: This is WRONG. Fix it immediately:
+     - Change status to "✓ Yes" (if fully convertible) or "⚠️ Partial" (if has other non-convertible conditions)
+     - Add note: "Converted using fallback configuration (Limit=10, EvaluationWindowSec=600). This is slightly more permissive than the original but provides similar rate limiting protection."
+     - Remove from "Notes on Rules Requiring Manual Intervention" section if it was only there due to low limit
+
+3. **Verify split rules:**
+   - Check if rules with top-level OR were properly identified for splitting
+   - Check if rules with mixed IPv4/IPv6 were properly identified for Phase 2 splitting
+
+4. **Fix the summary file directly** if any mistakes are found
+   - Use `fs_write` with `str_replace` to fix mistakes in `cloudflare-security-rules-summary.md`
+   - Document what was fixed in your response to user
+
+5. **Report verification results:**
+   - If mistakes were found and fixed: Tell user "I found and fixed X mistakes in the summary. Please review the corrected version."
+   - If no mistakes: Tell user "Summary verified against steering rules. No mistakes found."
+
 Ask user to confirm completeness and correctness.
 
 ### 5. Convert to AWS WAF Terraform
@@ -216,11 +249,11 @@ Ask user to confirm completeness and correctness.
 4. Read `steering/action-conversions.md` for action and rate limiting conversion rules
 5. Read `steering/aws-managed-rules.md` completely to understand AWS managed rules requirements
 6. Read `steering/common-mistakes.md` completely, including the "Quick Checklist Before Generating Terraform" at the end
-7. **CRITICAL for rate-based rules**: 
+7. **CRITICAL for rate-based rules - READ THIS FIRST**: 
+   - **ALL rate-based rules are ALWAYS convertible** - If you're about to mark one as "cannot convert" due to low limit, you're making a mistake
+   - **MANDATORY FALLBACK**: If calculated limit < 10 for all windows, use `Limit=10, EvaluationWindowSec=600` (this is NOT optional)
    - AWS WAF `limit` is request count in ONE evaluation window
-   - Use algorithm from action-conversions.md: try windows [60,120,300,600]s in order, use first where calculated limit ≥ 10
-   - **MANDATORY**: If all windows result in limit < 10, YOU MUST use fallback: `Limit=10, EvaluationWindowSec=600`
-   - NEVER mark a rate-based rule as "cannot convert" solely because the calculated limit is below 10
+   - Use algorithm from action-conversions.md: try windows [60,120,300,600]s in order, use first where calculated limit ≥ 10, otherwise use fallback
 8. **Verify your conversion plan** against the checklist in common-mistakes.md before generating Terraform code
 9. Ask user for custom Web ACL names:
    - Web ACL for websites (default: `cloudflare-migrated-waf-website`)
