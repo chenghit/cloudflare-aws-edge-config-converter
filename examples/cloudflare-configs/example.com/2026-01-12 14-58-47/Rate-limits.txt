@@ -1,0 +1,55 @@
+{
+  "result": {
+    "description": "",
+    "id": "8fe5cd91fe0b4dfea8201245e6baa97e",
+    "kind": "zone",
+    "last_updated": "2025-12-17T08:28:18.708806Z",
+    "name": "default",
+    "phase": "http_ratelimit",
+    "rules": [
+      {
+        "action": "block",
+        "description": "one-request-in-100-seconds",
+        "enabled": true,
+        "expression": "(http.request.uri.path wildcard r\"/rate-limit/*\") or (http.request.uri.path wildcard r\"/rbr/*\") or (cf.verified_bot_category eq \"Monitoring \u0026 Analytics\")",
+        "id": "62e668e3427a4ae6a92edd3437a2535a",
+        "last_updated": "2025-12-17T08:28:18.708806Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 3600,
+          "period": 100,
+          "requests_per_period": 1
+        },
+        "ref": "62e668e3427a4ae6a92edd3437a2535a",
+        "version": "1"
+      },
+      {
+        "action": "block",
+        "description": "one-request-in-10-seconds",
+        "enabled": true,
+        "expression": "(http.request.uri.path wildcard r\"/rate-limit2/*\") or (http.request.uri.path wildcard r\"/rbr2/*\") or (cf.waf.credential_check.password_leaked)",
+        "id": "62e668e3427a4ae6a92edd3437a2535b",
+        "last_updated": "2025-12-17T08:28:18.708806Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 3600,
+          "period": 10,
+          "requests_per_period": 1
+        },
+        "ref": "62e668e3427a4ae6a92edd3437a2535b",
+        "version": "1"
+      }
+    ],
+    "source": "rate_limit",
+    "version": "1"
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

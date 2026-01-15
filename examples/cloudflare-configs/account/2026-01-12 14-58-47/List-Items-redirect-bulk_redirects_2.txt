@@ -1,0 +1,29 @@
+{
+  "result": [
+    {
+      "id": "0baa7e410065497ba5837077d622b3f7",
+      "redirect": {
+        "source_url": "cdn.example.com/new_feature2",
+        "target_url": "https://cdn.example.com/soon2",
+        "status_code": 302,
+        "preserve_query_string": false
+      },
+      "created_on": "2025-12-26T05:46:12Z",
+      "modified_on": "2025-12-26T05:46:12Z"
+    },
+    {
+      "id": "05c15d63249f45989a868f68579fd70c",
+      "redirect": {
+        "source_url": "example.com/about2",
+        "include_subdomains": true,
+        "target_url": "https://cdn.example.com/news2",
+        "status_code": 301
+      },
+      "created_on": "2025-12-26T05:46:12Z",
+      "modified_on": "2025-12-26T05:47:31Z"
+    }
+  ],
+  "success": true,
+  "errors": [],
+  "messages": []
+}

@@ -1,0 +1,41 @@
+{
+  "result": [
+    {
+      "id": "f09882461bea424c924d955193994145",
+      "redirect": {
+        "source_url": "cdn.example.com/custom",
+        "target_url": "https://cdn.example.com/redirect",
+        "status_code": 302,
+        "preserve_query_string": true
+      },
+      "created_on": "2025-12-26T05:39:26Z",
+      "modified_on": "2025-12-26T05:39:26Z"
+    },
+    {
+      "id": "76e97f8fb3b04de48864109a8f8a6754",
+      "redirect": {
+        "source_url": "example.com/about",
+        "include_subdomains": true,
+        "target_url": "https://cdn.example.com/news",
+        "status_code": 301,
+        "preserve_query_string": true
+      },
+      "created_on": "2025-12-26T05:37:44Z",
+      "modified_on": "2025-12-26T05:39:26Z"
+    },
+    {
+      "id": "fdf9392d1bfb40809605a6c28ceba6a4",
+      "redirect": {
+        "source_url": "example.com/new_feature",
+        "include_subdomains": true,
+        "target_url": "https://cdn.example.com/soon",
+        "status_code": 302
+      },
+      "created_on": "2025-12-26T05:39:26Z",
+      "modified_on": "2025-12-26T05:39:26Z"
+    }
+  ],
+  "success": true,
+  "errors": [],
+  "messages": []
+}

@@ -1,0 +1,212 @@
+{
+  "result": {
+    "description": "",
+    "id": "ffe34cf143e642c4a5eb5ebdb0a57583",
+    "kind": "zone",
+    "last_updated": "2025-12-15T06:39:40.300921Z",
+    "name": "default",
+    "phase": "http_request_firewall_managed",
+    "rules": [
+      {
+        "action": "execute",
+        "action_parameters": {
+          "id": "efb7b8c949ac4650a09736fc376e9aee",
+          "overrides": {
+            "rules": [
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "7aeb2faf29284398aeb782e54875e938"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "7babab188b3c40ae87b93ec451f4fd5b"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "23ee7cebe6e8443e99ecf932ab579455"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "76f9871c8e88445b807c9ebcd440c742"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "cd7bd3dbe8fd4add9926ad50068b2a17"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "34da2a5e0a95425d9b0e44f07c641d63"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "2fe273498e964f0bb20ac022d5a14a5e"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "47631a04883d4d7cab6bd7b83478adcb"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "977ad8daef224ecdbe475c7ab3ab3365"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "bdd776b4f296477f960acc346dfa618e"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "49449f901cab4a01b2591ab836babcca"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "d6f6d394cb01400284cfb7971e7aed1e"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "d9aeff22f1024655937e5b033a61fbc5"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "525329e705aa4fa596e126366d02615e"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "8bb4bf582f704b61980fceff442561a8"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "15b0616fe67a439a8a3852410cadd290"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "00bee3de44184f7f8a6ad10910f04e13"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "7b1cfed7fd4047c6949c4d054751ef80"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "d8c7dbf00ec546e48e3c4340486c3ee2"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "ff8b8608c2c14bf5b3de621b6fc2309c"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "71b7793c77e24287861b82f0ec97cf32"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "40cba5ee3a014208958da0855ddfd8e3"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "5dd38056f4cd43fca7f198e6384f1856"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "d384de3d016d414dbf4d14caaa83212b"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "aa3411d5505b4895b547d68950a28587"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "ac89e3a915594a139fc370dece6a8e28"
+              }
+            ]
+          },
+          "version": "latest"
+        },
+        "enabled": true,
+        "expression": "true",
+        "id": "a4ee1a4c0d7f4431826b1e98b66e7959",
+        "last_updated": "2025-12-15T06:39:40.300921Z",
+        "ref": "a4ee1a4c0d7f4431826b1e98b66e7959",
+        "version": "1"
+      },
+      {
+        "action": "execute",
+        "action_parameters": {
+          "id": "4814384a9e5d4991b9815dcfc25d2f1f",
+          "overrides": {
+            "categories": [
+              {
+                "category": "paranoia-level-3",
+                "enabled": false
+              },
+              {
+                "category": "paranoia-level-4",
+                "enabled": false
+              }
+            ],
+            "rules": [
+              {
+                "action": "managed_challenge",
+                "id": "6179ae15870a4bb7b2d480d4843b323c",
+                "score_threshold": 40
+              }
+            ]
+          },
+          "version": "latest"
+        },
+        "enabled": true,
+        "expression": "true",
+        "id": "95381ec555cf42ccaed0a84e2cfe584d",
+        "last_updated": "2025-12-15T06:39:40.300921Z",
+        "ref": "95381ec555cf42ccaed0a84e2cfe584d",
+        "version": "1"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "ruleset": "current"
+        },
+        "description": "Bypass-host-test.example.com",
+        "enabled": true,
+        "expression": "(any(http.request.headers[\"host\"][*] eq \"test.example.com\"))",
+        "id": "590973b8aeaf47108ecff6049d51d3dc",
+        "last_updated": "2025-12-15T06:39:40.300921Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "590973b8aeaf47108ecff6049d51d3dc",
+        "version": "1"
+      }
+    ],
+    "source": "firewall_managed",
+    "version": "1"
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

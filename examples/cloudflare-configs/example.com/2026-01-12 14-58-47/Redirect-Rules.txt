@@ -1,0 +1,149 @@
+{
+  "result": {
+    "description": "",
+    "id": "0477a2afb72943659cc5ebeaeca0e9fa",
+    "kind": "zone",
+    "last_updated": "2026-01-01T11:08:52.894212Z",
+    "name": "default",
+    "phase": "http_request_dynamic_redirect",
+    "rules": [
+      {
+        "action": "redirect",
+        "action_parameters": {
+          "from_value": {
+            "preserve_query_string": true,
+            "status_code": 302,
+            "target_url": {
+              "expression": "concat(\"/eu\", http.request.uri.path)"
+            }
+          }
+        },
+        "description": "redirect_european_union",
+        "enabled": true,
+        "expression": "(ip.src.is_in_european_union and starts_with(http.request.uri.path, \"/european_union\"))",
+        "id": "82e5b2251d724c64bfcb14f8c8cd4738",
+        "last_updated": "2025-12-31T13:20:08.982592Z",
+        "ref": "82e5b2251d724c64bfcb14f8c8cd4738",
+        "version": "2"
+      },
+      {
+        "action": "redirect",
+        "action_parameters": {
+          "from_value": {
+            "preserve_query_string": false,
+            "status_code": 302,
+            "target_url": {
+              "expression": "concat(\"/new_continent\", http.request.uri.path)"
+            }
+          }
+        },
+        "description": "redirect_eu_continent",
+        "enabled": true,
+        "expression": "(ip.src.continent eq \"EU\" and starts_with(http.request.uri.path, \"/continent\"))",
+        "id": "9530fcca06404a9a8cf08364ed2a2a8a",
+        "last_updated": "2025-12-31T13:23:41.805761Z",
+        "ref": "9530fcca06404a9a8cf08364ed2a2a8a",
+        "version": "1"
+      },
+      {
+        "action": "redirect",
+        "action_parameters": {
+          "from_value": {
+            "preserve_query_string": false,
+            "status_code": 302,
+            "target_url": {
+              "expression": "concat(\"/new_continent\", http.request.uri.path)"
+            }
+          }
+        },
+        "description": "Duplicate of redirect_as_continent",
+        "enabled": true,
+        "expression": "(ip.src.continent eq \"AS\" and starts_with(http.request.uri.path, \"/continent\"))",
+        "id": "992c90a5bebd487198040eb50c70aff0",
+        "last_updated": "2026-01-01T11:07:06.645961Z",
+        "ref": "992c90a5bebd487198040eb50c70aff0",
+        "version": "1"
+      },
+      {
+        "action": "redirect",
+        "action_parameters": {
+          "from_value": {
+            "preserve_query_string": false,
+            "status_code": 302,
+            "target_url": {
+              "expression": "regex_replace(http.request.uri.path, \"^/products/([0-9]+)/([a-z\\\\-]+)$\", \"/items/${1}?slug=${2}\")"
+            }
+          }
+        },
+        "description": "regex_redirect",
+        "enabled": true,
+        "expression": "(http.request.uri.path matches r\"^/products/([0-9]+)/([a-z\\-]+)$\")",
+        "id": "728621b749c8472c88af12846b03f4f3",
+        "last_updated": "2025-12-29T01:47:27.032848Z",
+        "ref": "728621b749c8472c88af12846b03f4f3",
+        "version": "2"
+      },
+      {
+        "action": "redirect",
+        "action_parameters": {
+          "from_value": {
+            "preserve_query_string": true,
+            "status_code": 301,
+            "target_url": {
+              "expression": "wildcard_replace(http.request.full_uri, r\"http://*\", r\"https://${1}\")"
+            }
+          }
+        },
+        "description": "Redirect from HTTP to HTTPS [Template]",
+        "enabled": true,
+        "expression": "(http.request.full_uri wildcard r\"http://*\")",
+        "id": "b816263ca3074f689c39ec973828af0f",
+        "last_updated": "2025-12-26T06:08:12.779006Z",
+        "ref": "b816263ca3074f689c39ec973828af0f",
+        "version": "1"
+      },
+      {
+        "action": "redirect",
+        "action_parameters": {
+          "from_value": {
+            "preserve_query_string": true,
+            "status_code": 301,
+            "target_url": {
+              "expression": "regex_replace(http.request.uri.path, \"^/blog/([0-9]{4})/([0-9]{2})/([a-z0-9\\\\-]+)$\", \"/posts/${1}-${2}-${3}\")"
+            }
+          }
+        },
+        "description": "dynamic_redirect_1",
+        "enabled": true,
+        "expression": "(http.request.uri.path matches r\"^/blog/([0-9]{4})/([0-9]{2})/([a-z0-9\\\\-]+)$\")",
+        "id": "8c047ea6aa9d47f2afd5deb316ef0383",
+        "last_updated": "2025-12-29T01:55:06.826088Z",
+        "ref": "8c047ea6aa9d47f2afd5deb316ef0383",
+        "version": "1"
+      },
+      {
+        "action": "redirect",
+        "action_parameters": {
+          "from_value": {
+            "preserve_query_string": true,
+            "status_code": 301,
+            "target_url": {
+              "expression": "regex_replace(http.request.uri.path, \"^/articles/([a-z0-9\\\\-]+)$\", \"/posts/${1}\")"
+            }
+          }
+        },
+        "description": "dynamic_redirect_2",
+        "enabled": true,
+        "expression": "(http.request.uri.path matches \"^/articles/([a-z0-9\\\\-]+)$\")",
+        "id": "22f84e6f742e434eb97d8bda95d84a0e",
+        "last_updated": "2025-12-29T01:56:22.773007Z",
+        "ref": "22f84e6f742e434eb97d8bda95d84a0e",
+        "version": "1"
+      }
+    ],
+    "version": "17"
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

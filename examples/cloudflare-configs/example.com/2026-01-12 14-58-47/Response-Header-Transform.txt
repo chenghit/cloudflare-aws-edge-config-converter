@@ -1,0 +1,34 @@
+{
+  "result": {
+    "description": "",
+    "id": "459e17bbb8e443aa941b92aed6531312",
+    "kind": "zone",
+    "last_updated": "2025-12-29T06:13:15.082183Z",
+    "name": "default",
+    "phase": "http_response_headers_transform",
+    "rules": [
+      {
+        "action": "rewrite",
+        "action_parameters": {
+          "headers": {
+            "Link": {
+              "expression": "concat(\"\u003chttps://\", http.host, regex_replace(http.request.uri.path, \"/docs/(.*)\\\\.pdf\", \"/html/${1}/\"), \"\u003e; rel=\\\"canonical\\\"\")",
+              "operation": "add"
+            }
+          }
+        },
+        "description": "SEO - PDF Canonical Link",
+        "enabled": true,
+        "expression": "(http.request.uri.path wildcard r\"/docs/*.pdf\")",
+        "id": "07fb4635d2af42b2808e134a5d819f55",
+        "last_updated": "2025-12-29T06:13:15.082183Z",
+        "ref": "07fb4635d2af42b2808e134a5d819f55",
+        "version": "2"
+      }
+    ],
+    "version": "2"
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

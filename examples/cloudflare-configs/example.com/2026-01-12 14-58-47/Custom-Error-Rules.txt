@@ -1,0 +1,45 @@
+{
+  "result": {
+    "description": "",
+    "id": "ad8821af477b4cf18104c4c33180dd20",
+    "kind": "zone",
+    "last_updated": "2025-12-30T06:47:34.42236Z",
+    "name": "default",
+    "phase": "http_custom_errors",
+    "rules": [
+      {
+        "action": "serve_error",
+        "action_parameters": {
+          "content": "\u003c?xml version=\"1.0\" encoding=\"UTF-8\"?\u003e\n\u003cErrorResponse\u003e\n  \u003cError\u003e\n    \u003cType\u003eClient\u003c/Type\u003e\n    \u003cCode\u003eTooManyRequests\u003c/Code\u003e\n    \u003cMessage\u003e请求速率超出限制\u003c/Message\u003e\n    \u003cDescription\u003e您在短时间内发送了过多请求，已触发速率限制保护机制\u003c/Description\u003e\n  \u003c/Error\u003e\n  \u003cRequestInfo\u003e\n    \u003cRequestId\u003ereq-${timestamp}-${random}\u003c/RequestId\u003e\n    \u003cTimestamp\u003e2025-12-30T14:38:36+08:00\u003c/Timestamp\u003e\n    \u003cResource\u003e/api/v1/resource\u003c/Resource\u003e\n    \u003cMethod\u003eGET\u003c/Method\u003e\n  \u003c/RequestInfo\u003e\n  \u003cRateLimit\u003e\n    \u003cLimit\u003e100\u003c/Limit\u003e\n    \u003cWindow\u003e60\u003c/Window\u003e\n    \u003cWindowUnit\u003eseconds\u003c/WindowUnit\u003e\n    \u003cRemaining\u003e0\u003c/Remaining\u003e\n    \u003cReset\u003e2025-12-30T14:39:36+08:00\u003c/Reset\u003e\n    \u003cRetryAfter\u003e60\u003c/RetryAfter\u003e\n  \u003c/RateLimit\u003e\n  \u003cSuggestions\u003e\n    \u003cSuggestion\u003e请等待 60 秒后重试\u003c/Suggestion\u003e\n    \u003cSuggestion\u003e考虑实现请求缓存以减少 API 调用\u003c/Suggestion\u003e\n    \u003cSuggestion\u003e如需更高配额，请联系技术支持\u003c/Suggestion\u003e\n  \u003c/Suggestions\u003e\n  \u003cSupport\u003e\n    \u003cContactEmail\u003esupport@example.com\u003c/ContactEmail\u003e\n    \u003cDocumentationUrl\u003ehttps://docs.example.com/rate-limits\u003c/DocumentationUrl\u003e\n  \u003c/Support\u003e\n\u003c/ErrorResponse\u003e",
+          "content_type": "text/xml",
+          "status_code": 429
+        },
+        "description": "custom 429 response",
+        "enabled": true,
+        "expression": "(http.request.uri.path wildcard \"/error-429/*\")",
+        "id": "10b4d00c38514c0b8e60189cdfc5cc49",
+        "last_updated": "2025-12-30T06:43:16.930565Z",
+        "ref": "10b4d00c38514c0b8e60189cdfc5cc49",
+        "version": "2"
+      },
+      {
+        "action": "serve_error",
+        "action_parameters": {
+          "content": "\u003c?xml version=\"1.0\" encoding=\"UTF-8\"?\u003e\n\u003cErrorResponse\u003e\n  \u003cError\u003e\n    \u003cType\u003eClient\u003c/Type\u003e\n    \u003cCode\u003eTooManyRequests\u003c/Code\u003e\n    \u003cMessage\u003e请求被拒绝\u003c/Message\u003e\n    \u003cDescription\u003e请求被拒绝请求被拒绝请求被拒绝请求被拒绝请求被拒绝请求被拒绝\u003c/Description\u003e\n  \u003c/Error\u003e\n  \u003cRequestInfo\u003e\n    \u003cRequestId\u003ereq-${timestamp}-${random}\u003c/RequestId\u003e\n    \u003cTimestamp\u003e2025-12-30T14:38:36+08:00\u003c/Timestamp\u003e\n    \u003cResource\u003e/api/v1/resource\u003c/Resource\u003e\n    \u003cMethod\u003eGET\u003c/Method\u003e\n  \u003c/RequestInfo\u003e\n  \u003cRateLimit\u003e\n    \u003cLimit\u003e100\u003c/Limit\u003e\n    \u003cWindow\u003e60\u003c/Window\u003e\n    \u003cWindowUnit\u003eseconds\u003c/WindowUnit\u003e\n    \u003cRemaining\u003e0\u003c/Remaining\u003e\n    \u003cReset\u003e2025-12-30T14:39:36+08:00\u003c/Reset\u003e\n    \u003cRetryAfter\u003e60\u003c/RetryAfter\u003e\n  \u003c/RateLimit\u003e\n  \u003cSuggestions\u003e\n    \u003cSuggestion\u003e请求被拒绝请求被拒绝\u003c/Suggestion\u003e\n    \u003cSuggestion\u003e请求被拒绝请求被拒绝\u003c/Suggestion\u003e\n    \u003cSuggestion\u003e请求被拒绝请求被拒绝\u003c/Suggestion\u003e\n  \u003c/Suggestions\u003e\n  \u003cSupport\u003e\n    \u003cContactEmail\u003esupport@example.com\u003c/ContactEmail\u003e\n    \u003cDocumentationUrl\u003ehttps://docs.example.com/rate-limits\u003c/DocumentationUrl\u003e\n  \u003c/Support\u003e\n\u003c/ErrorResponse\u003e",
+          "content_type": "text/xml"
+        },
+        "description": "custom 403 response",
+        "enabled": true,
+        "expression": "(http.request.uri.path wildcard \"/error-403/*\" and http.response.code eq 403)",
+        "id": "140bd31a5cbe49489d6e9db6cb83240c",
+        "last_updated": "2025-12-30T06:44:26.963033Z",
+        "ref": "140bd31a5cbe49489d6e9db6cb83240c",
+        "version": "3"
+      }
+    ],
+    "version": "6"
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

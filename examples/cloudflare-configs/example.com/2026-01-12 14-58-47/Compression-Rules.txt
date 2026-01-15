@@ -1,0 +1,10 @@
+{
+  "result": null,
+  "success": false,
+  "errors": [
+    {
+      "message": "unknown phase \"http_request_compress\""
+    }
+  ],
+  "messages": []
+}
