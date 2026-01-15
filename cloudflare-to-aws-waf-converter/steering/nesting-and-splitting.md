@@ -32,7 +32,7 @@ This document explains Terraform's nesting constraints and the default splitting
 - This is the PRIMARY splitting strategy
 
 **Phase 2: Split by IPv4/IPv6 SECOND**
-- **ALWAYS split rules with mixed IPv4/IPv6 IP lists** - Create separate rules for IPv4 and IPv6
+- **ALWAYS split rules with mixed IPv4/IPv6 IP lists** - Create separate rules for IPv4 and IPv6, but ONLY for branches that contain IP matching conditions (not ASN, user-agent, headers, or other non-IP fields)
 - Apply to EVERY rule, including those already split in Phase 1
 - Even if a rule was split by OR, each resulting rule must be further split if it contains mixed IPv4/IPv6
 
@@ -75,10 +75,7 @@ Phase 2 - Split each branch by IPv4/IPv6:
 - Maintain sequential priorities for split rules
 - Document in rule names that they are part of a split set (e.g., `rule-name-branch-1-ipv4`, `rule-name-branch-1-ipv6`)
 
-**Only use complex nesting when:**
-- Rule is simple (2 levels or less)
-- Already verified to not exceed 3 levels
-- Cannot be split without changing semantics (rare)
+**Only use complex nesting when:** Rule is simple (2 levels or less), already verified to not exceed 3 levels, and cannot be split without changing semantics (rare)
 
 ## De Morgan's Law Transformations
 
@@ -378,14 +375,16 @@ Phase 1 - Split by OR:
 - Branch 2: `country eq "CO" and NOT ip in {ipv4, ipv6}`
 - Branch 3: `user_agent contains "Bot" and asn in {16001, 16002}`
 
-Phase 2 - Split branches 1 and 2 by IPv4/IPv6 (Branch 3 has no IP lists):
+Phase 2 - Split branches 1 and 2 by IPv4/IPv6 (Branch 3 has NO IP matching, only ASN):
 - Branch 1 IPv4: `country eq "DZ" and ipv4`
 - Branch 1 IPv6: `country eq "DZ" and ipv6`
 - Branch 2 IPv4: `country eq "CO" and NOT ipv4`
 - Branch 2 IPv6: `country eq "CO" and NOT ipv6`
-- Branch 3: `user_agent contains "Bot" and asn in {16001, 16002}` (unchanged)
+- Branch 3: `user_agent contains "Bot" and asn in {16001, 16002}` (unchanged - ASN is NOT an IP list)
 
-**Result: 5 rules**
+**Result: 5 rules** (NOT 6!)
+
+**CRITICAL: ASN matching uses `asn_match_statement`, NOT `ip_set_reference_statement`. Do NOT split ASN conditions by IPv4/IPv6.**
 
 ## Action Handling After Split
 
