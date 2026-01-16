@@ -1,8 +1,8 @@
 ---
 name: "cloudflare-to-cloudfront-functions-converter"
 displayName: "Cloudflare to CloudFront Functions Converter"
-description: "Converts Cloudflare transformation rules (redirects, URL rewrites, header modifications, bulk redirects) to AWS CloudFront Functions JavaScript Runtime 2.0"
-keywords: ["cloudflare transform", "cloudfront function", "redirect", "url rewrite", "header modification", "header transform", "bulk redirects"]
+description: 'Converts Cloudflare transformation rules (redirects, URL rewrites, header modifications, bulk redirects) to AWS CloudFront Functions JavaScript Runtime 2.0. Use this skill when user request contains ANY of these patterns: "Cloudflare" AND ("CloudFront" OR "CloudFront Function" OR "CloudFront Functions" OR "AWS"); ("convert" OR "migrate" OR "transform" OR "port") AND "Cloudflare" AND ("rules" OR "configuration" OR "config"); "Cloudflare" AND ("redirect" OR "rewrite" OR "header" OR "transformation") AND ("AWS" OR "CloudFront")'
+keywords: ["cloudflare to cloudfront function", "convert cloudflare transform", "translate cloudflare redirect", "migrate cloudflare rewrite", "cloudflare rules to function", "cloudflare转cloudfront function", "转换cloudflare转换规则", "cloudflare规则转function"]
 ---
 
 # Cloudflare to CloudFront Functions Converter
