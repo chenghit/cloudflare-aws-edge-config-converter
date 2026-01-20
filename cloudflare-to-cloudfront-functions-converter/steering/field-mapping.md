@@ -62,9 +62,9 @@ async function handler(event) {
 
 | Cloudflare Field | CloudFront Equivalent | Notes |
 |-----------------|----------------------|-------|
-| `http.referer` | `request.headers.referer?.value` | Referrer header |
-| `http.user_agent` | `request.headers['user-agent']?.value` | User-Agent header |
-| `http.x_forwarded_for` | `request.headers['x-forwarded-for']?.value` | X-Forwarded-For header |
+| `http.referer` | `request.headers.referer` | Referrer header (check existence first) |
+| `http.user_agent` | `request.headers['user-agent']` | User-Agent header (check existence first) |
+| `http.x_forwarded_for` | `request.headers['x-forwarded-for']` | X-Forwarded-For header (check existence first) |
 | `http.cookie` | `request.cookies` | Cookie object |
 
 ### Example: Accessing Headers
@@ -73,9 +73,9 @@ async function handler(event) {
 async function handler(event) {
     const request = event.request;
     
-    const referer = request.headers.referer?.value;
-    const userAgent = request.headers['user-agent']?.value;
-    const xForwardedFor = request.headers['x-forwarded-for']?.value;
+    const referer = request.headers.referer ? request.headers.referer.value : undefined;
+    const userAgent = request.headers['user-agent'] ? request.headers['user-agent'].value : undefined;
+    const xForwardedFor = request.headers['x-forwarded-for'] ? request.headers['x-forwarded-for'].value : undefined;
     
     // Check if header exists before using
     if (referer && referer.includes('google.com')) {
@@ -91,7 +91,7 @@ async function handler(event) {
 | Cloudflare Field | CloudFront Equivalent | Notes |
 |-----------------|----------------------|-------|
 | `http.cookie` | `request.cookies` | Access all cookies |
-| Specific cookie | `request.cookies.cookieName?.value` | Access specific cookie |
+| Specific cookie | `request.cookies.cookieName` | Access specific cookie (check existence first) |
 
 ### Example: Accessing Cookies
 
@@ -100,8 +100,8 @@ async function handler(event) {
     const request = event.request;
     
     // Get specific cookie
-    const sessionId = request.cookies.sessionId?.value;
-    const authToken = request.cookies.auth?.value;
+    const sessionId = request.cookies.sessionId ? request.cookies.sessionId.value : undefined;
+    const authToken = request.cookies.auth ? request.cookies.auth.value : undefined;
     
     // Check if cookie exists
     if (request.cookies.premium) {
@@ -139,10 +139,10 @@ All geographic fields require CloudFront viewer headers to be configured in Orig
 
 | Cloudflare Field | CloudFront Equivalent | Notes |
 |-----------------|----------------------|-------|
-| `ip.src.country` | `request.headers['cloudfront-viewer-country']?.value` | ISO 3166-1 alpha-2 code |
-| `ip.src.city` | `request.headers['cloudfront-viewer-city']?.value` | City name |
-| `ip.src.lat` | `request.headers['cloudfront-viewer-latitude']?.value` | Latitude coordinate |
-| `ip.src.lon` | `request.headers['cloudfront-viewer-longitude']?.value` | Longitude coordinate |
+| `ip.src.country` | `request.headers['cloudfront-viewer-country']` | ISO 3166-1 alpha-2 code (check existence first) |
+| `ip.src.city` | `request.headers['cloudfront-viewer-city']` | City name (check existence first) |
+| `ip.src.lat` | `request.headers['cloudfront-viewer-latitude']` | Latitude coordinate (check existence first) |
+| `ip.src.lon` | `request.headers['cloudfront-viewer-longitude']` | Longitude coordinate (check existence first) |
 | `ip.src.subdivision_1_iso_code` | Combine country + region | See below |
 | `ip.src.continent` | Derive from country code | See `continent-countries.md` |
 | `ip.src.is_in_european_union` | Check against EU list | See below |
@@ -153,10 +153,10 @@ All geographic fields require CloudFront viewer headers to be configured in Orig
 async function handler(event) {
     const request = event.request;
     
-    const country = request.headers['cloudfront-viewer-country']?.value; // e.g., "US"
-    const city = request.headers['cloudfront-viewer-city']?.value; // e.g., "Seattle"
-    const lat = request.headers['cloudfront-viewer-latitude']?.value; // e.g., "47.60620"
-    const lon = request.headers['cloudfront-viewer-longitude']?.value; // e.g., "-122.33210"
+    const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined;
+    const city = request.headers['cloudfront-viewer-city'] ? request.headers['cloudfront-viewer-city'].value : undefined;
+    const lat = request.headers['cloudfront-viewer-latitude'] ? request.headers['cloudfront-viewer-latitude'].value : undefined;
+    const lon = request.headers['cloudfront-viewer-longitude'] ? request.headers['cloudfront-viewer-longitude'].value : undefined;
     
     if (country === 'US') {
         request.headers['x-region'] = { value: 'north-america' };
@@ -174,8 +174,8 @@ Cloudflare's `ip.src.subdivision_1_iso_code` combines country and region with a 
 async function handler(event) {
     const request = event.request;
     
-    const country = request.headers['cloudfront-viewer-country']?.value; // e.g., "CN"
-    const region = request.headers['cloudfront-viewer-country-region']?.value; // e.g., "GD"
+    const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined; // e.g., "CN"
+    const region = request.headers['cloudfront-viewer-country-region'] ? request.headers['cloudfront-viewer-country-region'].value : undefined; // e.g., "GD"
     
     if (country && region) {
         const subdivisionCode = `${country}-${region}`; // e.g., "CN-GD"
@@ -196,37 +196,24 @@ Cloudflare's `ip.src.continent` must be derived from country code.
 
 **CRITICAL**: Continent codes (AS, EU, AF, etc.) are NOT country codes. You must map country → continent.
 
-**Decision Guide**:
-- Need 1-2 continents with <100 countries total? → Hardcode arrays
-- Need 3+ continents or >100 countries? → Use KVS
-- Performance critical? → Prefer hardcoding (no KVS latency)
+**Strategy: Always use KVS**
 
-**Option 1: Hardcode (Recommended for 1-2 continents)**
-```javascript
-async function handler(event) {
-    const request = event.request;
-    const country = request.headers['cloudfront-viewer-country']?.value;
-    
-    const continentMap = {
-        'US': 'NA', 'CA': 'NA', 'MX': 'NA',
-        'GB': 'EU', 'DE': 'EU', 'FR': 'EU',
-        'CN': 'AS', 'JP': 'AS', 'IN': 'AS',
-        'BR': 'SA', 'AR': 'SA', 'CL': 'SA',
-        'AU': 'OC', 'NZ': 'OC'
-    };
-    
-    const continent = continentMap[country];
-    if (continent) {
-        request.headers['x-continent'] = { value: continent };
-    }
-    
-    return request;
+Store country-to-continent mapping in KVS with prefix `continent:`. This keeps function size small and makes updates easier.
+
+**KVS entries format:**
+```json
+{
+  "data": [
+    {"key": "continent:US", "value": "NA"},
+    {"key": "continent:CN", "value": "AS"},
+    {"key": "continent:GB", "value": "EU"}
+  ]
 }
 ```
 
-**Option 2: Use KVS (For 3+ continents or >100 countries)**
+See `continent-countries.md` for complete list of all 239 country-to-continent mappings.
 
-If you need complete coverage (195+ countries) or many continents, use KVS:
+**CloudFront Function:**
 ```javascript
 import cf from 'cloudfront';
 
@@ -234,20 +221,34 @@ const kvsHandle = cf.kvs();
 
 async function handler(event) {
     const request = event.request;
-    const country = request.headers['cloudfront-viewer-country']?.value;
+    const uri = request.uri;
+    const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined;
     
     if (country) {
         try {
             const continent = await kvsHandle.get(`continent:${country}`);
-            request.headers['x-continent'] = { value: continent };
+            // Example: Redirect Asia users to Asia-specific page
+            if (continent === 'AS' && uri === '/welcome') {
+                return {
+                    statusCode: 302,
+                    headers: {
+                        'location': { value: '/asia/welcome' }
+                    }
+                };
+            }
         } catch (err) {
-            console.log(`Country ${country} not in mapping`);
+            // Country not in mapping, continue with default behavior
         }
     }
     
     return request;
 }
 ```
+
+**Why always use KVS:**
+- Reduces function size significantly
+- Easier to update country mappings without redeploying function
+- Complete coverage of all 195+ countries available
 
 ### EU Country Check
 
@@ -255,27 +256,22 @@ Cloudflare's `ip.src.is_in_european_union` checks if country is in EU.
 
 EU countries (27): `AT, BE, BG, CY, CZ, DE, DK, EE, ES, FI, FR, GR, HR, HU, IE, IT, LT, LU, LV, MT, NL, PL, PT, RO, SE, SI, SK`
 
-**Decision**: ALWAYS hardcode (only 27 countries = ~162 bytes, static list, frequently checked)
+**Strategy: Always use KVS**
 
-**Option 1: Hardcode in function (Recommended)**
-```javascript
-async function handler(event) {
-    const request = event.request;
-    const country = request.headers['cloudfront-viewer-country']?.value;
-    
-    const euCountries = ['AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU','IE','IT','LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK'];
-    
-    if (euCountries.includes(country)) {
-        request.headers['x-gdpr-required'] = { value: 'true' };
-    }
-    
-    return request;
+Store EU country flags in KVS with prefix `eu:`. This keeps function size small.
+
+**KVS entries format:**
+```json
+{
+  "data": [
+    {"key": "eu:AT", "value": "1"},
+    {"key": "eu:BE", "value": "1"},
+    {"key": "eu:BG", "value": "1"}
+  ]
 }
 ```
 
-**Option 2: Use KVS (Only if function size constrained)**
-
-If function size is approaching 10KB limit and you need to free up space:
+**CloudFront Function:**
 ```javascript
 import cf from 'cloudfront';
 
@@ -283,26 +279,53 @@ const kvsHandle = cf.kvs();
 
 async function handler(event) {
     const request = event.request;
-    const country = request.headers['cloudfront-viewer-country']?.value;
+    const uri = request.uri;
+    const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined;
     
+    let isEU = false;
     if (country) {
         try {
-            await kvsHandle.get(`eu:${country}`); // If exists, it's EU
-            request.headers['x-gdpr-required'] = { value: 'true' };
+            await kvsHandle.get(`eu:${country}`);
+            isEU = true;
         } catch (err) {
-            // Not EU country
+            // Not EU country, isEU remains false
         }
+    }
+    
+    // Example: Redirect EU users to EU-specific page
+    if (isEU && uri === '/welcome') {
+        return {
+            statusCode: 302,
+            headers: {
+                'location': { value: '/eu/welcome' }
+            }
+        };
+    }
+    
+    // Example: Redirect non-EU users to global page
+    if (!isEU && uri === '/welcome') {
+        return {
+            statusCode: 302,
+            headers: {
+                'location': { value: '/global/welcome' }
+            }
+        };
     }
     
     return request;
 }
 ```
 
+**Why always use KVS:**
+- Reduces function size (saves ~162 bytes)
+- Consistent approach with continent mapping
+- Easier to update if EU membership changes
+
 ## Network Fields
 
 | Cloudflare Field | CloudFront Equivalent | Notes |
 |-----------------|----------------------|-------|
-| `ip.src.asnum` | `request.headers['cloudfront-viewer-asn']?.value` | Autonomous System Number |
+| `ip.src.asnum` | `request.headers['cloudfront-viewer-asn']` | Autonomous System Number (check existence first) |
 
 ### Example: Accessing ASN
 
@@ -310,7 +333,7 @@ async function handler(event) {
 async function handler(event) {
     const request = event.request;
     
-    const asn = request.headers['cloudfront-viewer-asn']?.value; // e.g., "4134"
+    const asn = request.headers['cloudfront-viewer-asn'] ? request.headers['cloudfront-viewer-asn'].value : undefined; // e.g., "4134"
     
     // Block specific ASN
     if (asn === '12345') {
@@ -331,7 +354,7 @@ async function handler(event) {
 
 | Cloudflare Field | CloudFront Equivalent | Notes |
 |-----------------|----------------------|-------|
-| `http.request.version` | `request.headers['cloudfront-viewer-http-version']?.value` | HTTP version (e.g., "2.0", "1.1") |
+| `http.request.version` | `request.headers['cloudfront-viewer-http-version']` | HTTP version (check existence first) |
 
 ### Example: Accessing HTTP Version
 
@@ -339,7 +362,7 @@ async function handler(event) {
 async function handler(event) {
     const request = event.request;
     
-    const httpVersion = request.headers['cloudfront-viewer-http-version']?.value;
+    const httpVersion = request.headers['cloudfront-viewer-http-version'] ? request.headers['cloudfront-viewer-http-version'].value : undefined;
     
     if (httpVersion === '2.0') {
         request.headers['x-http2-enabled'] = { value: 'true' };
@@ -393,8 +416,8 @@ Use `request.querystring` when you need to access or modify individual parameter
 
 ```javascript
 // Access parsed query parameters
-const id = request.querystring.id?.value;
-const category = request.querystring.category?.value;
+const id = request.querystring.id ? request.querystring.id.value : undefined;
+const category = request.querystring.category ? request.querystring.category.value : undefined;
 
 // Check if parameter exists
 if (request.querystring.debug) {
@@ -417,7 +440,7 @@ Some query parameters can have multiple values (e.g., `?tag=value1&tag=value2&ta
 
 ```javascript
 // Check if parameter has multiple values
-if (request.querystring.tag?.multiValue) {
+if (request.querystring.tag && request.querystring.tag.multiValue) {
     // Access all values
     const values = request.querystring.tag.multiValue.map(v => v.value);
     // e.g., ["value1", "value2", "value3"]
@@ -544,7 +567,7 @@ const queryString = reconstructQueryString(request.querystring);
 The `cloudfront-viewer-address` header includes both IP and port: `ip:port`
 
 ```javascript
-const viewerAddress = request.headers['cloudfront-viewer-address']?.value;
+const viewerAddress = request.headers['cloudfront-viewer-address'] ? request.headers['cloudfront-viewer-address'].value : undefined;
 // e.g., "203.0.113.42:54321"
 
 // Extract IP only
@@ -552,8 +575,10 @@ const clientIp = event.viewer.ip; // Recommended
 
 // Or parse from viewer-address
 if (viewerAddress) {
-    const [ip, port] = viewerAddress.split(':');
-    console.log(`IP: ${ip}, Port: ${port}`);
+    const parts = viewerAddress.split(':');
+    const ip = parts[0];
+    const port = parts[1];
+    // Use ip and port as needed
 }
 ```
 
@@ -563,21 +588,23 @@ All header names in CloudFront Functions event object are **lowercase**.
 
 ```javascript
 // ✅ CORRECT
-const country = request.headers['cloudfront-viewer-country']?.value;
+const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined;
 
-// ❌ WRONG
-const country = request.headers['CloudFront-Viewer-Country']?.value;
+// ❌ WRONG - Wrong case (header names must be lowercase)
+const country = request.headers['CloudFront-Viewer-Country'] ? request.headers['CloudFront-Viewer-Country'].value : undefined;
 ```
 
-### Optional Chaining
+### Checking Header Existence
 
-Always use optional chaining (`?.`) when accessing headers that might not exist.
+Always check if a header exists before accessing its value to avoid runtime errors.
 
 ```javascript
-// ✅ CORRECT - Won't throw error if header missing
-const country = request.headers['cloudfront-viewer-country']?.value;
+// ✅ CORRECT - Safe access with conditional check
+const country = request.headers['cloudfront-viewer-country'] 
+    ? request.headers['cloudfront-viewer-country'].value 
+    : undefined;
 
-// ❌ WRONG - Will throw error if header missing
+// ❌ WRONG - Will throw TypeError if header missing
 const country = request.headers['cloudfront-viewer-country'].value;
 ```
 
@@ -601,18 +628,18 @@ async function handler(event) {
     const method = request.method;
     
     // Geographic
-    const country = request.headers['cloudfront-viewer-country']?.value;
-    const city = request.headers['cloudfront-viewer-city']?.value;
+    const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined;
+    const city = request.headers['cloudfront-viewer-city'] ? request.headers['cloudfront-viewer-city'].value : undefined;
     
     // Network
-    const asn = request.headers['cloudfront-viewer-asn']?.value;
+    const asn = request.headers['cloudfront-viewer-asn'] ? request.headers['cloudfront-viewer-asn'].value : undefined;
     
     // Headers
-    const userAgent = request.headers['user-agent']?.value;
-    const referer = request.headers.referer?.value;
+    const userAgent = request.headers['user-agent'] ? request.headers['user-agent'].value : undefined;
+    const referer = request.headers.referer ? request.headers.referer.value : undefined;
     
     // Cookies
-    const sessionId = request.cookies.sessionId?.value;
+    const sessionId = request.cookies.sessionId ? request.cookies.sessionId.value : undefined;
     
     // Example: Redirect based on country
     if (country === 'CN') {

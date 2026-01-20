@@ -40,22 +40,21 @@ Within each rule type:
 
 ## 4. Continent Logic Validation
 
-- [ ] All `ip.src.continent` rules derive continent from country code
+- [ ] All `ip.src.continent` rules use KVS lookup with prefix `continent:`
 - [ ] No direct comparison of country code to continent code (e.g., `country === 'AS'` is WRONG)
 - [ ] Continent codes (AS, EU, AF, NA, SA, OC, AN) are NOT used as country codes
-- [ ] If hardcoded: Country arrays map to continent codes correctly
-- [ ] If KVS: Keys use format `continent:{countryCode}`, values are continent codes
+- [ ] KVS keys use format `continent:{countryCode}`, values are continent codes
+- [ ] Complete country-to-continent mapping included (see `continent-countries.md` for all 239 countries)
 
 **Why this matters**: Cloudflare `ip.src.continent` returns continent codes (AS, EU, etc.), but CloudFront `cloudfront-viewer-country` returns country codes (CN, US, GB, etc.). You must map country → continent.
 
 ## 5. EU Country Check Validation
 
-- [ ] EU country list is complete (27 countries): AT, BE, BG, CY, CZ, DE, DK, EE, ES, FI, FR, GR, HR, HU, IE, IT, LT, LU, LV, MT, NL, PL, PT, RO, SE, SI, SK
-- [ ] Decision justified: Hardcode (recommended) or KVS (if size constrained)
-- [ ] If hardcoded: Array declared correctly
-- [ ] If KVS: Keys use format `eu:{countryCode}`, existence check used
-
-**Recommendation**: Always hardcode EU list (only 162 bytes, static, frequently checked).
+- [ ] EU country list stored in KVS with prefix `eu:`
+- [ ] All 27 EU countries included: AT, BE, BG, CY, CZ, DE, DK, EE, ES, FI, FR, GR, HR, HU, IE, IT, LT, LU, LV, MT, NL, PL, PT, RO, SE, SI, SK
+- [ ] KVS keys use format `eu:{countryCode}`, value is `1`
+- [ ] Function uses existence check (try/catch pattern)
+- [ ] Logic handles both EU and non-EU cases correctly
 
 ## 6. Bulk Redirects Validation
 
@@ -102,22 +101,14 @@ For URL rewrites:
 - [ ] True-Client-IP uses `event.viewer.ip`, not `cloudfront-viewer-address` (which includes port)
 - [ ] Header modifications happen AFTER all redirect logic (not wasted if redirecting)
 
-## 9. KVS Decision Validation
+## 9. KVS Usage Validation
 
-Generate a table showing data type decisions:
-
-| Data Type | Size Estimate | Frequently Updated? | Decision | Justification |
-|-----------|---------------|---------------------|----------|---------------|
-| Bulk redirects | X entries | Yes | KVS | Efficient lookup, easy updates, scalable |
-| EU countries | 162 bytes (27 countries) | No | Hardcode | <1KB, static list, frequently checked |
-| Asia countries | 318 bytes (53 countries) | No | Hardcode/KVS | Depends on function size |
-| Continent mapping | 1170 bytes (195 countries) | No | KVS | >1KB, complete coverage |
-
-Decision tree applied correctly:
-
-- [ ] Data >1KB OR frequently updated → KVS
-- [ ] Data <1KB AND static AND function <6KB → Hardcode
-- [ ] Data <1KB AND static AND function >6KB → Move to KVS
+- [ ] Bulk redirects stored in KVS (if any)
+- [ ] Continent mappings stored in KVS with prefix `continent:` (if any `ip.src.continent` rules)
+- [ ] EU countries stored in KVS with prefix `eu:` (if any `ip.src.is_in_european_union` rules)
+- [ ] All KVS entries use correct key prefixes
+- [ ] KVS JSON format valid
+- [ ] No duplicate keys in KVS file
 
 ## 10. Size Validation
 
@@ -133,12 +124,18 @@ Decision tree applied correctly:
 
 ## 11. Performance Optimization Validation
 
-- [ ] Early returns used for redirect responses (don't process remaining rules)
-- [ ] String methods preferred over regex:
-  - `host.endsWith('.example.com')` not `/.*\.example\.com$/.test(host)`
-  - `uri.startsWith('/path/')` not `/^\/path\//.test(uri)`
-- [ ] No complex regex patterns (CPU intensive)
-- [ ] No redundant checks (e.g., checking bulk redirects after already redirected)
+- [ ] Simple patterns converted to string methods:
+  - `eq "value"` → `===`
+  - `ne "value"` → `!==`
+  - `contains "substring"` → `includes()`
+  - `wildcard r"*.domain"` → `endsWith('.domain')`
+  - `wildcard r"/prefix/*"` → `startsWith('/prefix/')`
+  - `starts_with(field, "prefix")` → `startsWith()`
+  - `ends_with(field, "suffix")` → `endsWith()`
+  - `in { ... }` → `[...].includes()`
+- [ ] Regex from `matches` operator preserved unchanged
+- [ ] Rule execution order preserved from Cloudflare configuration
+- [ ] No redundant checks after early returns
 
 ## 12. Code Structure Validation
 
@@ -179,14 +176,9 @@ After completing all checks and fixing any issues, generate and present this sum
 ### KVS Usage
 - Total entries: X
 - Entry types:
-  - Bulk redirects: X
-  - Continent mapping: X (if applicable)
-  - EU countries: X (if applicable)
-
-### KVS Decision Table
-| Data Type | Size | Frequently Updated? | Decision | Justification |
-|-----------|------|---------------------|----------|---------------|
-| ... | ... | ... | ... | ... |
+  - Bulk redirects: X (if applicable)
+  - Continent mapping: X countries (if applicable)
+  - EU countries: 27 (if applicable)
 
 ### Non-Convertible Rules
 - Total: X
@@ -243,14 +235,18 @@ const target = parts[2];
 
 **Impact**: Logic never matches (AS/EU are continent codes, not country codes)
 
-**Fix**: Derive continent from country
+**Fix**: Use KVS to derive continent from country
 ```javascript
 // ❌ WRONG
 if (country === 'AS') { ... }
 
 // ✅ CORRECT
-const asiaCountries = ['CN','JP','IN',...];
-if (asiaCountries.includes(country)) { ... }
+try {
+    const continent = await kvsHandle.get(`continent:${country}`);
+    if (continent === 'AS') { ... }
+} catch (err) {
+    // Country not in mapping
+}
 ```
 
 ### Failure 4: Bulk Redirect Missing Subdomain Entry

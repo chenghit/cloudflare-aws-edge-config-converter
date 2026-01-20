@@ -111,8 +111,8 @@ Access parsed query parameters as an object. Required when handling multiValue p
 
 ```javascript
 // Access individual parameters
-const id = request.querystring.id?.value;
-const category = request.querystring.category?.value;
+const id = request.querystring.id ? request.querystring.id.value : undefined;
+const category = request.querystring.category ? request.querystring.category.value : undefined;
 ```
 
 **Use when**:
@@ -124,7 +124,7 @@ const category = request.querystring.category?.value;
 
 ```javascript
 // Check for multiValue
-if (request.querystring.tag?.multiValue) {
+if (request.querystring.tag && request.querystring.tag.multiValue) {
     // Multiple values: ?tag=val1&tag=val2&tag=val3
     for (let i = 0; i < request.querystring.tag.multiValue.length; i++) {
         const value = request.querystring.tag.multiValue[i].value;

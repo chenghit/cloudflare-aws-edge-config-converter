@@ -182,7 +182,10 @@ async function handler(event) {
     }
     
     if (redirectData) {
-        const [statusCode, preserveQs, targetUrl] = redirectData.split('|');
+        const parts = redirectData.split('|');
+        const statusCode = parts[0];
+        const preserveQs = parts[1];
+        const targetUrl = parts[2];
         const qs = request.rawQueryString();
         let finalUrl = targetUrl;
         

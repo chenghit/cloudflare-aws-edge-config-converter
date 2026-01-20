@@ -160,13 +160,13 @@ async function handler(event) {
     }
     
     // Add continent header
-    const country = request.headers['cloudfront-viewer-country']?.value;
+    const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined;
     if (country) {
         try {
             const continent = await kvsHandle.get(`continent:${country}`);
             request.headers['x-continent'] = { value: continent };
         } catch (err) {
-            console.log(`Country ${country} not in continent mapping`);
+            // Country not in continent mapping
         }
         
         // Check if EU country
@@ -235,28 +235,53 @@ async function handler(event) {
 
 ## Example: Country to Continent Mapping
 
-### Option 1: Hardcode in Function (Recommended for small lists)
+**Strategy: Always use KVS**
 
+Store country-to-continent mapping in KVS to reduce function size.
+
+**KVS JSON File** (combined with other data):
+```json
+{
+  "data": [
+    {"key": "continent:US", "value": "NA"},
+    {"key": "continent:CA", "value": "NA"},
+    {"key": "continent:CN", "value": "AS"},
+    {"key": "continent:GB", "value": "EU"}
+  ]
+}
+```
+
+**CloudFront Function**:
 ```javascript
+import cf from 'cloudfront';
+
+const kvsHandle = cf.kvs();
+
 async function handler(event) {
     const request = event.request;
-    const country = request.headers['cloudfront-viewer-country']?.value;
+    const uri = request.uri;
+    const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined;
     
-    const continentMap = {
-        'US': 'NA', 'CA': 'NA', 'MX': 'NA',
-        'GB': 'EU', 'DE': 'EU', 'FR': 'EU',
-        'CN': 'AS', 'JP': 'AS', 'IN': 'AS'
-    };
-    
-    if (country && continentMap[country]) {
-        request.headers['x-continent'] = { value: continentMap[country] };
+    if (country) {
+        try {
+            const continent = await kvsHandle.get(`continent:${country}`);
+            // Example: Redirect Asia users to Asia-specific page
+            if (continent === 'AS' && uri === '/welcome') {
+                return {
+                    statusCode: 302,
+                    headers: {
+                        'location': { value: '/asia/welcome' }
+                    }
+                };
+            }
+        } catch (err) {
+            // Country not in mapping, continue with default behavior
+        }
     }
     
     return request;
 }
 ```
-
-### Option 2: Use KVS (If function size is constrained or need all 195+ countries)
 
 **KVS JSON File** (combined with other data):
 ```json
@@ -277,14 +302,23 @@ const kvsHandle = cf.kvs();
 
 async function handler(event) {
     const request = event.request;
-    const country = request.headers['cloudfront-viewer-country']?.value;
+    const uri = request.uri;
+    const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined;
     
     if (country) {
         try {
             const continent = await kvsHandle.get(`continent:${country}`);
-            request.headers['x-continent'] = { value: continent };
+            // Example: Redirect Asia users to Asia-specific page
+            if (continent === 'AS' && uri === '/welcome') {
+                return {
+                    statusCode: 302,
+                    headers: {
+                        'location': { value: '/asia/welcome' }
+                    }
+                };
+            }
         } catch (err) {
-            console.log(`Country ${country} not found in mapping`);
+            // Country not in mapping, continue with default behavior
         }
     }
     
@@ -294,32 +328,17 @@ async function handler(event) {
 
 ## Example: EU Country Check
 
-### Option 1: Hardcode in Function (Recommended for small lists)
+**Strategy: Always use KVS**
 
-```javascript
-async function handler(event) {
-    const request = event.request;
-    const country = request.headers['cloudfront-viewer-country']?.value;
-    
-    const euCountries = ['AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU','IE','IT','LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK'];
-    
-    if (euCountries.includes(country)) {
-        request.headers['x-gdpr-required'] = { value: 'true' };
-    }
-    
-    return request;
-}
-```
-
-### Option 2: Use KVS (If function size is constrained)
+Store EU country flags in KVS with prefix `eu:`. This keeps function size small.
 
 **KVS JSON File** (combined with other data):
 ```json
 {
   "data": [
-    {"key": "eu:AT", "value": "true"},
-    {"key": "eu:BE", "value": "true"},
-    {"key": "eu:BG", "value": "true"}
+    {"key": "eu:AT", "value": "1"},
+    {"key": "eu:BE", "value": "1"},
+    {"key": "eu:BG", "value": "1"}
   ]
 }
 ```
@@ -332,15 +351,27 @@ const kvsHandle = cf.kvs();
 
 async function handler(event) {
     const request = event.request;
-    const country = request.headers['cloudfront-viewer-country']?.value;
+    const uri = request.uri;
+    const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined;
     
+    let isEU = false;
     if (country) {
         try {
-            await kvsHandle.get(`eu:${country}`); // If exists, it's EU
-            request.headers['x-gdpr-required'] = { value: 'true' };
+            await kvsHandle.get(`eu:${country}`);
+            isEU = true;
         } catch (err) {
-            // Not EU country
+            // Not EU country, isEU remains false
         }
+    }
+    
+    // Example: Redirect EU users to EU-specific page
+    if (isEU && uri === '/welcome') {
+        return {
+            statusCode: 302,
+            headers: {
+                'location': { value: '/eu/welcome' }
+            }
+        };
     }
     
     return request;
@@ -425,12 +456,12 @@ let val1, val2;
 try {
     val1 = await kvsHandle.get('key1');
 } catch (err) {
-    console.log('key1 not found');
+    // Key not found
 }
 try {
     val2 = await kvsHandle.get('key2');
 } catch (err) {
-    console.log('key2 not found');
+    // Key not found
 }
 ```
 
@@ -444,7 +475,6 @@ try {
     // Use value
 } catch (err) {
     // Handle missing key
-    console.log(`Key not found: ${err}`);
 }
 ```
 
@@ -483,32 +513,22 @@ Keep values under 1KB. For larger data, use references:
 }
 ```
 
-## Decision Tree: KVS vs Hardcoded
+## When to Use KVS
 
-```
-Is data size > 1KB?
-├─ Yes → Use KVS
-└─ No
-   └─ Does data change frequently?
-      ├─ Yes → Use KVS
-      └─ No
-         └─ Is function size > 8KB?
-            ├─ Yes → Use KVS
-            └─ No → Hardcode in function
-```
+**Always use KVS for:**
+- Bulk redirects (any number)
+- Continent mappings (any number of countries)
+- EU country checks (all 27 countries)
+
+**Reason**: Reduces function size, easier to update, consistent approach.
 
 ## Common Use Cases
 
-| Use Case | Recommended Approach | Reason |
-|----------|---------------------|--------|
-| <10 redirects | Hardcode | Simple, fast, no KVS overhead |
-| 10-100 redirects | KVS | Manageable size, easier updates |
-| >100 redirects | KVS | Required for size limits |
-| EU country list (27 countries) | Hardcode | Small, static list |
-| All countries (195+) | KVS | Large list |
-| Continent mapping (195+ entries) | KVS | Large list |
-| Feature flags | KVS | Frequent updates |
-| Static config | Hardcode | No update flexibility needed |
+| Use Case | Approach | Reason |
+|----------|----------|--------|
+| Bulk redirects (any number) | KVS | Efficient lookup, easy updates, scalable |
+| Continent mapping | KVS | Reduces function size, complete coverage |
+| EU country check | KVS | Reduces function size, consistent approach |
 
 ## Output Strategy for This Skill
 

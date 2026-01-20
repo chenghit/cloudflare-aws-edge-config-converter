@@ -53,26 +53,90 @@ try {
 
 ## CPU Optimization
 
-### Avoid Complex Regex
+### Pattern Optimization Strategy
 
-For matching patterns like `*.example.com`:
+**CRITICAL**: Only optimize simple patterns. Preserve user's regex from `matches` operator.
 
+**Decision tree for each Cloudflare expression:**
+
+```
+Cloudflare operator?
+├─ `eq "value"` → Convert to: `===`
+├─ `ne "value"` → Convert to: `!==`
+├─ `contains "substring"` → Convert to: `includes()`
+├─ `wildcard r"*.domain"` → Convert to: `endsWith('.domain')`
+├─ `wildcard r"/prefix/*"` → Convert to: `startsWith('/prefix/')`
+├─ `strict wildcard` → Same as wildcard but case-sensitive
+├─ `matches r"regex"` → Keep original regex (user explicitly chose regex)
+├─ `starts_with(field, "prefix")` → Convert to: `startsWith()`
+├─ `ends_with(field, "suffix")` → Convert to: `endsWith()`
+└─ `in { ... }` → Convert to: `[...].includes()`
+```
+
+### Safe Conversions
+
+**1. Exact match (`eq`/`ne`)**
 ```javascript
-// ❌ BAD - Complex regex
-if (/^.*\.example\.com$/.test(host)) { }
+// Cloudflare: http.host eq "example.com"
+if (host === 'example.com') { }
 
-// ✅ GOOD - String method
+// Cloudflare: http.host ne "example.com"
+if (host !== 'example.com') { }
+```
+
+**2. Contains (`contains`)**
+```javascript
+// Cloudflare: http.user_agent contains "Mobi"
+const ua = request.headers['user-agent'];
+if (ua && ua.value.includes('Mobi')) { }
+```
+
+**3. Simple wildcard suffix (`wildcard r"*.domain"`)**
+```javascript
+// Cloudflare: http.host wildcard r"*.example.com"
 if (host.endsWith('.example.com')) { }
 ```
 
-### Optimize Wildcard Matching
+**4. Simple wildcard prefix (`wildcard r"/path/*"`)**
+```javascript
+// Cloudflare: http.request.uri.path wildcard r"/api/*"
+if (uri.startsWith('/api/')) { }
+```
 
-For URL patterns like `https://*.example.com/path/*`:
+**5. Functions (`starts_with`, `ends_with`)**
+```javascript
+// Cloudflare: starts_with(http.request.uri.path, "/api/")
+if (uri.startsWith('/api/')) { }
 
-Break into components:
-1. Host: Use `endsWith('.example.com')`
-2. URI path: Use `startsWith('/path/')`
-3. Query string: Use `rawQueryString()` if needed
+// Cloudflare: ends_with(http.request.uri.path, ".html")
+if (uri.endsWith('.html')) { }
+```
+
+**6. In set (`in { ... }`)**
+```javascript
+// Cloudflare: http.host in {"a.com" "b.com" "c.com"}
+if (['a.com', 'b.com', 'c.com'].includes(host)) { }
+```
+
+### Preserve Original Regex
+
+**Do NOT optimize - keep as regex:**
+
+```javascript
+// Cloudflare: http.request.uri.path matches r"^/products/([0-9]+)/([a-z\-]+)$"
+// Keep as:
+if (/^\/products\/([0-9]+)\/([a-z\-]+)$/.test(uri)) { }
+
+// Cloudflare: http.request.uri.path matches "^/blog/([0-9]{4})/([0-9]{2})/([a-z0-9\\-]+)$"
+// Keep as:
+if (/^\/blog\/([0-9]{4})\/([0-9]{2})\/([a-z0-9\-]+)$/.test(uri)) { }
+```
+
+**Why preserve `matches` operator?**
+- User explicitly chose regex for complex pattern matching
+- Changing to string methods would alter matching logic
+- CloudFront Functions support regex - use it when needed
+- The `matches` operator requires Business/Enterprise plan, indicating intentional use
 
 ## Runtime Requirements
 
@@ -164,7 +228,8 @@ Before (with comments):
 ```javascript
 // Check if request is from EU country
 const euCountries = ['AT', 'BE', 'BG', ...];
-const country = request.headers['cloudfront-viewer-country']?.value;
+const countryHeader = request.headers['cloudfront-viewer-country'];
+const country = countryHeader ? countryHeader.value : undefined;
 if (euCountries.includes(country)) {
     // Add GDPR header
     request.headers['x-gdpr-required'] = { value: 'true' };
@@ -174,7 +239,8 @@ if (euCountries.includes(country)) {
 After (minified):
 ```javascript
 const eu=['AT','BE','BG',...];
-const c=request.headers['cloudfront-viewer-country']?.value;
+const ch=request.headers['cloudfront-viewer-country'];
+const c=ch?ch.value:undefined;
 if(eu.includes(c))request.headers['x-gdpr-required']={value:'true'};
 ```
 
