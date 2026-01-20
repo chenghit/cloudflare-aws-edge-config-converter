@@ -149,7 +149,7 @@ const uri = event.request.uri;
 ### Get query string
 ```javascript
 // Get specific query parameter
-const id = event.request.querystring.ID?.value;
+const id = event.request.querystring.ID ? request.querystring.ID.value : undefined;
 
 // Get raw query string
 const rawQs = event.request.rawQueryString();
@@ -158,8 +158,8 @@ const rawQs = event.request.rawQueryString();
 ### Get headers
 ```javascript
 // Get specific header
-const host = event.request.headers.host?.value;
-const country = event.request.headers['cloudfront-viewer-country']?.value;
+const host = event.request.headers.host ? request.headers.host.value : undefined;
+const country = event.request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined;
 
 // Check if header exists
 if (event.request.headers['user-agent']) {
@@ -170,7 +170,7 @@ if (event.request.headers['user-agent']) {
 ### Get cookies
 ```javascript
 // Get specific cookie
-const sessionId = event.request.cookies.sessionId?.value;
+const sessionId = event.request.cookies.sessionId ? request.cookies.sessionId.value : undefined;
 
 // Check if cookie exists
 if (event.request.cookies.auth) {

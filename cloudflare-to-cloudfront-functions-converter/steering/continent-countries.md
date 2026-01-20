@@ -82,37 +82,41 @@ AQ, BV, TF, HM, GS
 
 ## Usage in CloudFront Functions
 
-### Option 1: Hardcode Small Subset
+**Strategy: Always use KVS**
 
-If you only need to check a few countries:
+Store country-to-continent mapping in KVS to reduce function size. Use prefix `continent:` for keys.
 
+**CloudFront Function:**
 ```javascript
+import cf from 'cloudfront';
+
+const kvsHandle = cf.kvs();
+
 async function handler(event) {
     const request = event.request;
-    const country = request.headers['cloudfront-viewer-country']?.value;
+    const uri = request.uri;
+    const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined;
     
-    // Hardcode small continent map
-    const asiaCountries = ['CN', 'JP', 'IN', 'SG', 'KR'];
-    const europeCountries = ['GB', 'DE', 'FR', 'IT', 'ES'];
-    
-    let continent;
-    if (asiaCountries.includes(country)) {
-        continent = 'AS';
-    } else if (europeCountries.includes(country)) {
-        continent = 'EU';
-    }
-    
-    if (continent) {
-        request.headers['x-continent'] = { value: continent };
+    if (country) {
+        try {
+            const continent = await kvsHandle.get(`continent:${country}`);
+            // Example: Redirect Asia users to Asia-specific page
+            if (continent === 'AS' && uri === '/welcome') {
+                return {
+                    statusCode: 302,
+                    headers: {
+                        'location': { value: '/asia/welcome' }
+                    }
+                };
+            }
+        } catch (err) {
+            // Country not in mapping, continue with default behavior
+        }
     }
     
     return request;
 }
 ```
-
-### Option 2: Use Key Value Store for All Countries
-
-If you need complete coverage (195+ countries), use KVS:
 
 **KVS JSON** (with prefix `continent:`):
 ```json
@@ -137,14 +141,23 @@ const kvsHandle = cf.kvs();
 
 async function handler(event) {
     const request = event.request;
-    const country = request.headers['cloudfront-viewer-country']?.value;
+    const uri = request.uri;
+    const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined;
     
     if (country) {
         try {
             const continent = await kvsHandle.get(`continent:${country}`);
-            request.headers['x-continent'] = { value: continent };
+            // Example: Redirect Asia users to Asia-specific page
+            if (continent === 'AS' && uri === '/welcome') {
+                return {
+                    statusCode: 302,
+                    headers: {
+                        'location': { value: '/asia/welcome' }
+                    }
+                };
+            }
         } catch (err) {
-            console.log(`Country ${country} not in continent mapping`);
+            // Country not in mapping, continue with default behavior
         }
     }
     
@@ -431,12 +444,4 @@ For reference, here's the complete mapping for all 239 countries/territories:
 - **KVS entries needed**: 239 (with `continent:` prefix)
 - **Estimated KVS size**: ~10KB (well within 5MB limit)
 
-## Decision Guide
-
-| Scenario | Recommendation |
-|----------|---------------|
-| Need <10 countries | Hardcode in function |
-| Need 10-50 countries | Consider hardcoding if function size allows |
-| Need >50 countries | Use KVS |
-| Need all 239 countries | Use KVS (required) |
-| Function size >8KB | Move to KVS to free up space |
+**Note**: Only include the countries actually used in Cloudflare rules. If rules only check for Asia (AS) continent, only include the 53 Asian countries in KVS.

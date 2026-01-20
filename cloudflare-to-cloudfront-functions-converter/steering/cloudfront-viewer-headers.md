@@ -95,27 +95,35 @@ These headers are available in CloudFront Functions without any configuration:
 
 ```javascript
 // Get country code
-const country = request.headers['cloudfront-viewer-country']?.value;
+const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : undefined;
 
 // Get client IP (without port)
 const clientIp = event.viewer.ip;
 
 // Get client IP with port
-const clientAddress = request.headers['cloudfront-viewer-address']?.value;
-const [ip, port] = clientAddress ? clientAddress.split(':') : [clientIp, ''];
+const clientAddress = request.headers['cloudfront-viewer-address'] ? request.headers['cloudfront-viewer-address'].value : undefined;
+let ip, port;
+if (clientAddress) {
+    const parts = clientAddress.split(':');
+    ip = parts[0];
+    port = parts[1];
+} else {
+    ip = clientIp;
+    port = '';
+}
 
 // Get ASN
-const asn = request.headers['cloudfront-viewer-asn']?.value;
+const asn = request.headers['cloudfront-viewer-asn'] ? request.headers['cloudfront-viewer-asn'].value : undefined;
 
 // Check if mobile device
-const isMobile = request.headers['cloudfront-is-mobile-viewer']?.value === 'true';
+const isMobile = request.headers['cloudfront-is-mobile-viewer'] ? request.headers['cloudfront-is-mobile-viewer'].value : undefined === 'true';
 
 // Get geographic coordinates
-const lat = request.headers['cloudfront-viewer-latitude']?.value;
-const lon = request.headers['cloudfront-viewer-longitude']?.value;
+const lat = request.headers['cloudfront-viewer-latitude'] ? request.headers['cloudfront-viewer-latitude'].value : undefined;
+const lon = request.headers['cloudfront-viewer-longitude'] ? request.headers['cloudfront-viewer-longitude'].value : undefined;
 
 // Get HTTP version
-const httpVersion = request.headers['cloudfront-viewer-http-version']?.value;
+const httpVersion = request.headers['cloudfront-viewer-http-version'] ? request.headers['cloudfront-viewer-http-version'].value : undefined;
 ```
 
 ## Important Notes

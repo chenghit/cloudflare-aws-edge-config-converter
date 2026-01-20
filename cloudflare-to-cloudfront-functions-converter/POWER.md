@@ -13,6 +13,7 @@ Convert Cloudflare transformation rules to CloudFront Functions (JavaScript Runt
 
 **Steering files**: Reference files in this power's `steering/` directory
 - `steering/field-mapping.md`
+- `steering/operator-conversion.md`
 - `steering/cloudfront-function-limits.md`
 - `steering/cloudfront-event-structure.md`
 - `steering/cloudfront-viewer-headers.md`
@@ -53,6 +54,7 @@ This power converts **transformation rules only**, not security rules:
 ## Core Principles
 
 Read these references before conversion:
+- `steering/operator-conversion.md` - **CRITICAL**: Cloudflare operators to CloudFront conversion rules
 - `steering/cloudflare-rule-execution-order.md` - **CRITICAL**: Cloudflare rule execution order (must follow this order in generated code)
 - `steering/cloudfront-function-limits.md` - All constraints (10KB size, 2MB memory, ~1ms execution)
 - `steering/cloudfront-event-structure.md` - Event object structure
@@ -64,7 +66,9 @@ Read these references before conversion:
 **CRITICAL constraints**:
 - Do NOT use optional chaining (`?.`) or array/object destructuring
 - Use sequential `await`, not `Promise.all()`
-- Optimize for CPU efficiency (avoid complex regex)
+- Convert simple Cloudflare operators to string methods (see `cloudfront-function-limits.md`)
+- Preserve regex from `matches` operator unchanged
+- Preserve rule execution order from Cloudflare configuration
 
 **CRITICAL: Understanding URL Handling Differences**
 
@@ -236,16 +240,17 @@ Ask user to confirm completeness and correctness.
 ### 5. Generate CloudFront Function Code
 
 **Before generation, you MUST:**
-1. Read `steering/field-mapping.md` completely to understand Cloudflare to CloudFront field mappings
-2. Read `steering/cloudflare-rule-execution-order.md` completely to understand Cloudflare rule execution order (must follow this order in generated code)
-3. Read `steering/cloudfront-helper-methods.md` for available helper methods
-4. Read `steering/bulk-redirects-handling.md` for bulk redirect KVS generation rules
-5. Read `steering/unsupported-syntax.md` for forbidden JavaScript syntax
-6. Ask user for custom function name (default: `cloudflare-migrated-viewer-request`)
+1. Read `steering/operator-conversion.md` completely to understand Cloudflare operator to CloudFront conversion rules
+2. Read `steering/field-mapping.md` completely to understand Cloudflare to CloudFront field mappings
+3. Read `steering/cloudflare-rule-execution-order.md` completely to understand Cloudflare rule execution order (must follow this order in generated code)
+4. Read `steering/cloudfront-helper-methods.md` for available helper methods
+5. Read `steering/bulk-redirects-handling.md` for bulk redirect KVS generation rules
+6. Read `steering/unsupported-syntax.md` for forbidden JavaScript syntax
+7. Ask user for custom function name (default: `cloudflare-migrated-viewer-request`)
 
 **CRITICAL: Continent Matching Logic**
 
-When converting Cloudflare rules that use `ip.src.continent`:
+When converting Cloudflare rules that use `ip.src.continent` or `ip.src.is_in_european_union`:
 
 1. **Understand the data types**:
    - Cloudflare `ip.src.continent` returns: `AS`, `EU`, `AF`, `NA`, `SA`, `OC`, `AN` (continent codes)
@@ -259,34 +264,32 @@ When converting Cloudflare rules that use `ip.src.continent`:
    
    // ❌ WRONG - 'EU' is a continent code, not a country code
    if (country === 'EU' && uri.startsWith('/path')) {
-   
-   // ✅ CORRECT - Derive continent from country first
-   const asiaCountries = ['CN','JP','IN',...];
-   const isAsia = country && asiaCountries.includes(country);
-   if (isAsia && uri.startsWith('/path')) {
    ```
 
-3. **KVS vs Hardcode Decision**
+3. **Always use KVS for continent and EU mappings**
 
-Apply this decision tree for all data types:
+Store country-to-continent mappings and EU country flags in KVS:
+- Continent mapping: Use prefix `continent:` (e.g., `continent:US` → `NA`)
+- EU countries: Use prefix `eu:` (e.g., `eu:AT` → `1`)
 
+**Example:**
+```javascript
+// ✅ CORRECT - Look up continent from country via KVS
+try {
+    const continent = await kvsHandle.get(`continent:${country}`);
+    if (continent === 'AS' && uri.startsWith('/path')) {
+        // Handle Asia-specific logic
+    }
+} catch (err) {
+    // Country not in mapping
+}
 ```
-Is data >1KB OR frequently updated?
-├─ Yes → Use KVS
-└─ No → Is function size >6KB?
-   ├─ Yes → Move data to KVS
-   └─ No → Hardcode (better performance)
-```
 
-**Continent size reference** (for quick estimation):
-- EU: 50 countries (~300 bytes) | AS: 53 (~318 bytes) | AF: 56 (~336 bytes)
-- NA: 36 (~216 bytes) | SA: 14 (~84 bytes) | OC: 25 (~150 bytes)
-
-**Common cases**:
-- **Bulk redirects**: Always KVS (efficient lookup, easy updates, scalable)
-- **Single continent** (<100 countries, <600 bytes): Hardcode
-- **2-3 continents** (100-150 countries, <900 bytes): Hardcode if function <6KB, else KVS
-- **4+ continents or global**: Use KVS
+**Why always use KVS:**
+- Reduces function size significantly
+- Complete coverage of all 239 countries available in `continent-countries.md`
+- Easier to update without redeploying function
+- Consistent approach for all geographic data
 
 **CRITICAL: Bulk Redirects Processing**
 
@@ -385,14 +388,14 @@ Read and apply `steering/validation-checklist.md` completely. This checklist cov
 1. **Syntax validation** - No forbidden ES6+ features (optional chaining, destructuring, etc.)
 2. **Async operations** - Sequential await, no Promise.all()
 3. **Rule execution order** - Redirect Rules → URL Rewrites → Bulk Redirects → Header Transforms
-4. **Continent logic** - Derive from country code, never compare country to continent code
-5. **EU country check** - Complete 27-country list, hardcode recommended
+4. **Continent logic** - Use KVS with prefix `continent:`, never compare country to continent code
+5. **EU country check** - Use KVS with prefix `eu:`, all 27 countries included
 6. **Bulk redirects** - Correct KVS entry generation (1 or 2 entries per rule)
 7. **Query string handling** - Preserve/append logic correct
 8. **Header handling** - Lowercase names, correct CloudFront viewer headers
-9. **KVS decision** - Data size and update frequency justify KVS vs hardcode
+9. **KVS usage** - Continent and EU mappings in KVS
 10. **Size validation** - Function <10KB, minified version if >6KB
-11. **Performance optimization** - Early returns, string methods over regex
+11. **Performance optimization** - Simple operators to string methods, preserve `matches` regex
 12. **Code structure** - Correct imports, function signature, returns
 13. **Output files** - All required files generated with correct format
 
@@ -517,6 +520,7 @@ Before delivering files to user, verify:
 
 Read these references as needed during conversion:
 
+- `steering/operator-conversion.md` - Cloudflare operators to CloudFront conversion rules
 - `steering/cloudfront-function-limits.md` - Size, memory, execution time limits
 - `steering/cloudfront-event-structure.md` - Event object structure
 - `steering/cloudfront-viewer-headers.md` - Available CloudFront headers

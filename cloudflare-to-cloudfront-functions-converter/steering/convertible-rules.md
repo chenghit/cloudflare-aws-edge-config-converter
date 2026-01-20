@@ -117,47 +117,32 @@ These Cloudflare fields can be matched in CloudFront Functions:
 
 ### Continent and EU
 - `ip.src.continent` → Derive from country code using continent mapping (see `continent-countries.md`)
-  - **Decision**: If only a few countries needed, hardcode in function
-  - **Decision**: If many countries needed, use KVS with prefix `continent:`
-
 - `ip.src.is_in_european_union` → Check against EU country list
-  - EU countries: `['AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU','IE','IT','LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK']`
-  - **Decision**: If function size allows, hardcode array in function
-  - **Decision**: If function size constrained, use KVS with prefix `eu:`
+  - EU countries: `AT, BE, BG, CY, CZ, DE, DK, EE, ES, FI, FR, GR, HR, HU, IE, IT, LT, LU, LV, MT, NL, PL, PT, RO, SE, SI, SK`
 
 ### HTTP Version
 - `http.request.version` → `request.headers['cloudfront-viewer-http-version'].value`
 
 ## Optimization Guidelines
 
-### Host Matching
-For patterns like `*.example.com`:
+### Pattern Conversion
 
-```javascript
-// ❌ BAD - Complex regex
-if (/^.*\.example\.com$/.test(host)) { }
+When converting Cloudflare expressions to CloudFront Functions, apply these conversions:
 
-// ✅ GOOD - String method
-if (host.endsWith('.example.com')) { }
-```
+**Simple operators → String methods:**
+- `eq "value"` → `===`
+- `ne "value"` → `!==`
+- `contains "substring"` → `includes()`
+- `wildcard r"*.domain"` → `endsWith('.domain')`
+- `wildcard r"/prefix/*"` → `startsWith('/prefix/')`
+- `starts_with(field, "prefix")` → `startsWith()`
+- `ends_with(field, "suffix")` → `endsWith()`
+- `in { ... }` → `[...].includes()`
 
-### Path Matching
-For patterns like `/path/*`:
+**Preserve regex:**
+- `matches r"regex"` → Keep original regex unchanged
 
-```javascript
-// ❌ BAD - Regex
-if (/^\/path\/.*$/.test(uri)) { }
-
-// ✅ GOOD - String method
-if (uri.startsWith('/path/')) { }
-```
-
-### Combined Matching
-For URL patterns like `https://*.example.com/path/*`:
-
-Break into components:
-1. Host: `host.endsWith('.example.com')`
-2. URI: `uri.startsWith('/path/')`
+See `cloudfront-function-limits.md` for detailed conversion examples.
 3. Query: `rawQueryString()` if needed
 
 ## Summary
