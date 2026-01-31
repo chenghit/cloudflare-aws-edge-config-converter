@@ -1,7 +1,7 @@
-# Power 3-4 Architecture Design: Cloudflare to CloudFront Migration
+# Power 3-11 Architecture Design: Cloudflare to CloudFront Migration
 
-**Version:** 1.0  
-**Last Updated:** 2026-01-13
+**Version:** 2.0  
+**Last Updated:** 2026-01-31
 
 ---
 
@@ -10,12 +10,14 @@
 1. [Overview](#overview)
 2. [Architecture Overview](#architecture-overview)
 3. [Power 3: cloudflare-cdn-config-analyzer](#power-3-cloudflare-cdn-config-analyzer)
-4. [Power 4: cloudfront-migration-orchestrator](#power-4-cloudfront-migration-orchestrator)
-5. [Converter Powers (5-9)](#converter-powers-5-9)
-6. [Complete Workflow](#complete-workflow)
-7. [Key Design Decisions](#key-design-decisions)
-8. [Implementation Notes](#implementation-notes)
-9. [Appendix](#appendix)
+4. [Power 4: cloudfront-implementation-planner](#power-4-cloudfront-implementation-planner)
+5. [Power 5: implementation-plan-validator](#power-5-implementation-plan-validator)
+6. [Power 7: cloudfront-migration-orchestrator](#power-6-cloudfront-migration-orchestrator)
+7. [Converter Powers (7-11)](#converter-powers-7-11)
+8. [Complete Workflow](#complete-workflow)
+9. [Key Design Decisions](#key-design-decisions)
+10. [Implementation Notes](#implementation-notes)
+11. [Appendix](#appendix)
 
 ---
 
@@ -25,6 +27,7 @@ This document describes the architecture design for migrating Cloudflare CDN con
 
 ### Key Design Principles
 
+- ✅ **Separation of concerns** - Analyzer (parse), Planner (decide), Orchestrator (assign)
 - ✅ **Implementation-based task assignment** - Assign tasks based on CloudFront implementation method (not Cloudflare rule type)
 - ✅ **Functions first, then configuration** - Convert CloudFront Functions and Lambda@Edge first, then generate Terraform configuration
 - ✅ **Separate sessions** - Execute each skill in separate Kiro CLI sessions to avoid context pollution
@@ -38,11 +41,13 @@ This document describes the architecture design for migrating Cloudflare CDN con
 - **CloudFront:** Distribution-level configuration with Cache Behaviors as the core concept
 
 **Solution:** Multi-stage conversion with human-in-the-loop decision making:
-1. **Analyze** - Parse Cloudflare config and determine implementation methods
+1. **Analyze** - Parse Cloudflare config, group by hostname, identify decision points
 2. **Decide** - User provides business context and cost acceptance
-3. **Orchestrate** - Generate task assignments for converter powers
-4. **Convert** - Execute specialized converters in separate sessions
-5. **Deploy** - Apply Terraform configuration
+3. **Plan** - Determine CloudFront implementation methods based on config + decisions
+4. **Validate** - Verify implementation plan correctness (critical: wrong plan = wrong converters)
+5. **Orchestrate** - Generate task assignments for converter powers
+6. **Convert** - Execute specialized converters in separate sessions
+7. **Deploy** - Apply Terraform configuration
 
 ### Why Group Rules by Proxied DNS Record?
 
@@ -112,33 +117,38 @@ function handler(event) {
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Power 3: Analyzer                        │
-│  Input: Cloudflare configs → Output: Analysis + Plan       │
+│              Power 3: Analyzer (Parse & Group)              │
+│  Input: Cloudflare configs → Output: Hostname-based summary│
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│         Power 4: Planner (Implementation Decision)          │
+│  Input: Config summary → Output: Implementation plan       │
 └─────────────────────────────────────────────────────────────┘
                               ↓
                     User fills decisions
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
-│                 Power 4: Orchestrator                       │
+│            Power 7: Orchestrator (Task Assignment)          │
 │  Input: Plan + Decisions → Output: Task assignments        │
 └─────────────────────────────────────────────────────────────┘
                               ↓
               ┌───────────────┴───────────────┐
               ↓                               ↓
 ┌─────────────────────────┐   ┌─────────────────────────┐
-│ Power 5: Viewer Request │   │ Power 6: Viewer Response│
+│ Power 8: Viewer Request │   │ Power 9: Viewer Response│
 │   CloudFront Function   │   │   CloudFront Function   │
 └─────────────────────────┘   └─────────────────────────┘
               ↓                               ↓
 ┌─────────────────────────┐   ┌─────────────────────────┐
-│ Power 7: Origin Request │   │ Power 8: Origin Response│
+│ Power 10: Origin Request │   │ Power 11: Origin Response│
 │      Lambda@Edge        │   │      Lambda@Edge        │
 └─────────────────────────┘   └─────────────────────────┘
               ↓                               ↓
               └───────────────┬───────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
-│          Power 9: CloudFront Config Generator               │
+│         Power 11: CloudFront Config Generator               │
 │  Input: Task + Functions + Lambda → Output: Terraform      │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -150,7 +160,9 @@ function handler(event) {
 ## Power 3: cloudflare-cdn-config-analyzer
 
 ### Responsibility
-Configuration analysis + Implementation method determination + User decision collection
+Parse Cloudflare CDN configurations and group rules by proxied DNS records (hostnames).
+
+**Key Point:** This power does NOT make implementation decisions. It only parses and organizes Cloudflare configurations.
 
 ### Trigger Keywords
 - `analyze cloudflare cdn config`
@@ -172,22 +184,21 @@ Cloudflare configuration files (all CDN-related):
 
 ### Output Files
 
-#### 1. `cdn-config-analysis.md`
-Configuration analysis report grouped by proxied DNS records.
+#### `hostname-based-config-summary.md`
+Configuration summary grouped by proxied DNS records.
 
 **Structure:**
 ```markdown
-# Cloudflare CDN Configuration Analysis
+# Cloudflare CDN Configuration Summary
 
 ## Summary
 - Total Proxied DNS Records: 3
 - Total Rules: 45
-- Convertible Rules: 38
-- Non-convertible Rules: 7
 
 ## DNS Record: example.com
 - Type: CNAME
 - Value: origin.example.com
+- Proxied: Yes
 - Total Rules: 15
 
 ### Cache Rules (5 rules)
@@ -197,27 +208,75 @@ Configuration analysis report grouped by proxied DNS records.
 | cache-2 | 2 | `http.request.uri.path matches ".*\\.jpg$"` | Set cache TTL | TTL: 86400s |
 
 ### Origin Rules (3 rules)
-[Similar structure...]
+| Rule ID | Priority | Match Expression | Action | Settings |
+|---------|----------|------------------|--------|----------|
+| origin-1 | 1 | `http.request.uri.path matches "^/api/.*"` | Override origin | Host: api-backend.example.com |
 
-### Transform Rules (7 rules)
-[Similar structure...]
+### Redirect Rules (2 rules)
+| Rule ID | Priority | Match Expression | Target URL | Status Code |
+|---------|----------|------------------|------------|-------------|
+| redirect-1 | 1 | `http.request.uri.path eq "/old"` | `/new` | 301 |
+
+### URL Rewrite Rules (2 rules)
+| Rule ID | Priority | Match Expression | Rewrite Action |
+|---------|----------|------------------|----------------|
+| rewrite-1 | 1 | `http.request.uri.path matches "^/api/v1/(.*)"` | `/v2/$1` |
+
+### Request Header Transform Rules (2 rules)
+| Rule ID | Priority | Match Expression | Header Action |
+|---------|----------|------------------|---------------|
+| header-1 | 1 | `http.request.uri.path matches "^/api/.*"` | Set `X-API-Version: 2.0` |
+
+### Response Header Transform Rules (1 rule)
+| Rule ID | Priority | Match Expression | Header Action |
+|---------|----------|------------------|---------------|
+| resp-header-1 | 1 | `true` | Set `X-Frame-Options: DENY` |
 
 ---
 
 ## DNS Record: api.example.com
+- Type: A
+- Value: 203.0.113.10
+- Proxied: Yes
+- Total Rules: 10
+
 [Similar structure...]
 
 ---
 
 ## Global Rules (no http.host match)
-These rules may apply to multiple DNS records. User decision required.
+These rules may apply to multiple DNS records. User decision required for assignment.
 
 ### Cache Rules (2 rules)
 [Similar structure...]
 ```
 
-#### 2. `implementation-plan.md`
-**Core output**: Determines implementation method for each rule.
+**Key Characteristics:**
+- Pure data extraction, no implementation decisions
+- Organized by hostname for CloudFront Distribution alignment
+- Preserves all Cloudflare rule details
+- Identifies global rules that need user assignment
+
+---
+
+## Power 4: cloudfront-implementation-planner
+
+### Responsibility
+Determine CloudFront implementation methods for each Cloudflare rule based on technical requirements and constraints.
+
+**Key Point:** This power makes technical decisions about HOW to implement each rule in CloudFront, but does NOT make business/cost decisions (that's for users).
+
+### Trigger Keywords
+- `plan cloudfront implementation`
+- `determine cloudfront implementation methods`
+
+### Input Files
+- `hostname-based-config-summary.md` (from Power 3)
+
+### Output Files
+
+#### 1. `implementation-plan.md`
+**Core output**: Maps each rule to CloudFront implementation method.
 
 **Structure:**
 ```markdown
@@ -228,8 +287,8 @@ These rules may apply to multiple DNS records. User decision required.
 ### Rules Requiring Viewer Request CloudFront Function
 | Rule ID | Original Type | Rule Summary | Reason |
 |---------|---------------|--------------|--------|
-| redirect-2 | Redirect Rule | Redirect `/old` to `/new` | Simple redirect logic |
-| header-3 | Request Header Transform | Add `X-Custom-Header` | Simple header manipulation |
+| redirect-1 | Redirect Rule | Redirect `/old` to `/new` | Simple redirect logic, no external data needed |
+| header-1 | Request Header Transform | Add `X-API-Version: 2.0` | Simple header manipulation |
 
 **Estimated Function Size:** ~2KB  
 **Complexity:** Low  
@@ -238,6 +297,134 @@ These rules may apply to multiple DNS records. User decision required.
 ---
 
 ### Rules Requiring Viewer Response CloudFront Function
+| Rule ID | Original Type | Rule Summary | Reason |
+|---------|---------------|--------------|--------|
+| resp-header-1 | Response Header Transform | Add `X-Frame-Options: DENY` | Simple response header manipulation |
+
+**Estimated Function Size:** ~1KB  
+**Complexity:** Low  
+**Note:** This domain's rules will be in a separate function file (`viewer-response-example-com.js`).
+
+---
+
+### Rules Requiring Origin Request Lambda@Edge
+| Rule ID | Original Type | Rule Summary | Reason |
+|---------|---------------|--------------|--------|
+| origin-1 | Origin Rule | Dynamic origin selection based on path | Need to modify origin before cache lookup |
+| rewrite-1 | URL Rewrite Rule | Complex regex pattern `/api/v1/(.*)` → `/v2/$1` | Regex complexity exceeds CloudFront Function limits |
+
+**Estimated Lambda Size:** ~5KB  
+**Complexity:** Medium  
+**Cost Impact:** Moderate (runs on cache miss only, ~10-30% of requests)  
+**Note:** Lambda@Edge doesn't have strict size limits, but domain-based splitting provides clarity and independent deployment.
+
+---
+
+### Rules Requiring Origin Response Lambda@Edge
+| Rule ID | Original Type | Rule Summary | Reason |
+|---------|---------------|--------------|--------|
+| error-1 | Custom Error Rule | Custom error page with dynamic content | Need to generate response body |
+
+**Estimated Lambda Size:** ~3KB  
+**Complexity:** Low  
+**Cost Impact:** Moderate (runs on cache miss only, ~10-30% of requests)
+
+---
+
+### Rules Requiring CloudFront Configuration/Policy
+| Rule ID | Original Type | Rule Summary | Implementation |
+|---------|---------------|--------------|----------------|
+| cache-1 | Cache Rule | Cache `/api/*` with TTL 0s | Cache Behavior (path: `/api/*`) + Cache Policy (TTL: 0s) |
+| cache-2 | Cache Rule | Cache `*.jpg` for 1 day | Cache Behavior (path: `*.jpg`) + Cache Policy (TTL: 86400s) |
+
+**Configuration Complexity:** Low
+
+---
+
+### Rules Requiring Viewer Lambda@Edge (High Cost - Non-Convertible)
+| Rule ID | Original Type | Rule Summary | Why Viewer Lambda Needed | Estimated Cost Impact |
+|---------|---------------|--------------|--------------------------|----------------------|
+| auth-1 | Custom Rule | Real-time JWT validation on every request | Must run on every request including cache hits | **CRITICAL: $50-500 per million requests** |
+
+⚠️ **WARNING:** These rules require Viewer Request/Response Lambda@Edge, which runs on EVERY request including cache hits. This is **10-100x more expensive** than Origin Request/Response Lambda.
+
+**Cost Comparison:**
+| Lambda Type | Execution Frequency | Relative Cost | Typical Use Case |
+|-------------|-------------------|---------------|------------------|
+| Viewer Request Lambda | Every request | 100x | Rarely recommended |
+| Origin Request Lambda | Cache miss only | 10x | Common |
+| Origin Response Lambda | Cache miss only | 10x | Common |
+
+---
+
+## DNS Record: api.example.com
+[Similar structure...]
+```
+
+#### 2. `user-decisions-template.md`
+Template for users to make business/cost decisions.
+
+**Structure:**
+```markdown
+# User Decisions Required
+
+## High-Cost Rules Requiring Approval
+
+### DNS Record: example.com
+
+#### Rule: auth-1 (Viewer Request Lambda@Edge)
+- **Description:** Real-time JWT validation on every request
+- **Cost Impact:** $50-500 per million requests (100x more expensive than Origin Lambda)
+- **Alternative:** Move authentication to origin or use CloudFront signed URLs
+- **Your Decision:** [ ] Proceed with Viewer Lambda (accept high cost) / [ ] Use alternative approach / [ ] Skip this rule
+
+---
+
+## Global Rules Assignment
+
+### Rule: cache-global-1
+- **Description:** Cache all static assets for 1 day
+- **Applies To:** (Select one or more)
+  - [ ] example.com
+  - [ ] api.example.com
+  - [ ] cdn.example.com
+
+---
+
+[Additional decisions...]
+```
+
+### Decision Logic
+
+**Implementation Method Selection Criteria:**
+
+1. **CloudFront Function (Viewer Request/Response)**
+   - Simple logic (< 10KB code size)
+   - No external dependencies
+   - Fast execution (< 1ms)
+   - Examples: Simple redirects, header manipulation, URL rewrites
+
+2. **Lambda@Edge (Origin Request/Response)**
+   - Complex logic or external dependencies
+   - Regex patterns too complex for CloudFront Function
+   - Need to access/modify origin
+   - Examples: Dynamic origin selection, complex transformations
+
+3. **CloudFront Configuration/Policy**
+   - Static configuration (no dynamic logic)
+   - Examples: Cache TTL, compression, CORS headers
+
+4. **Viewer Lambda@Edge (Non-Convertible)**
+   - Must run on EVERY request (including cache hits)
+   - Examples: Real-time authentication, A/B testing on every request
+   - **Marked as non-convertible due to extreme cost**
+
+---
+
+## Power 7: cloudfront-migration-orchestrator
+
+### Responsibility
+Generate task assignment files for converter powers based on implementation plan and user decisions.
 | Rule ID | Original Type | Rule Summary | Reason |
 |---------|---------------|--------------|--------|
 | header-5 | Response Header Transform | Add security headers to response | Simple response header manipulation |
@@ -983,9 +1170,9 @@ After all conversions are complete:
 
 ---
 
-## Converter Powers (5-9)
+## Converter Powers (7-11)
 
-### Power 5: viewer-request-function-converter
+### Power 7: viewer-request-function-converter
 
 **Responsibility:** Convert rules to Viewer Request CloudFront Functions
 
@@ -1007,7 +1194,7 @@ After all conversions are complete:
 
 ---
 
-### Power 6: viewer-response-function-converter
+### Power 8: viewer-response-function-converter
 
 **Responsibility:** Convert rules to Viewer Response CloudFront Functions
 
@@ -1029,7 +1216,7 @@ After all conversions are complete:
 
 ---
 
-### Power 7: origin-request-lambda-converter
+### Power 9: origin-request-lambda-converter
 
 **Responsibility:** Convert rules to Origin Request Lambda@Edge
 
@@ -1053,7 +1240,7 @@ After all conversions are complete:
 
 ---
 
-### Power 8: origin-response-lambda-converter
+### Power 10: origin-response-lambda-converter
 
 **Responsibility:** Convert rules to Origin Response Lambda@Edge
 
@@ -1076,7 +1263,7 @@ After all conversions are complete:
 
 ---
 
-### Power 9: cloudfront-config-generator
+### Power 11: cloudfront-config-generator
 
 **Responsibility:** Generate CloudFront Terraform configuration
 
@@ -1152,7 +1339,7 @@ After all conversions are complete:
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ Session 3: Viewer Request Function (Power 5)               │
+│ Session 3: Viewer Request Function (Power 7)               │
 ├─────────────────────────────────────────────────────────────┤
 │ User: "Convert viewer request CloudFront Function using     │
 │        ./task-assignments/task-viewer-request-function.md"  │
@@ -1163,7 +1350,7 @@ After all conversions are complete:
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ Session 4: Viewer Response Function (Power 6)              │
+│ Session 4: Viewer Response Function (Power 8)              │
 ├─────────────────────────────────────────────────────────────┤
 │ User: "Convert viewer response CloudFront Function using    │
 │        ./task-assignments/task-viewer-response-function.md" │
@@ -1174,7 +1361,7 @@ After all conversions are complete:
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ Session 5: Origin Request Lambda (Power 7)                 │
+│ Session 5: Origin Request Lambda (Power 9)                 │
 ├─────────────────────────────────────────────────────────────┤
 │ User: "Convert origin request Lambda@Edge using             │
 │        ./task-assignments/task-origin-request-lambda.md"    │
@@ -1185,7 +1372,7 @@ After all conversions are complete:
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ Session 6: Origin Response Lambda (Power 8)                │
+│ Session 6: Origin Response Lambda (Power 10)                │
 ├─────────────────────────────────────────────────────────────┤
 │ User: "Convert origin response Lambda@Edge using            │
 │        ./task-assignments/task-origin-response-lambda.md"   │
@@ -1196,7 +1383,7 @@ After all conversions are complete:
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│ Session 7: CloudFront Configuration (Power 9)              │
+│ Session 7: CloudFront Configuration (Power 11)              │
 ├─────────────────────────────────────────────────────────────┤
 │ User: "Generate CloudFront Terraform configuration using    │
 │        ./task-assignments/task-cloudfront-config.md         │
@@ -1269,7 +1456,7 @@ After all conversions are complete:
 - **User guidance:** Provide clear instructions in execution guide
 - **Domain-based splitting:** Ensure each domain's tasks are clearly separated
 
-### Converter Powers (5-9) Challenges
+### Converter Powers (7-11) Challenges
 - **Code generation quality:** Must generate production-ready code
 - **Error handling:** Include proper error handling and logging
 - **Optimization:** CloudFront Functions have strict size limits (10KB per function)
@@ -1389,6 +1576,6 @@ The key innovations are:
 **Next Steps:**
 1. Implement Power 3 (Analyzer) first
 2. Test with real Cloudflare configurations
-3. Refine implementation determination logic
-4. Implement Powers 4-9 iteratively
+3. Implement Power 4 (Planner) and Power 5 (Validator)
+4. Implement Powers 6-11 iteratively
 5. Create comprehensive reference documents

@@ -407,51 +407,60 @@ If you use cf-terraforming for your Terraform workflow, you would need to manual
 
 ## Roadmap
 
-### 🚧 Powers 3-9: Complete CDN Configuration Migration Solution (Architecture Design Phase)
+### 🚧 Powers 3-11: Complete CDN Configuration Migration Solution (Architecture Design Phase)
 
 We are designing a comprehensive CDN configuration migration solution that refactors the current single power into multiple specialized powers:
 
 **Architecture Design Documents:**
-- [Power 3-4 Architecture Design (English)](./docs/architecture/power-3-4-design-EN.md)
-- [Power 3-4 架构设计 (中文)](./docs/architecture/power-3-4-design-CN.md)
+- [Power 3-11 Architecture Design (English)](./docs/architecture/power-3-11-design-EN.md)
+- [Power 3-11 架构设计 (中文)](./docs/architecture/power-3-11-design-CN.md)
+- [Architecture Changelog](./docs/architecture/CHANGELOG.md)
 
 **Planned Powers:**
 
 | Power | Responsibility | Output | Status |
 |-------|---------------|--------|--------|
-| **Power 3** | Config Analyzer - Analyze Cloudflare CDN config, group by domain, determine implementation methods | Analysis report, implementation plan, user decision template | 🎨 Architecture Design |
-| **Power 4** | Task Orchestrator - Generate task assignments and execution guide | Task assignment files, execution guide | 🎨 Architecture Design |
-| **Power 5** | Viewer Request Function Converter | CloudFront Function code (one file per domain) | 📝 To Be Designed |
-| **Power 6** | Viewer Response Function Converter | CloudFront Function code (one file per domain) | 📝 To Be Designed |
-| **Power 7** | Origin Request Lambda Converter | Lambda@Edge code | 📝 To Be Designed |
-| **Power 8** | Origin Response Lambda Converter | Lambda@Edge code | 📝 To Be Designed |
-| **Power 9** | CloudFront Config Generator | Terraform configuration, deployment guide | 📝 To Be Designed |
+| **Power 3** | Config Analyzer - Parse Cloudflare CDN config and group by hostname | Hostname-based config summary + user input template | 🎨 Architecture Design |
+| **Power 4** | Implementation Planner - Determine CloudFront implementation methods | Implementation plan | 🎨 Architecture Design |
+| **Power 5** | Plan Validator - Verify implementation plan correctness | Validation report (critical: wrong plan = wrong converters) | 🎨 Architecture Design |
+| **Power 6** | Task Orchestrator - Generate task assignments and execution guide | Task assignment files, execution guide | 🎨 Architecture Design |
+| **Power 7** | Viewer Request Function Converter | CloudFront Function code (one file per domain) | 📝 To Be Designed |
+| **Power 8** | Viewer Response Function Converter | CloudFront Function code (one file per domain) | 📝 To Be Designed |
+| **Power 9** | Origin Request Lambda Converter | Lambda@Edge code | 📝 To Be Designed |
+| **Power 10** | Origin Response Lambda Converter | Lambda@Edge code | 📝 To Be Designed |
+| **Power 11** | CloudFront Config Generator | Terraform configuration, deployment guide | 📝 To Be Designed |
 
 **Key Improvements:**
+- ✅ **Subagent architecture from day one** - All Powers (3-11) implemented as Kiro subagents with isolated contexts
+- ✅ **Separation of concerns** - Analyzer (parse), Planner (decide), Validator (verify), Orchestrator (assign)
+- ✅ **User decision before planning** - Business context informs technical implementation decisions
+- ✅ **Plan validation** - Catch errors before converters execute (no recovery after conversion)
 - ✅ **Domain-based rule grouping** - Meets CloudFront Function 10KB size limit
 - ✅ **Implementation-based task assignment** - Not by Cloudflare rule type
-- ✅ **Multi-stage conversion workflow** - Analyze → Decide → Orchestrate → Convert → Deploy
+- ✅ **Multi-stage conversion workflow** - Analyze → Decide → Plan → Validate → Orchestrate → Convert → Deploy
 - ✅ **Cost-aware design** - Mark high-cost solutions (Viewer Lambda@Edge) as non-convertible
 - ✅ **Stateless workflow** - State transfer via Markdown files, supports batch processing
+- ✅ **Automation scripts** - One-command installation and configuration
 
 **Impact After Implementation:**
 
-⚠️ **When Powers 3-9 are implemented, the current `cloudflare-to-cloudfront-functions-converter` will be deprecated.**
+⚠️ **When Powers 3-11 are implemented, the current `cloudflare-to-cloudfront-functions-converter` will be deprecated.**
 
 Reasons:
-- Powers 3-9 provide more complete CDN configuration conversion (not just Functions)
+- Powers 3-11 provide more complete CDN configuration conversion (not just Functions)
 - Domain-based grouping better handles Function size limits
 - Supports more complex conversion scenarios (Lambda@Edge, Policies, Cache Behaviors)
-- Clearer workflow and task assignment
+- Clearer workflow and task assignment with validation
 
 **Timeline:**
-- 2026 Q1: Complete architecture design, implement Power 3 prototype
-- 2026 Q2: Implement Powers 4-9
-- 2026 Q2 End: Deprecate `cloudflare-to-cloudfront-functions-converter`
-- 2026 Q3: Research subagent architecture for enhanced context isolation
-  - Explore Kiro's subagent capabilities to delegate specialized tasks
-  - Design workflow where planner, orchestrator, and converters run as isolated subagents
-  - Goal: Prevent context mixing and hallucinations by separating concerns within a single conversation
+- 2026 Q1: Complete architecture design, implement Power 3 (Analyzer) as subagent prototype
+- 2026 Q2: Implement Powers 4-11 as subagents with context isolation
+  - Provide automation scripts for Kiro Powers installation and subagent configuration
+  - Deprecate `cloudflare-to-cloudfront-functions-converter`
+- 2026 Q3: Optimize subagent workflow and user experience
+  - Performance tuning for parallel subagent execution
+  - Enhanced error handling and recovery mechanisms
+  - User experience improvements based on feedback
 
 ---
 
