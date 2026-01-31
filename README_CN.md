@@ -2,6 +2,32 @@
 
 **通过AI对话，自动将Cloudflare配置转换为AWS边缘服务配置**
 
+---
+
+## ⚠️ 重要：必需的输入格式
+
+**本工具仅支持由 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 生成的配置文件。**
+
+**❌ 不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)（Cloudflare官方工具）**
+
+如果你提供由 cf-terraforming 生成的 Terraform HCL 文件（`.tf`），本工具的 Powers 将不会激活。任何转换尝试将仅依赖底层大语言模型的通用能力，而不会使用本工具中编码的专业转换逻辑、验证规则和最佳实践。转换结果将不可预测且不受支持。
+
+**为什么必须使用 CloudflareBackup：**
+- **可预测的文件结构**：CloudflareBackup 创建标准的目录结构，使用固定的文件名（`WAF-Custom-Rules.txt`、`Rate-limits.txt`、`IP-Lists.txt` 等）
+- **一键备份**：一次运行即可备份所有配置，组织结构一致
+- **Powers 优化**：文件位置和命名约定专为本工具的工作流设计
+
+**为什么不支持 cf-terraforming：**
+- **无标准输出结构**：cf-terraforming 输出到 stdout；用户必须手动重定向到任意命名的文件
+- **需要手动执行多次**：每种资源类型（rulesets、lists、DNS records 等）都需要单独运行命令
+- **不可预测的文件组织**：Powers 无法在没有标准结构的情况下可靠地定位配置文件
+
+如果你更喜欢在 Terraform 工作流中使用 cf-terraforming，你需要手动重新组织其输出以匹配 CloudflareBackup 的结构，这违背了本工具的自动化目的。
+
+详见 [为什么不支持 cf-terraforming？](#为什么不支持-cf-terraforming)
+
+---
+
 ## 为什么需要这个工具
 
 从Cloudflare迁移到AWS时，手工转换数百条规则既耗时又容易出错。本工具利用GenAI能力，通过对话式交互自动完成批量配置转换，将迁移时间从数天缩短到数小时。
@@ -315,6 +341,81 @@ Kiro: [生成JavaScript代码和部署指南]
 1. 立即停止当前对话
 2. 新开一个对话
 3. 一次只转换一个项目的一种类型规则
+
+## 为什么不支持 cf-terraforming？
+
+[cf-terraforming](https://github.com/cloudflare/cf-terraforming) 是 Cloudflare 的官方工具，用于将配置导出为 Terraform。虽然它非常适合基于 Terraform 的基础设施管理，但由于输出结构的根本差异，它与本转换工具不兼容。
+
+### 输出结构对比
+
+**CloudflareBackup（支持）**：
+```
+cloudflare_backup/
+├── account/
+│   └── 2026-01-31 10-00-00/
+│       ├── IP-Lists.txt                    # 固定文件名
+│       ├── List-Items-ip-block-list.txt    # 可预测的模式
+│       └── Bulk-Redirect-Rules.txt         # 固定文件名
+└── example.com/
+    └── 2026-01-31 10-00-00/
+        ├── WAF-Custom-Rules.txt            # 固定文件名
+        ├── Rate-limits.txt                 # 固定文件名
+        └── Redirect-Rules.txt              # 固定文件名
+```
+
+**cf-terraforming（不支持）**：
+```bash
+# 用户必须运行多个命令并手动命名文件：
+cf-terraforming generate --resource-type cloudflare_ruleset --zone <ID> > 用户任意命名.tf
+cf-terraforming generate --resource-type cloudflare_list --account <ID> > 另一个名字.tf
+cf-terraforming generate --resource-type cloudflare_record --zone <ID> > dns.tf
+
+# 结果：不可预测的结构
+用户选择的目录/
+├── 用户任意命名.tf      # 用户自定义名称
+├── 另一个名字.tf         # 用户自定义名称
+└── dns.tf               # 用户自定义名称
+```
+
+### 为什么这很重要
+
+**CloudflareBackup 的可预测结构**允许 Powers：
+1. **自动定位文件**：Powers 确切知道在哪里找到 `WAF-Custom-Rules.txt`
+2. **验证完整性**：Powers 可以检查预期的文件是否存在
+3. **处理关系**：Powers 知道 `List-Items-ip-<name>.txt` 对应 `IP-Lists.txt` 中的列表
+
+**cf-terraforming 的灵活输出**造成问题：
+1. **无法发现文件**：Powers 无法猜测用户如何命名文件
+2. **无标准组织**：用户可能以任何目录结构组织文件
+3. **需要手动协调**：用户需要告诉 Powers 每个文件的位置
+
+### 用户体验示例
+
+**使用 CloudflareBackup**：
+```
+用户："转换 ./cloudflare_backup/example.com/2026-01-31 10-00-00/ 中的 Cloudflare 安全规则"
+Power：[自动找到 WAF-Custom-Rules.txt、Rate-limits.txt、IP-Lists.txt]
+```
+
+**使用 cf-terraforming**（假设）：
+```
+用户："转换 ./my_terraform/ 中的 Cloudflare 安全规则"
+Power："我找不到标准配置文件。请指定：
+        - WAF 规则在哪里？（文件名？）
+        - Rate limits 在哪里？（文件名？）
+        - IP 列表在哪里？（文件名？）
+        - 列表项在哪里？（文件名？）"
+用户：[必须手动指定每个文件位置]
+```
+
+### 设计决策
+
+本工具优先考虑**自动化和可靠性**而非灵活性：
+- **一条备份命令**（CloudflareBackup）vs. 多条手动命令（cf-terraforming）
+- **可预测的文件位置** vs. 用户自定义组织
+- **零配置** vs. 手动文件映射
+
+如果你在 Terraform 工作流中使用 cf-terraforming，你需要手动重新组织其输出以匹配 CloudflareBackup 的结构（固定文件名、标准目录布局），这违背了本自动化工具的目的。
 
 ## 相关资源
 
