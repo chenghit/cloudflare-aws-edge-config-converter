@@ -1,7 +1,7 @@
-# Power 3-4 架构设计：Cloudflare到CloudFront迁移
+# Power 3-11 架构设计：Cloudflare到CloudFront迁移
 
-**版本：** 1.0  
-**最后更新：** 2026-01-13
+**版本：** 2.0  
+**最后更新：** 2026-01-31
 
 ---
 
@@ -10,8 +10,8 @@
 1. [概述](#概述)
 2. [架构总览](#架构总览)
 3. [Power 3: cloudflare-cdn-config-analyzer](#power-3-cloudflare-cdn-config-analyzer)
-4. [Power 4: cloudfront-migration-orchestrator](#power-4-cloudfront-migration-orchestrator)
-5. [转换器Powers (5-9)](#转换器powers-5-9)
+4. [Power 6: cloudfront-migration-orchestrator](#power-4-cloudfront-migration-orchestrator)
+5. [转换器Powers (7-11)](#转换器powers-5-9)
 6. [完整工作流](#完整工作流)
 7. [关键设计决策](#关键设计决策)
 8. [实施注意事项](#实施注意事项)
@@ -119,26 +119,26 @@ function handler(event) {
                     用户填写决策
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
-│                 Power 4: 编排器                             │
+│                 Power 6: 编排器                             │
 │  输入: 计划 + 决策 → 输出: 任务分配                        │
 └─────────────────────────────────────────────────────────────┘
                               ↓
               ┌───────────────┴───────────────┐
               ↓                               ↓
 ┌─────────────────────────┐   ┌─────────────────────────┐
-│ Power 5: Viewer Request │   │ Power 6: Viewer Response│
+│ Power 7: Viewer Request │   │ Power 8: Viewer Response│
 │   CloudFront Function   │   │   CloudFront Function   │
 └─────────────────────────┘   └─────────────────────────┘
               ↓                               ↓
 ┌─────────────────────────┐   ┌─────────────────────────┐
-│ Power 7: Origin Request │   │ Power 8: Origin Response│
+│ Power 9: Origin Request │   │ Power 10: Origin Response│
 │      Lambda@Edge        │   │      Lambda@Edge        │
 └─────────────────────────┘   └─────────────────────────┘
               ↓                               ↓
               └───────────────┬───────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
-│          Power 9: CloudFront配置生成器                      │
+│          Power 11: CloudFront配置生成器                      │
 │  输入: 任务 + Functions + Lambda → 输出: Terraform         │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -554,7 +554,7 @@ Power 3必须使用以下决策树为每条规则确定实现方式：
 
 ---
 
-## Power 4: cloudfront-migration-orchestrator
+## Power 6: cloudfront-migration-orchestrator
 
 ### 职责
 任务分配和执行顺序管理（不执行转换）

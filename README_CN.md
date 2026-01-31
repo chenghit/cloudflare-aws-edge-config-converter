@@ -426,51 +426,60 @@ Power："我找不到标准配置文件。请指定：
 
 ## Roadmap
 
-### 🚧 Powers 3-9: 完整的CDN配置迁移方案（架构设计中）
+### 🚧 Powers 3-11: 完整的CDN配置迁移方案（架构设计中）
 
 我们正在设计一套更完整的CDN配置迁移方案，将当前的单一power重构为多个专门的powers：
 
 **架构设计文档：**
-- [Power 3-4 Architecture Design (English)](./docs/architecture/power-3-4-design-EN.md)
-- [Power 3-4 架构设计 (中文)](./docs/architecture/power-3-4-design-CN.md)
+- [Power 3-11 Architecture Design (English)](./docs/architecture/power-3-11-design-EN.md)
+- [Power 3-11 架构设计 (中文)](./docs/architecture/power-3-11-design-CN.md)
+- [架构变更日志](./docs/architecture/CHANGELOG.md)
 
 **计划中的Powers：**
 
 | Power | 职责 | 输出 | 状态 |
 |-------|-----|------|------|
-| **Power 3** | 配置分析器 - 分析Cloudflare CDN配置，按域名分组，判断实现方式 | 分析报告、实施计划、用户决策模板 | 🎨 架构设计中 |
-| **Power 4** | 任务编排器 - 生成任务分配和执行指南 | 任务分配文件、执行指南 | 🎨 架构设计中 |
-| **Power 5** | Viewer Request Function转换器 | CloudFront Function代码（每域名一个文件） | 📝 待设计 |
-| **Power 6** | Viewer Response Function转换器 | CloudFront Function代码（每域名一个文件） | 📝 待设计 |
-| **Power 7** | Origin Request Lambda转换器 | Lambda@Edge代码 | 📝 待设计 |
-| **Power 8** | Origin Response Lambda转换器 | Lambda@Edge代码 | 📝 待设计 |
-| **Power 9** | CloudFront配置生成器 | Terraform配置、部署指南 | 📝 待设计 |
+| **Power 3** | 配置分析器 - 解析Cloudflare CDN配置并按hostname分组 | 基于hostname的配置汇总 + 用户输入模板 | 🎨 架构设计中 |
+| **Power 4** | 实施规划器 - 确定CloudFront实现方法 | 实施计划 | 🎨 架构设计中 |
+| **Power 5** | 计划验证器 - 验证实施计划正确性 | 验证报告（关键：错误的计划=错误的转换器） | 🎨 架构设计中 |
+| **Power 6** | 任务编排器 - 生成任务分配和执行指南 | 任务分配文件、执行指南 | 🎨 架构设计中 |
+| **Power 7** | Viewer Request Function转换器 | CloudFront Function代码（每域名一个文件） | 📝 待设计 |
+| **Power 8** | Viewer Response Function转换器 | CloudFront Function代码（每域名一个文件） | 📝 待设计 |
+| **Power 9** | Origin Request Lambda转换器 | Lambda@Edge代码 | 📝 待设计 |
+| **Power 10** | Origin Response Lambda转换器 | Lambda@Edge代码 | 📝 待设计 |
+| **Power 11** | CloudFront配置生成器 | Terraform配置、部署指南 | 📝 待设计 |
 
 **核心改进：**
+- ✅ **从一开始就采用subagent架构** - 所有Powers（3-11）都实现为Kiro subagents，具有隔离的context
+- ✅ **关注点分离** - 分析器（解析）、规划器（决策）、验证器（验证）、编排器（分配）
+- ✅ **规划前的用户决策** - 业务上下文指导技术实施决策
+- ✅ **计划验证** - 在转换器执行前捕获错误（转换后无法恢复）
 - ✅ **按域名分组规则** - 满足CloudFront Function 10KB大小限制
 - ✅ **基于实现方式的任务分配** - 而非按Cloudflare规则类型
-- ✅ **多阶段转换流程** - 分析→决策→编排→转换→部署
+- ✅ **多阶段转换流程** - 分析→决策→规划→验证→编排→转换→部署
 - ✅ **成本意识设计** - 标记高成本方案（Viewer Lambda@Edge）为不可转换
 - ✅ **无状态工作流** - 通过Markdown文件传递状态，支持分批处理
+- ✅ **自动化脚本** - 一键安装和配置
 
 **实施后的影响：**
 
-⚠️ **当Powers 3-9实现后，当前的`cloudflare-to-cloudfront-functions-converter`将被废弃（deprecated）。**
+⚠️ **当Powers 3-11实现后，当前的`cloudflare-to-cloudfront-functions-converter`将被废弃（deprecated）。**
 
 原因：
-- Powers 3-9提供更完整的CDN配置转换（不仅是Functions）
+- Powers 3-11提供更完整的CDN配置转换（不仅是Functions）
 - 按域名分组，更好地处理Function大小限制
 - 支持更复杂的转换场景（Lambda@Edge、Policies、Cache Behaviors）
-- 更清晰的工作流和任务分配
+- 更清晰的工作流和任务分配，包含验证步骤
 
 **时间线：**
-- 2026 Q1: 完成架构设计，实现Power 3原型
-- 2026 Q2: 实现Powers 4-9
-- 2026 Q2末: 废弃`cloudflare-to-cloudfront-functions-converter`
-- 2026 Q3: 研究subagent架构以增强context隔离
-  - 探索Kiro的subagent能力，将专门任务委托给独立的subagents
-  - 设计让planner、orchestrator和converters作为隔离subagents运行的工作流
-  - 目标：通过在单个对话中分离关注点来防止context混淆和幻觉
+- 2026 Q1: 完成架构设计，实现Power 3（分析器）作为subagent原型
+- 2026 Q2: 实现Powers 4-11作为subagents，实现context隔离
+  - 提供自动化脚本用于Kiro Powers安装和subagent配置
+  - 废弃`cloudflare-to-cloudfront-functions-converter`
+- 2026 Q3: 优化subagent工作流和用户体验
+  - 并行subagent执行的性能调优
+  - 增强错误处理和恢复机制
+  - 基于反馈的用户体验改进
 
 ---
 
