@@ -7,6 +7,8 @@ description: Converts Cloudflare security configurations (WAF custom rules, rate
 
 Convert Cloudflare security configurations to AWS WAF Terraform configuration for CloudFront distributions.
 
+**Language Adaptation**: Generate output files in the same language as the user's conversation. If user speaks Chinese, generate Chinese markdown files. If user speaks English, generate English markdown files.
+
 ## Path Resolution
 
 Reference files in `references/` directory. User data from path provided by user.

@@ -1,0 +1,8 @@
+{
+  "name": "cf-cdn-analyzer",
+  "description": "Analyzes Cloudflare CDN configuration and groups rules by proxied hostname",
+  "resources": [
+    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-analyzer/SKILL.md"
+  ],
+  "tools": ["fs_read", "fs_write", "glob", "grep", "execute_bash"]
+}

@@ -39,7 +39,7 @@ This tool contains multiple independent Agent Skills, each focused on specific c
 |-------|-------|--------|--------|
 | **cf-waf-converter** | Cloudflare security rules (WAF, Rate Limiting, IP Access, etc.) | AWS WAF configuration (Terraform) | ✅ Available |
 | **cf-functions-converter** | Cloudflare transformation rules (Redirect, URL Rewrite, Header Transform, etc.) | CloudFront Functions (JavaScript) | ✅ Available |
-| **cf-cdn-analyzer** | Cloudflare CDN configuration (Cache, Origin, SSL, etc.) | Configuration analysis and implementation plan | 🚧 In Development |
+| **cf-cdn-analyzer** | Cloudflare CDN configuration (Cache, Origin, Redirect, etc.) | Hostname-based configuration summary with user decision template | ✅ Available |
 
 **Why Subagents?** Each skill runs in a separate Kiro subagent with isolated context. This prevents context pollution when handling complex multi-step conversions, especially for the upcoming CDN migration workflow (Skills 3-11) which requires parallel execution of multiple converter skills. See [Architecture Design](./docs/architecture/) for details.
 
@@ -52,9 +52,12 @@ This tool contains multiple independent Agent Skills, each focused on specific c
   - Sufficient for most migration scenarios
 
 - **Large-Scale Configuration**: `claude-sonnet-4.5-1m`
-  - Use case: > 100 rules
+  - Use case: > 100 rules OR multiple domains with complex configurations
+  - **Recommended for CDN migration**: If you have 10+ proxied domains with various rules, use this model
   - Supports larger context window
   - Configuration: Use `/model` command in Kiro to switch
+
+**Note for CDN Migration**: CDN configuration analysis (cf-cdn-analyzer) processes all rules across all proxied domains simultaneously. With many domains and rules, context size grows quickly. Using `claude-sonnet-4.5-1m` ensures sufficient context window.
 
 ### System Requirements
 
@@ -233,18 +236,43 @@ Kiro: [Generates JavaScript code and deployment guide]
 
 **Complete Example**: [examples/conversation-history/cloudflare-to-cloudfront-functions.txt](examples/conversation-history/cloudflare-to-cloudfront-functions.txt)
 
-### Skill 3: Convert CDN Configuration to CloudFront (In Development)
+### Skill 3: Analyze CDN Configuration
 
-**Status**: Architecture design phase (Skills 3-11)
+**How to use**: Switch to `cf-cdn-analyzer` subagent using `/agent swap cf-cdn-analyzer`
 
-This will be a multi-stage workflow involving:
-- Skill 3: Config Analyzer - Parse and group Cloudflare CDN config
-- Skill 4: Implementation Planner - Determine CloudFront implementation methods
-- Skill 5: Plan Validator - Verify implementation plan correctness
-- Skill 6: Task Orchestrator - Generate task assignments
-- Skills 7-11: Specialized converters (Functions, Lambda@Edge, Config Generator)
+**Example Conversation**:
 
-See [Architecture Design](./docs/architecture/skill-3-11-design-EN.md) for complete workflow and design decisions.
+```
+User: /agent swap cf-cdn-analyzer
+
+Kiro: [Switches to CDN analyzer subagent]
+
+User: Analyze Cloudflare CDN config in /path/to/cloudflare-config
+
+Kiro: [Reads configuration files, detects SaaS, groups rules by hostname]
+      [Generates hostname-based-config-summary.md and README_1_analyzer.md]
+      
+      Please edit the "Proxied Hostnames" table in hostname-based-config-summary.md
+      to indicate which hostnames need default cache behavior...
+```
+
+**Output Files**:
+
+- `hostname-based-config-summary.md` - Configuration grouped by hostname with user decision template
+- `README_1_analyzer.md` - Next steps guide
+
+**What This Skill Does**:
+
+- Detects SaaS configuration (terminates if found)
+- Identifies proxied DNS records (each becomes a CloudFront Distribution)
+- Detects IP-based origins (marks as non-convertible)
+- Groups all rules by hostname following Cloudflare execution order
+- Identifies implicit Cloudflare default cache behavior
+- Generates user decision template for default cache behavior
+
+**Next Steps**: Edit the summary file and run Planner skill (cf-cdn-planner) to determine CloudFront implementation methods.
+
+**Note**: This is the first step in a multi-stage CDN migration workflow (Skills 3-11). See [Architecture Design](./docs/architecture/skill-3-11-design-EN.md) for complete workflow.
 
 ## Best Practices
 
@@ -253,6 +281,7 @@ See [Architecture Design](./docs/architecture/skill-3-11-design-EN.md) for compl
 1. **Use Separate Subagents for Different Tasks**
    - Use `/agent swap cf-waf-converter` for security rules
    - Use `/agent swap cf-functions-converter` for transformation rules
+   - Use `/agent swap cf-cdn-analyzer` for CDN configuration analysis
    - Each subagent has isolated context to avoid confusion
 
 2. **Convert One Project at a Time**
@@ -294,6 +323,21 @@ See [Architecture Design](./docs/architecture/skill-3-11-design-EN.md) for compl
 * **Page Rules (Deprecated)**
   - Reason: Cloudflare has deprecated Page Rules functionality
   - Recommendation: First migrate to modern rule types in Cloudflare (Redirect Rules, URL Rewrite Rules, etc.), then use this tool for conversion
+
+* **Snippets and Workers**
+  - Reason: These are custom JavaScript/TypeScript functions, not configuration rules
+  - Recommendation: Manual conversion required - review logic and rewrite as CloudFront Functions or Lambda@Edge
+  - Note: Future versions may provide conversion guidance
+
+* **SaaS and mTLS Configurations**
+  - Reason: Complex multi-tenant and certificate management configurations require manual architecture design
+  - Note: Cloudflare Custom Hostnames (SaaS) and CloudFront SaaS have fundamentally different implementation models
+  - Recommendation: Manual migration with careful planning
+
+* **Image Optimization and Advanced Features**
+  - Reason: CloudFront doesn't natively support Cloudflare's Image Optimization, Zaraz, etc.
+  - Alternative: Deploy AWS solutions (e.g., Dynamic Image Transformation for Amazon CloudFront)
+  - Note: These require separate infrastructure setup beyond simple configuration conversion
 
 * **Some Advanced Transformation Rules**
   - Reason: Cloudflare and CloudFront features are not one-to-one
@@ -350,6 +394,25 @@ See [Architecture Design](./docs/architecture/skill-3-11-design-EN.md) for compl
 1. Stop current conversation immediately
 2. Start a new conversation with `/agent swap` to the correct subagent
 3. Convert only one type of rule for one project at a time
+
+### Skill Not Activating Properly
+
+**Problem**: Agent says "I will use [skill-name]" but doesn't follow the skill's workflow
+
+**Symptoms**:
+- Agent generates ad-hoc analysis instead of following defined steps
+- Output files are not created or have wrong names
+- Agent doesn't read reference documents
+
+**Solution**:
+Use specific keywords in your request that match the skill's description:
+- For cf-waf-converter: Say "convert **security rules**" or "convert to **AWS WAF**"
+- For cf-functions-converter: Say "convert **transformation rules**" or "convert to **CloudFront Functions**"
+- For cf-cdn-analyzer: Say "analyze **CDN configuration**" or "analyze **CDN config**"
+
+**Example**:
+- ❌ Vague: "analyze my cloudflare config files" (skill may not activate)
+- ✅ Specific: "analyze my cloudflare **CDN config**" (skill activates correctly)
 
 ## Why Not cf-terraforming?
 
