@@ -380,6 +380,25 @@ Kiro: [Reads configuration files, detects SaaS, groups rules by hostname]
 2. Start a new conversation with `/agent swap` to the correct subagent
 3. Convert only one type of rule for one project at a time
 
+### Skill Not Activating Properly
+
+**Problem**: Agent says "I will use [skill-name]" but doesn't follow the skill's workflow
+
+**Symptoms**:
+- Agent generates ad-hoc analysis instead of following defined steps
+- Output files are not created or have wrong names
+- Agent doesn't read reference documents
+
+**Solution**:
+Use specific keywords in your request that match the skill's description:
+- For cf-waf-converter: Say "convert **security rules**" or "convert to **AWS WAF**"
+- For cf-functions-converter: Say "convert **transformation rules**" or "convert to **CloudFront Functions**"
+- For cf-cdn-analyzer: Say "analyze **CDN configuration**" or "analyze **CDN config**"
+
+**Example**:
+- ❌ Vague: "分析我的cloudflare配置文件" (skill may not activate)
+- ✅ Specific: "分析我的cloudflare **CDN配置**" (skill activates correctly)
+
 ## Why Not cf-terraforming?
 
 [cf-terraforming](https://github.com/cloudflare/cf-terraforming) is Cloudflare's official tool for exporting configurations to Terraform. While it's excellent for Terraform-based infrastructure management, it's fundamentally incompatible with this migration tool.
