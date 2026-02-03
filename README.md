@@ -324,6 +324,21 @@ Kiro: [Reads configuration files, detects SaaS, groups rules by hostname]
   - Reason: Cloudflare has deprecated Page Rules functionality
   - Recommendation: First migrate to modern rule types in Cloudflare (Redirect Rules, URL Rewrite Rules, etc.), then use this tool for conversion
 
+* **Snippets and Workers**
+  - Reason: These are custom JavaScript/TypeScript functions, not configuration rules
+  - Recommendation: Manual conversion required - review logic and rewrite as CloudFront Functions or Lambda@Edge
+  - Note: Future versions may provide conversion guidance
+
+* **SaaS and mTLS Configurations**
+  - Reason: Complex multi-tenant and certificate management configurations require manual architecture design
+  - Note: Cloudflare Custom Hostnames (SaaS) and CloudFront SaaS have fundamentally different implementation models
+  - Recommendation: Manual migration with careful planning
+
+* **Image Optimization and Advanced Features**
+  - Reason: CloudFront doesn't natively support Cloudflare's Image Optimization, Zaraz, etc.
+  - Alternative: Deploy AWS solutions (e.g., Dynamic Image Transformation for Amazon CloudFront)
+  - Note: These require separate infrastructure setup beyond simple configuration conversion
+
 * **Some Advanced Transformation Rules**
   - Reason: Cloudflare and CloudFront features are not one-to-one
   - Note: Tool will list unconvertible rules and alternatives in generated documentation
