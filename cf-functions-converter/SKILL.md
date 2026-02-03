@@ -273,7 +273,8 @@ Ask user to confirm completeness and correctness.
 4. Read `references/cloudfront-helper-methods.md` for available helper methods
 5. Read `references/bulk-redirects-handling.md` for bulk redirect KVS generation rules
 6. Read `references/unsupported-syntax.md` for forbidden JavaScript syntax
-7. Ask user for custom function name (default: `cloudflare-migrated-viewer-request`)
+7. Read `references/continent-countries.md` for country-to-continent mappings (CRITICAL for continent rules)
+8. Ask user for custom function name (default: `cloudflare-migrated-viewer-request`)
 
 **CRITICAL: Continent Matching Logic**
 
