@@ -10,17 +10,17 @@
 
 **❌ 不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)（Cloudflare官方工具）**
 
-如果你提供由 cf-terraforming 生成的 Terraform HCL 文件（`.tf`），本工具的 Powers 将不会激活。任何转换尝试将仅依赖底层大语言模型的通用能力，而不会使用本工具中编码的专业转换逻辑、验证规则和最佳实践。转换结果将不可预测且不受支持。
+如果你提供由 cf-terraforming 生成的 Terraform HCL 文件（`.tf`），本工具的 Skills 将不会激活。任何转换尝试将仅依赖底层大语言模型的通用能力，而不会使用本工具中编码的专业转换逻辑、验证规则和最佳实践。转换结果将不可预测且不受支持。
 
 **为什么必须使用 CloudflareBackup：**
 - **可预测的文件结构**：CloudflareBackup 创建标准的目录结构，使用固定的文件名（`WAF-Custom-Rules.txt`、`Rate-limits.txt`、`IP-Lists.txt` 等）
 - **一键备份**：一次运行即可备份所有配置，组织结构一致
-- **Powers 优化**：文件位置和命名约定专为本工具的工作流设计
+- **Skills 优化**：文件位置和命名约定专为本工具的工作流设计
 
 **为什么不支持 cf-terraforming：**
 - **无标准输出结构**：cf-terraforming 输出到 stdout；用户必须手动重定向到任意命名的文件
 - **需要手动执行多次**：每种资源类型（rulesets、lists、DNS records 等）都需要单独运行命令
-- **不可预测的文件组织**：Powers 无法在没有标准结构的情况下可靠地定位配置文件
+- **不可预测的文件组织**：Skills 无法在没有标准结构的情况下可靠地定位配置文件
 
 如果你更喜欢在 Terraform 工作流中使用 cf-terraforming，你需要手动重新组织其输出以匹配 CloudflareBackup 的结构，这违背了本工具的自动化目的。
 
@@ -34,7 +34,7 @@
 
 ## 功能概览
 
-本工具包含多个独立的Kiro Powers，每个power专注于特定类型的配置转换：
+本工具包含多个独立的Kiro Skills，每个power专注于特定类型的配置转换：
 
 | Skill | 输入 | 输出 | 状态 |
 |-------|------|------|------|
@@ -156,9 +156,9 @@ Token会保留在对话历史中，存在泄露风险。使用独立备份工具
 - 包含真实的Cloudflare配置结构
 - 可直接用于测试转换功能
 
-### Power 1: 转换安全规则到AWS WAF
+### Skill 1: 转换安全规则到AWS WAF
 
-**触发方式**：Power在你提到"Cloudflare"和"AWS WAF"或"安全规则"时自动激活
+**触发方式**：Skill在你提到"Cloudflare"和"AWS WAF"或"安全规则"时自动激活
 
 **示例对话**：
 
@@ -187,9 +187,9 @@ Kiro: [生成Terraform配置文件]
 
 **完整示例**：[examples/conversation-history/cloudflare-to-aws-waf.txt](examples/conversation-history/cloudflare-to-aws-waf.txt)
 
-### Power 2: 转换Transformation规则到CloudFront Functions
+### Skill 2: 转换Transformation规则到CloudFront Functions
 
-**触发方式**：Power在你提到"Cloudflare"和"CloudFront"或"transformation"或"redirect"时自动激活
+**触发方式**：Skill在你提到"Cloudflare"和"CloudFront"或"transformation"或"redirect"时自动激活
 
 **示例对话**：
 
@@ -368,14 +368,6 @@ Kiro: [读取配置文件，检测SaaS，按hostname分组规则]
 - ❌ 模糊："分析我的cloudflare配置文件"（skill可能不会激活）
 - ✅ 具体："分析我的cloudflare **CDN配置**"（skill正确激活）
 
-**问题**：Kiro没有激活对应的power进行转换
-
-**解决方案**：
-
-1. 检查对话中是否包含正确的关键词（如"Cloudflare" + "AWS WAF"）
-2. 明确说明要转换的内容类型（安全规则 vs transformation规则）
-3. 提供配置文件的完整路径
-
 ### 转换结果不符合预期
 
 **问题**：生成的配置与预期不符
@@ -434,28 +426,28 @@ cf-terraforming generate --resource-type cloudflare_record --zone <ID> > dns.tf
 
 ### 为什么这很重要
 
-**CloudflareBackup 的可预测结构**允许 Powers：
-1. **自动定位文件**：Powers 确切知道在哪里找到 `WAF-Custom-Rules.txt`
-2. **验证完整性**：Powers 可以检查预期的文件是否存在
-3. **处理关系**：Powers 知道 `List-Items-ip-<name>.txt` 对应 `IP-Lists.txt` 中的列表
+**CloudflareBackup 的可预测结构**允许 Skills：
+1. **自动定位文件**：Skills 确切知道在哪里找到 `WAF-Custom-Rules.txt`
+2. **验证完整性**：Skills 可以检查预期的文件是否存在
+3. **处理关系**：Skills 知道 `List-Items-ip-<name>.txt` 对应 `IP-Lists.txt` 中的列表
 
 **cf-terraforming 的灵活输出**造成问题：
-1. **无法发现文件**：Powers 无法猜测用户如何命名文件
+1. **无法发现文件**：Skills 无法猜测用户如何命名文件
 2. **无标准组织**：用户可能以任何目录结构组织文件
-3. **需要手动协调**：用户需要告诉 Powers 每个文件的位置
+3. **需要手动协调**：用户需要告诉 Skills 每个文件的位置
 
 ### 用户体验示例
 
 **使用 CloudflareBackup**：
 ```
 用户："转换 ./cloudflare_backup/example.com/2026-01-31 10-00-00/ 中的 Cloudflare 安全规则"
-Power：[自动找到 WAF-Custom-Rules.txt、Rate-limits.txt、IP-Lists.txt]
+Skill：[自动找到 WAF-Custom-Rules.txt、Rate-limits.txt、IP-Lists.txt]
 ```
 
 **使用 cf-terraforming**（假设）：
 ```
 用户："转换 ./my_terraform/ 中的 Cloudflare 安全规则"
-Power："我找不到标准配置文件。请指定：
+Skill："我找不到标准配置文件。请指定：
         - WAF 规则在哪里？（文件名？）
         - Rate limits 在哪里？（文件名？）
         - IP 列表在哪里？（文件名？）
@@ -475,37 +467,37 @@ Power："我找不到标准配置文件。请指定：
 ## 相关资源
 
 - [Kiro文档](https://kiro.dev/docs/)
-- [Kiro Powers](https://kiro.dev/powers/)
+- [Kiro Skills](https://kiro.dev/powers/)
 - [AWS WAF文档](https://docs.aws.amazon.com/waf/)
 - [CloudFront Functions文档](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-functions.html)
 
 ## Roadmap
 
-### 🚧 Powers 3-11: 完整的CDN配置迁移方案（架构设计中）
+### 🚧 Skills 3-11: 完整的CDN配置迁移方案（架构设计中）
 
 我们正在设计一套更完整的CDN配置迁移方案，将当前的单一power重构为多个专门的powers：
 
 **架构设计文档：**
-- [Power 3-11 Architecture Design (English)](./docs/architecture/power-3-11-design-EN.md)
-- [Power 3-11 架构设计 (中文)](./docs/architecture/power-3-11-design-CN.md)
+- [Skill 3-11 Architecture Design (English)](./docs/architecture/power-3-11-design-EN.md)
+- [Skill 3-11 架构设计 (中文)](./docs/architecture/power-3-11-design-CN.md)
 - [架构变更日志](./docs/architecture/CHANGELOG.md)
 
 **计划中的Powers：**
 
 | Power | 职责 | 输出 | 状态 |
 |-------|-----|------|------|
-| **Power 3** | 配置分析器 - 解析Cloudflare CDN配置并按hostname分组 | 基于hostname的配置汇总 + 用户输入模板 | 🎨 架构设计中 |
-| **Power 4** | 实施规划器 - 确定CloudFront实现方法 | 实施计划 | 🎨 架构设计中 |
-| **Power 5** | 计划验证器 - 验证实施计划正确性 | 验证报告（关键：错误的计划=错误的转换器） | 🎨 架构设计中 |
-| **Power 6** | 任务编排器 - 生成任务分配和执行指南 | 任务分配文件、执行指南 | 🎨 架构设计中 |
-| **Power 7** | Viewer Request Function转换器 | CloudFront Function代码（每域名一个文件） | 📝 待设计 |
-| **Power 8** | Viewer Response Function转换器 | CloudFront Function代码（每域名一个文件） | 📝 待设计 |
-| **Power 9** | Origin Request Lambda转换器 | Lambda@Edge代码 | 📝 待设计 |
-| **Power 10** | Origin Response Lambda转换器 | Lambda@Edge代码 | 📝 待设计 |
-| **Power 11** | CloudFront配置生成器 | Terraform配置、部署指南 | 📝 待设计 |
+| **Skill 3** | 配置分析器 - 解析Cloudflare CDN配置并按hostname分组 | 基于hostname的配置汇总 + 用户输入模板 | 🎨 架构设计中 |
+| **Skill 4** | 实施规划器 - 确定CloudFront实现方法 | 实施计划 | 🎨 架构设计中 |
+| **Skill 5** | 计划验证器 - 验证实施计划正确性 | 验证报告（关键：错误的计划=错误的转换器） | 🎨 架构设计中 |
+| **Skill 6** | 任务编排器 - 生成任务分配和执行指南 | 任务分配文件、执行指南 | 🎨 架构设计中 |
+| **Skill 7** | Viewer Request Function转换器 | CloudFront Function代码（每域名一个文件） | 📝 待设计 |
+| **Skill 8** | Viewer Response Function转换器 | CloudFront Function代码（每域名一个文件） | 📝 待设计 |
+| **Skill 9** | Origin Request Lambda转换器 | Lambda@Edge代码 | 📝 待设计 |
+| **Skill 10** | Origin Response Lambda转换器 | Lambda@Edge代码 | 📝 待设计 |
+| **Skill 11** | CloudFront配置生成器 | Terraform配置、部署指南 | 📝 待设计 |
 
 **核心改进：**
-- ✅ **从一开始就采用subagent架构** - 所有Powers（3-11）都实现为Kiro subagents，具有隔离的context
+- ✅ **从一开始就采用subagent架构** - 所有Skills（3-11）都实现为Kiro subagents，具有隔离的context
 - ✅ **关注点分离** - 分析器（解析）、规划器（决策）、验证器（验证）、编排器（分配）
 - ✅ **规划前的用户决策** - 业务上下文指导技术实施决策
 - ✅ **计划验证** - 在转换器执行前捕获错误（转换后无法恢复）
@@ -518,18 +510,18 @@ Power："我找不到标准配置文件。请指定：
 
 **实施后的影响：**
 
-⚠️ **当Powers 3-11实现后，当前的`cf-functions-converter`将被废弃（deprecated）。**
+⚠️ **当Skills 3-11实现后，当前的`cf-functions-converter`将被废弃（deprecated）。**
 
 原因：
-- Powers 3-11提供更完整的CDN配置转换（不仅是Functions）
+- Skills 3-11提供更完整的CDN配置转换（不仅是Functions）
 - 按域名分组，更好地处理Function大小限制
 - 支持更复杂的转换场景（Lambda@Edge、Policies、Cache Behaviors）
 - 更清晰的工作流和任务分配，包含验证步骤
 
 **时间线：**
-- 2026 Q1: 完成架构设计，实现Power 3（分析器）作为subagent原型
-- 2026 Q2: 实现Powers 4-11作为subagents，实现context隔离
-  - 提供自动化脚本用于Kiro Powers安装和subagent配置
+- 2026 Q1: 完成架构设计，实现Skill 3（分析器）作为subagent原型
+- 2026 Q2: 实现Skills 4-11作为subagents，实现context隔离
+  - 提供自动化脚本用于Kiro Skills安装和subagent配置
   - 废弃`cf-functions-converter`
 - 2026 Q3: 优化subagent工作流和用户体验
   - 并行subagent执行的性能调优
