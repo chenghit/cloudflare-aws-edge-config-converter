@@ -368,8 +368,6 @@ Kiro: [读取配置文件，检测SaaS，按hostname分组规则]
 - ❌ 模糊："分析我的cloudflare配置文件"（skill可能不会激活）
 - ✅ 具体："分析我的cloudflare **CDN配置**"（skill正确激活）
 
-### Power未激活
-
 **问题**：Kiro没有激活对应的power进行转换
 
 **解决方案**：

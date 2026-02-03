@@ -396,8 +396,8 @@ Use specific keywords in your request that match the skill's description:
 - For cf-cdn-analyzer: Say "analyze **CDN configuration**" or "analyze **CDN config**"
 
 **Example**:
-- ❌ Vague: "分析我的cloudflare配置文件" (skill may not activate)
-- ✅ Specific: "分析我的cloudflare **CDN配置**" (skill activates correctly)
+- ❌ Vague: "analyze my cloudflare config files" (skill may not activate)
+- ✅ Specific: "analyze my cloudflare **CDN config**" (skill activates correctly)
 
 ## Why Not cf-terraforming?
 
