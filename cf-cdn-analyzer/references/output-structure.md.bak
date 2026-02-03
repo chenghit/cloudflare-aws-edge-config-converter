@@ -49,24 +49,24 @@ Example:
 - Total Rules: 15
 
 ### Redirect Rules (2 rules)
-| Priority | Match Expression | Target URL | Status Code |
-|----------|------------------|------------|-------------|
-| 1 | `http.request.uri.path eq "/old"` | `/new` | 301 |
+| Rule ID | Priority | Match Expression | Target URL | Status Code |
+|---------|----------|------------------|------------|-------------|
+| redirect-1 | 1 | `http.request.uri.path eq "/old"` | `/new` | 301 |
 
 ### URL Rewrite Rules (2 rules)
-| Priority | Match Expression | Rewrite Action |
-|----------|------------------|----------------|
-| 1 | `http.request.uri.path matches "^/api/v1/(.*)"` | `/v2/$1` |
+| Rule ID | Priority | Match Expression | Rewrite Action |
+|---------|----------|------------------|----------------|
+| rewrite-1 | 1 | `http.request.uri.path matches "^/api/v1/(.*)"` | `/v2/$1` |
 
 ### Bulk Redirects (3 rules)
-| Priority | Source URL | Target URL | Status Code | Include Subdomains | Preserve Query String |
-|----------|------------|------------|-------------|-------------------|----------------------|
-| 1 | example.com/old | example.com/new | 301 | No | Yes |
+| Rule ID | Priority | Source URL | Target URL | Status Code | Include Subdomains | Preserve Query String |
+|---------|----------|------------|------------|-------------|-------------------|----------------------|
+| bulk-1 | 1 | example.com/old | example.com/new | 301 | No | Yes |
 
 ### Request Header Transform Rules (2 rules)
-| Priority | Match Expression | Header Action |
-|----------|------------------|---------------|
-| 1 | `http.request.uri.path matches "^/api/.*"` | Set `X-API-Version: 2.0` |
+| Rule ID | Priority | Match Expression | Header Action |
+|---------|----------|------------------|---------------|
+| header-1 | 1 | `http.request.uri.path matches "^/api/.*"` | Set `X-API-Version: 2.0` |
 
 ### Managed Transforms
 | Transform Type | Enabled |
@@ -74,20 +74,20 @@ Example:
 | True-Client-IP Header | Yes |
 
 ### Cache Rules (5 rules)
-| Priority | Match Expression | Action | Settings |
-|----------|------------------|--------|----------|
-| 1 | `http.request.uri.path matches "^/api/.*"` | Set cache TTL | TTL: 0s |
-| 2 | `http.request.uri.path matches ".*\\.jpg$"` | Set cache TTL | TTL: 86400s |
+| Rule ID | Priority | Match Expression | Action | Settings |
+|---------|----------|------------------|--------|----------|
+| cache-1 | 1 | `http.request.uri.path matches "^/api/.*"` | Set cache TTL | TTL: 0s |
+| cache-2 | 2 | `http.request.uri.path matches ".*\\.jpg$"` | Set cache TTL | TTL: 86400s |
 
 ### Origin Rules (3 rules)
-| Priority | Match Expression | Action | Settings |
-|----------|------------------|--------|----------|
-| 1 | `http.request.uri.path matches "^/api/.*"` | Override origin | Host: api-backend.example.com |
+| Rule ID | Priority | Match Expression | Action | Settings |
+|---------|----------|------------------|--------|----------|
+| origin-1 | 1 | `http.request.uri.path matches "^/api/.*"` | Override origin | Host: api-backend.example.com |
 
 ### Custom Error Rules (1 rule)
-| Error Code | Custom Response |
-|------------|-----------------|
-| 404 | Custom 404 page |
+| Rule ID | Error Code | Custom Response |
+|---------|------------|-----------------|
+| error-1 | 404 | Custom 404 page |
 
 ### Custom Pages
 | Error Type | State | Custom URL |
@@ -96,14 +96,14 @@ Example:
 | 1000_errors | custom | https://example.com/errors/cloudflare.html |
 
 ### Response Header Transform Rules (1 rule)
-| Priority | Match Expression | Header Action |
-|----------|------------------|---------------|
-| 1 | `true` | Set `X-Frame-Options: DENY` |
+| Rule ID | Priority | Match Expression | Header Action |
+|---------|----------|------------------|---------------|
+| resp-header-1 | 1 | `true` | Set `X-Frame-Options: DENY` |
 
 ### Compression Rules (1 rule)
-| Priority | Match Expression | Compression Type |
-|----------|------------------|------------------|
-| 1 | `true` | Gzip, Brotli |
+| Rule ID | Priority | Match Expression | Compression Type |
+|---------|----------|------------------|------------------|
+| compress-1 | 1 | `true` | Gzip, Brotli |
 
 ---
 
@@ -117,22 +117,6 @@ These rules may apply to multiple DNS records. User decision required for assign
 
 ### Cache Rules (2 rules)
 [Same table structure as above]
-
----
-
-## Orphaned Rules (Hostname Not in Proxied DNS Records)
-
-These rules reference hostnames that are not proxied. This may indicate outdated or misconfigured rules.
-
-### Hostname: old.example.com (Not Proxied)
-
-#### Bulk Redirects (2 rules)
-| Priority | Source URL | Target URL | Status Code |
-|----------|------------|------------|-------------|
-| 1 | old.example.com/about | /about-us | 301 |
-| 2 | old.example.com/contact | /contact-us | 301 |
-
-**Note**: These rules will not take effect because the hostname is not proxied through Cloudflare. Consider deleting these rules or proxying the hostname.
 
 ---
 
@@ -156,77 +140,22 @@ These rules reference hostnames that are not proxied. This may indicate outdated
 
 ### How to Determine Which Rules Apply to a Hostname
 
-**CRITICAL RULE: A rule can ONLY be listed under a specific DNS record if its Match Expression explicitly matches that exact hostname. If not, it MUST be listed as a Global Rule or Orphaned Rule.**
+**1. Exact Match:**
+- Rule expression contains `http.host eq "example.com"`
+- This rule ONLY applies to example.com
 
-**Step 1: Check if rule specifies hostname**
+**2. Wildcard Match:**
+- Rule expression contains `http.host matches ".*\\.example\\.com"`
+- This rule applies to all subdomains of example.com
 
-**No hostname specified (Global Rule):**
-- Rule expression does NOT contain `http.host` AND does NOT contain hostname in `http.request.full_uri`
-- Examples:
-  - `true` → Global (applies to all requests)
-  - `http.request.uri.path eq "/test"` → Global (no hostname filter)
-  - `http.user_agent contains "bot"` → Global (no hostname filter)
-- **Result**: Mark as "Global Rule"
-- **DO NOT** list under any specific DNS record, even if you think it "might" apply
+**3. Multiple Hosts (OR condition):**
+- Rule expression contains `(http.host eq "example.com") or (http.host eq "www.example.com")`
+- This rule applies to both hostnames
 
-**Hostname specified:**
-- Rule expression contains `http.host` OR contains hostname in `http.request.full_uri`
-- Continue to Step 2
-
-**Step 2: Check if hostname uses wildcard for all subdomains**
-
-**Wildcard matching all subdomains (Global Rule):**
-- Expression contains `*.example.com` or `.*\\.example\\.com` pattern
-- Examples:
-  - `http.host wildcard "*.example.com"`
-  - `http.host matches ".*\\.example\\.com"`
-  - `http.request.full_uri wildcard r"https://*.example.com/path/*"`
-- **Result**: Mark as "Global Rule" - applies to multiple hostnames
-
-**Specific hostname (Specific Rule):**
-- Expression specifies exact hostname(s)
-- Examples:
-  - `http.host eq "cdn.example.com"` → Only cdn.example.com
-  - `http.host in {"example.com" "www.example.com"}` → Both example.com and www.example.com
-  - `http.request.full_uri wildcard r"https://cdn.example.com/path/*"` → Only cdn.example.com
-- **Result**: Check if hostname is in proxied DNS records
-  - If YES: List under that DNS record
-  - If NO: List under "Orphaned Rules" section
-
-**Special Case: Bulk Redirects**
-
-Bulk Redirects specify source URL directly (format: `hostname/path`). Extract hostname from source URL and check if it's in proxied DNS records:
-- If YES: List under that DNS record
-- If NO: List under "Orphaned Rules"
-
-### Orphaned Rules
-
-Rules that reference hostnames not in the proxied DNS records list should be grouped in a separate "Orphaned Rules" section. This indicates:
-- Outdated rules that should be deleted
-- Rules for hostnames that were un-proxied but rules not cleaned up
-- Configuration errors
-
-**Example:**
-```markdown
-## Orphaned Rules (Hostname Not in Proxied DNS Records)
-
-These rules reference hostnames that are not proxied. This may indicate outdated or misconfigured rules.
-
-### Hostname: old.example.com (Not Proxied)
-
-#### Bulk Redirects (2 rules)
-| Priority | Source URL | Target URL | Status Code |
-|----------|------------|------------|-------------|
-| 1 | old.example.com/about | /about-us | 301 |
-| 2 | old.example.com/contact | /contact-us | 301 |
-
-#### Cache Rules (1 rule)
-| Priority | Match Expression | Action | Settings |
-|----------|------------------|--------|----------|
-| 1 | `http.host eq "old.example.com"` | Set cache TTL | TTL: 3600s |
-
-**Note**: These rules will not take effect because the hostname is not proxied through Cloudflare.
-```
+**4. No Host Match (Global Rule):**
+- Rule expression does NOT contain `http.host`
+- This rule may apply to ALL proxied hostnames
+- Mark as "Global Rule" and list separately
 
 ### Preserving Rule Priority
 
@@ -271,39 +200,46 @@ Expression: (http.host in {"example.com" "www.example.com"}) and (http.request.u
 ## Table Column Definitions
 
 ### Cache Rules
+- **Rule ID**: Cloudflare rule ID
 - **Priority**: Cloudflare rule priority (lower = higher priority)
 - **Match Expression**: Full Cloudflare expression
 - **Action**: Cache action (e.g., "Set cache TTL", "Bypass cache")
 - **Settings**: Cache settings (e.g., "TTL: 3600s", "Edge TTL: 7200s")
 
 ### Origin Rules
+- **Rule ID**: Cloudflare rule ID
 - **Priority**: Cloudflare rule priority
 - **Match Expression**: Full Cloudflare expression
 - **Action**: Origin action (e.g., "Override origin", "Override host header")
 - **Settings**: Origin settings (e.g., "Host: backend.example.com")
 
 ### Redirect Rules
+- **Rule ID**: Cloudflare rule ID
 - **Priority**: Cloudflare rule priority
 - **Match Expression**: Full Cloudflare expression
 - **Target URL**: Redirect target
 - **Status Code**: HTTP status code (301, 302, 307, 308)
 
 ### URL Rewrite Rules
+- **Rule ID**: Cloudflare rule ID
 - **Priority**: Cloudflare rule priority
 - **Match Expression**: Full Cloudflare expression
 - **Rewrite Action**: Rewrite target (e.g., "/v2/$1")
 
 ### Header Transform Rules
+- **Rule ID**: Cloudflare rule ID
 - **Priority**: Cloudflare rule priority
 - **Match Expression**: Full Cloudflare expression
 - **Header Action**: Header operation (e.g., "Set X-Custom: value", "Remove X-Old")
 
 ### Compression Rules
+- **Rule ID**: Cloudflare rule ID
 - **Priority**: Cloudflare rule priority
 - **Match Expression**: Full Cloudflare expression
 - **Compression Type**: Compression algorithms (e.g., "Gzip, Brotli")
 
 ### Custom Error Rules
+- **Rule ID**: Cloudflare rule ID
 - **Error Code**: HTTP error code (e.g., 404, 500)
 - **Custom Response**: Custom error page or response
 
@@ -317,6 +253,7 @@ Expression: (http.host in {"example.com" "www.example.com"}) and (http.request.u
 - **Enabled**: Whether the transform is enabled (Yes/No)
 
 ### Bulk Redirects
+- **Rule ID**: Cloudflare rule ID
 - **Priority**: Rule priority
 - **Source URL**: Source URL pattern
 - **Target URL**: Redirect target
