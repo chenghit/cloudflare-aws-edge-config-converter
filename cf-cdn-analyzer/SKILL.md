@@ -178,6 +178,27 @@ Parse `DNS.txt` to identify:
 
 **CRITICAL: Only assign rules to specific DNS records if the rule explicitly matches that hostname. If a rule has no hostname match or uses wildcard for all subdomains, it MUST be listed as Global Rule.**
 
+**CRITICAL: Hostname Matching Rules**
+
+1. **For rules using `http.host`:**
+   - Extract hostname from expression
+   - Use EXACT match with DNS record hostname
+   - Example: `http.host eq "example.com"` ONLY matches `example.com`, NOT `cdn.example.com`
+
+2. **For rules using `http.request.full_uri`:**
+   - Extract hostname from the URI pattern
+   - Use EXACT match with DNS record hostname
+   - Example: `https://example.com/path` ONLY matches `example.com`, NOT `cdn.example.com`
+   - Example: `https://*.example.com/path` is wildcard → Global Rule
+
+3. **For Bulk Redirects:**
+   - Extract hostname from source URL (format: `hostname/path`)
+   - Use EXACT match with DNS record hostname
+   - Example: `example.com/path` ONLY matches `example.com`, NOT `cdn.example.com`
+
+4. **If hostname not in proxied DNS records:**
+   - List under "Orphaned Rules", NOT "Global Rules"
+
 For each proxied hostname, collect all relevant configuration:
 
 **Redirect Rules:**
@@ -189,7 +210,7 @@ For each proxied hostname, collect all relevant configuration:
 - Preserve rule priority order
 
 **Bulk Redirects:**
-- Bulk redirect rules matching this hostname
+- Extract hostname from source URL and match with this DNS record
 - Include referenced list items from `List-Items-redirect-*.txt`
 
 **Request Header Transform Rules:**
