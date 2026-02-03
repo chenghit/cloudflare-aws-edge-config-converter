@@ -219,6 +219,19 @@ Identify and exclude device detection rules in Request Header Transform Rules:
 
 ### 4. Generate Markdown Summary
 
+**Before generating summary, you MUST read these reference documents:**
+
+1. `references/convertible-rules.md` - Which rule types can be converted
+2. `references/non-convertible-rules.md` - Which rules cannot be converted and why
+3. `references/operator-conversion.md` - Operator conversion rules (to judge convertibility)
+4. `references/field-mapping.md` - Field mapping rules (to judge convertibility)
+5. `references/bulk-redirects-handling.md` - Bulk redirect conversion strategy
+6. `references/cloudfront-function-limits.md` - Size limits and constraints
+7. `references/continent-countries.md` - Continent/country mapping (for continent rules)
+8. `references/cloudflare-rule-execution-order.md` - Rule execution order (must preserve in summary)
+
+**After reading all 8 references above, generate the summary.**
+
 Output a Markdown file (`cloudflare-transformation-rules-summary.md`) with:
 
 1. **Convertible Rules** (organized by category):
