@@ -7,7 +7,14 @@ description: Analyzes Cloudflare CDN configuration and groups rules by proxied h
 
 Analyze Cloudflare CDN configuration and group by proxied hostname for CloudFront migration planning.
 
-YOU MUST follow the Workflow section below step-by-step.
+**CRITICAL: When activated, your FIRST action is:**
+1. Read ALL reference documents (Step 0 in Workflow)
+2. Then follow Workflow steps sequentially
+
+**DO NOT:**
+- Generate analysis reports directly
+- Skip reading reference documents
+- Deviate from the Workflow
 
 **Language Adaptation**: Generate output files in the same language as the user's conversation. If user speaks Chinese, generate Chinese markdown files. If user speaks English, generate English markdown files.
 
