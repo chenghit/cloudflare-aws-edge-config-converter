@@ -46,43 +46,37 @@ Example:
 - Value: origin.example.com
 - Proxied: Yes
 - Status: ✅ Convertible
-- Total Rules: 15
+- Total Rules: 5
 
-### Redirect Rules (2 rules)
+### Redirect Rules (1 rule)
 | Priority | Match Expression | Target URL | Status Code |
 |----------|------------------|------------|-------------|
-| 1 | `http.request.uri.path eq "/old"` | `/new` | 301 |
+| 1 | `http.host eq "example.com" and http.request.uri.path eq "/old"` | `/new` | 301 |
 
-### URL Rewrite Rules (2 rules)
+### URL Rewrite Rules (1 rule)
 | Priority | Match Expression | Rewrite Action |
 |----------|------------------|----------------|
-| 1 | `http.request.uri.path matches "^/api/v1/(.*)"` | `/v2/$1` |
+| 1 | `http.host eq "example.com" and http.request.uri.path matches "^/api/v1/(.*)"` | `/v2/$1` |
 
-### Bulk Redirects (3 rules)
+### Bulk Redirects (1 rule)
 | Priority | Source URL | Target URL | Status Code | Include Subdomains | Preserve Query String |
 |----------|------------|------------|-------------|-------------------|----------------------|
 | 1 | example.com/old | example.com/new | 301 | No | Yes |
 
-### Request Header Transform Rules (2 rules)
+### Request Header Transform Rules (1 rule)
 | Priority | Match Expression | Header Action |
 |----------|------------------|---------------|
-| 1 | `http.request.uri.path matches "^/api/.*"` | Set `X-API-Version: 2.0` |
+| 1 | `http.host eq "example.com" and http.request.uri.path matches "^/api/.*"` | Set `X-API-Version: 2.0` |
 
-### Managed Transforms
-| Transform Type | Enabled |
-|----------------|---------|
-| True-Client-IP Header | Yes |
-
-### Cache Rules (5 rules)
+### Cache Rules (1 rule)
 | Priority | Match Expression | Action | Settings |
 |----------|------------------|--------|----------|
-| 1 | `http.request.uri.path matches "^/api/.*"` | Set cache TTL | TTL: 0s |
-| 2 | `http.request.uri.path matches ".*\\.jpg$"` | Set cache TTL | TTL: 86400s |
+| 1 | `http.host eq "example.com" and http.request.uri.path matches "^/api/.*"` | Set cache TTL | TTL: 0s |
 
-### Origin Rules (3 rules)
+### Origin Rules (1 rule)
 | Priority | Match Expression | Action | Settings |
 |----------|------------------|--------|----------|
-| 1 | `http.request.uri.path matches "^/api/.*"` | Override origin | Host: api-backend.example.com |
+| 1 | `http.request.full_uri wildcard "https://example.com/api/*"` | Override origin | Host: api-backend.example.com |
 
 ### Custom Error Rules (1 rule)
 | Error Code | Custom Response |
@@ -98,12 +92,12 @@ Example:
 ### Response Header Transform Rules (1 rule)
 | Priority | Match Expression | Header Action |
 |----------|------------------|---------------|
-| 1 | `true` | Set `X-Frame-Options: DENY` |
+| 1 | `http.host eq "example.com" and http.request.uri.path wildcard "/docs/*"` | Set `X-Custom-Header: value` |
 
 ### Compression Rules (1 rule)
 | Priority | Match Expression | Compression Type |
 |----------|------------------|------------------|
-| 1 | `true` | Gzip, Brotli |
+| 1 | `http.host eq "example.com"` | Gzip, Brotli |
 
 ---
 
@@ -114,6 +108,11 @@ Example:
 
 ## Global Rules (no http.host match)
 These rules may apply to multiple DNS records. User decision required for assignment.
+
+### Managed Transforms (Zone-level)
+| Transform Type | Enabled |
+|----------------|---------|
+| True-Client-IP Header | Yes |
 
 ### Cache Rules (2 rules)
 [Same table structure as above]
