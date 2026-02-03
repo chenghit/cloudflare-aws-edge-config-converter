@@ -40,7 +40,7 @@
 |-------|------|------|------|
 | **cf-waf-converter** | Cloudflare安全规则（WAF、Rate Limiting、IP Access等） | AWS WAF配置（Terraform） | ✅ 可用 |
 | **cf-functions-converter** | Cloudflare transformation规则（Redirect、URL Rewrite、Header Transform等） | CloudFront Functions（JavaScript） | ✅ 可用 |
-| **cf-cdn-analyzer** | Cloudflare CDN配置（Cache、Origin、SSL等） | 配置分析和实施计划 | 🚧 开发中 |
+| **cf-cdn-analyzer** | Cloudflare CDN配置（Cache、Origin、Redirect等） | 基于hostname的配置摘要及用户决策模板 | ✅ 可用 |
 
 **重要**：每个skill需要在独立的Kiro对话中使用，避免在同一对话中混合多种转换任务。
 
@@ -215,30 +215,65 @@ Kiro: [生成JavaScript代码和部署指南]
 
 **完整示例**：[examples/conversation-history/cloudflare-to-cloudfront-functions.txt](examples/conversation-history/cloudflare-to-cloudfront-functions.txt)
 
-### Power 3: 转换CDN配置到CloudFront（开发中）
+### Skill 3: 分析CDN配置
 
-此功能计划在下一版本发布。
+**使用方法**：使用 `/agent swap cf-cdn-analyzer` 切换到CDN分析器子代理
+
+**示例对话**：
+
+```
+用户: /agent swap cf-cdn-analyzer
+
+Kiro: [切换到CDN分析器子代理]
+
+用户: 分析 /path/to/cloudflare-config 中的Cloudflare CDN配置
+
+Kiro: [读取配置文件，检测SaaS，按hostname分组规则]
+      [生成 hostname-based-config-summary.md 和 README_1_analyzer.md]
+      
+      请编辑 hostname-based-config-summary.md 中的"Proxied Hostnames"表格，
+      指示哪些hostname需要应用默认缓存行为...
+```
+
+**输出文件**：
+
+- `hostname-based-config-summary.md` - 按hostname分组的配置摘要及用户决策模板
+- `README_1_analyzer.md` - 下一步指南
+
+**此Skill的功能**：
+
+- 检测SaaS配置（如发现则终止）
+- 识别代理DNS记录（每个记录将成为一个CloudFront Distribution）
+- 检测基于IP的源站（标记为不可转换）
+- 按hostname分组所有规则，遵循Cloudflare执行顺序
+- 识别隐式的Cloudflare默认缓存行为
+- 生成用户决策模板用于选择默认缓存行为
+
+**下一步**：编辑摘要文件并运行Planner skill (cf-cdn-planner) 以确定CloudFront实现方法。
+
+**注意**：这是多阶段CDN迁移工作流程（Skills 3-11）的第一步。完整工作流程见[架构设计](./docs/architecture/skill-3-11-design-CN.md)。
 
 ## 最佳实践
 
 ### ✅ 推荐做法
 
-1. **一次转换一个项目**
+1. **使用独立的子代理处理不同任务**
+
+   - 使用 `/agent swap cf-waf-converter` 转换安全规则
+   - 使用 `/agent swap cf-functions-converter` 转换transformation规则
+   - 使用 `/agent swap cf-cdn-analyzer` 分析CDN配置
+   - 每个子代理有独立的上下文，避免混淆
+
+2. **一次转换一个项目**
 
    - 完成一个domain的转换后，新开对话
    - 避免多个项目的配置在同一对话中混淆
-
-2. **分别转换不同类型的规则**
-
-   - 在独立对话中转换安全规则
-   - 在另一个对话中转换transformation规则
-   - 不要在同一对话中混合转换
 
 3. **使用清晰的描述**
 
    - 转换安全规则：提到"AWS WAF"或"安全规则"
    - 转换transformation规则：提到"CloudFront Function"或"redirect"
-   - 帮助Kiro正确激活对应的power
+   - 分析CDN配置：提到"CDN配置"或"analyze"
 
 4. **验证生成的摘要**
 
