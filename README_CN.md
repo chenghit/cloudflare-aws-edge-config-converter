@@ -36,13 +36,13 @@
 
 本工具包含多个独立的Kiro Powers，每个power专注于特定类型的配置转换：
 
-| Power | 输入 | 输出 | 状态 |
+| Skill | 输入 | 输出 | 状态 |
 |-------|------|------|------|
-| **cloudflare-to-aws-waf-converter** | Cloudflare安全规则（WAF、Rate Limiting、IP Access等） | AWS WAF配置（Terraform） | ✅ 可用 |
-| **cloudflare-to-cloudfront-functions-converter** | Cloudflare transformation规则（Redirect、URL Rewrite、Header Transform等） | CloudFront Functions（JavaScript） | ✅ 可用 |
-| **cloudflare-to-cloudfront-config-converter** | Cloudflare CDN配置（Cache、Origin、SSL等） | CloudFront Distribution配置（Terraform） | 🚧 开发中 |
+| **cf-waf-converter** | Cloudflare安全规则（WAF、Rate Limiting、IP Access等） | AWS WAF配置（Terraform） | ✅ 可用 |
+| **cf-functions-converter** | Cloudflare transformation规则（Redirect、URL Rewrite、Header Transform等） | CloudFront Functions（JavaScript） | ✅ 可用 |
+| **cf-cdn-analyzer** | Cloudflare CDN配置（Cache、Origin、SSL等） | 配置分析和实施计划 | 🚧 开发中 |
 
-**重要**：每个power需要在独立的Kiro对话中使用，避免在同一对话中混合多种转换任务。
+**重要**：每个skill需要在独立的Kiro对话中使用，避免在同一对话中混合多种转换任务。
 
 ## 推荐配置
 
@@ -76,9 +76,9 @@
 # 打开Kiro → Powers面板（👻⚡ 图标）
 # 点击"Add power from GitHub" → "Import power from GitHub"
 # 安装WAF转换器：
-#   输入：https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-aws-waf-converter
+#   输入：https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cf-waf-converter
 # 安装CloudFront Functions转换器：
-#   输入：https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-cloudfront-functions-converter
+#   输入：https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cf-functions-converter
 
 # 4. 在Kiro IDE中打开工作区
 # 文件 → 打开文件夹 → 选择包含Cloudflare配置文件的文件夹
@@ -118,8 +118,8 @@ terraform version
 2. 点击Powers面板（👻⚡ 图标）
 3. 点击"Add power from GitHub" → "Import power from GitHub"
 4. 输入仓库URL及子目录路径：
-   - WAF转换器：`https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-aws-waf-converter`
-   - CloudFront Functions转换器：`https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cloudflare-to-cloudfront-functions-converter`
+   - WAF转换器：`https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cf-waf-converter`
+   - CloudFront Functions转换器：`https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cf-functions-converter`
 5. 点击"Install"
 
 ### 从本地路径安装（用于开发）
@@ -129,8 +129,8 @@ terraform version
 3. 点击Powers面板
 4. 点击"Add power from GitHub" → "Import power from a folder"
 5. 选择power目录：
-   - `cloudflare-to-aws-waf-converter/`
-   - `cloudflare-to-cloudfront-functions-converter/`
+   - `cf-waf-converter/`
+   - `cf-functions-converter/`
 
 ## 使用指南
 
@@ -463,7 +463,7 @@ Power："我找不到标准配置文件。请指定：
 
 **实施后的影响：**
 
-⚠️ **当Powers 3-11实现后，当前的`cloudflare-to-cloudfront-functions-converter`将被废弃（deprecated）。**
+⚠️ **当Powers 3-11实现后，当前的`cf-functions-converter`将被废弃（deprecated）。**
 
 原因：
 - Powers 3-11提供更完整的CDN配置转换（不仅是Functions）
@@ -475,7 +475,7 @@ Power："我找不到标准配置文件。请指定：
 - 2026 Q1: 完成架构设计，实现Power 3（分析器）作为subagent原型
 - 2026 Q2: 实现Powers 4-11作为subagents，实现context隔离
   - 提供自动化脚本用于Kiro Powers安装和subagent配置
-  - 废弃`cloudflare-to-cloudfront-functions-converter`
+  - 废弃`cf-functions-converter`
 - 2026 Q3: 优化subagent工作流和用户体验
   - 并行subagent执行的性能调优
   - 增强错误处理和恢复机制
