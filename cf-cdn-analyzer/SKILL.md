@@ -176,6 +176,8 @@ Parse `DNS.txt` to identify:
 
 ### 5. Group Configuration by Hostname
 
+**CRITICAL: Only assign rules to specific DNS records if the rule explicitly matches that hostname. If a rule has no hostname match or uses wildcard for all subdomains, it MUST be listed as Global Rule.**
+
 For each proxied hostname, collect all relevant configuration:
 
 **Redirect Rules:**
