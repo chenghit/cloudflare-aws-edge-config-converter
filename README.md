@@ -37,9 +37,9 @@ This tool contains multiple independent Agent Skills, each focused on specific c
 
 | Skill | Input | Output | Status |
 |-------|-------|--------|--------|
-| **cloudflare-to-aws-waf-converter** | Cloudflare security rules (WAF, Rate Limiting, IP Access, etc.) | AWS WAF configuration (Terraform) | ✅ Available |
-| **cloudflare-to-cloudfront-functions-converter** | Cloudflare transformation rules (Redirect, URL Rewrite, Header Transform, etc.) | CloudFront Functions (JavaScript) | ✅ Available |
-| **cloudflare-cdn-config-analyzer** | Cloudflare CDN configuration (Cache, Origin, SSL, etc.) | Configuration analysis and implementation plan | 🚧 In Development |
+| **cf-waf-converter** | Cloudflare security rules (WAF, Rate Limiting, IP Access, etc.) | AWS WAF configuration (Terraform) | ✅ Available |
+| **cf-functions-converter** | Cloudflare transformation rules (Redirect, URL Rewrite, Header Transform, etc.) | CloudFront Functions (JavaScript) | ✅ Available |
+| **cf-cdn-analyzer** | Cloudflare CDN configuration (Cache, Origin, SSL, etc.) | Configuration analysis and implementation plan | 🚧 In Development |
 
 **Why Subagents?** Each skill runs in a separate Kiro subagent with isolated context. This prevents context pollution when handling complex multi-step conversions, especially for the upcoming CDN migration workflow (Skills 3-11) which requires parallel execution of multiple converter skills. See [Architecture Design](./docs/architecture/) for details.
 
@@ -595,7 +595,7 @@ We are designing a comprehensive CDN configuration migration solution that refac
 
 **Impact After Implementation:**
 
-⚠️ **When Skills 3-11 are implemented, the current `cloudflare-to-cloudfront-functions-converter` will be deprecated.**
+⚠️ **When Skills 3-11 are implemented, the current `cf-functions-converter` will be deprecated.**
 
 Reasons:
 - Skills 3-11 provide more complete CDN configuration conversion (not just Functions)
@@ -607,7 +607,7 @@ Reasons:
 - 2026 Q1: Complete architecture design, implement Skill 3 (Analyzer) as subagent prototype
 - 2026 Q2: Implement Skills 4-11 as subagents with context isolation
   - Provide automation scripts for Kiro Skills installation and subagent configuration
-  - Deprecate `cloudflare-to-cloudfront-functions-converter`
+  - Deprecate `cf-functions-converter`
 - 2026 Q3: Optimize subagent workflow and user experience
   - Performance tuning for parallel subagent execution
   - Enhanced error handling and recovery mechanisms
