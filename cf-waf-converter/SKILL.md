@@ -1,5 +1,5 @@
 ---
-name: cloudflare-to-aws-waf-converter
+name: cf-waf-converter
 description: Converts Cloudflare security configurations (WAF custom rules, rate limiting rules, IP access rules, IP/ASN lists) to AWS WAF Terraform configuration for CloudFront distributions. Use this skill when you need to migrate Cloudflare security rules to AWS WAF, convert Cloudflare firewall rules to AWS, or transform Cloudflare IP access controls and rate limiting to AWS WAF. This skill reads CloudflareBackup configuration files, analyzes rule convertibility, generates conversion plans, produces Terraform modules with proper nesting and splitting strategies, and validates the output against AWS WAF constraints. It handles skip actions, rate-based rules with fallback configurations, IP set management, and generates deployment-ready Terraform code with two Web ACL configurations (website and API/file variants).
 ---
 

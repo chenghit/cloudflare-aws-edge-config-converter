@@ -1,5 +1,5 @@
 ---
-name: cloudflare-to-cloudfront-functions-converter
+name: cf-functions-converter
 description: Converts Cloudflare transformation rules (redirect rules, URL rewrite rules, request/response header transforms, bulk redirects, managed transforms) to AWS CloudFront Functions JavaScript Runtime 2.0. Use this skill when you need to migrate Cloudflare transformation rules to CloudFront Functions, convert Cloudflare redirects and rewrites to CloudFront, or transform Cloudflare header manipulation rules to CloudFront Functions. This skill reads CloudflareBackup configuration files, identifies convertible and non-convertible rules, generates CloudFront Function code with proper syntax constraints (no optional chaining, sequential await), handles bulk redirects with Key Value Store, manages continent/EU country mappings, validates against 10KB size limits, generates minified versions when needed, and produces deployment-ready JavaScript code with KVS data and deployment guides.
 ---
 
