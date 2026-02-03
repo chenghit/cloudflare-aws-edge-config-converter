@@ -129,6 +129,18 @@ Installed subagents:
 - `cf-waf-converter` - Converts Cloudflare security rules to AWS WAF
 - `cf-functions-converter` - Converts Cloudflare transformation rules to CloudFront Functions
 
+### Updating Skills
+
+To update to the latest version:
+
+```bash
+cd cloudflare-aws-edge-config-converter
+git pull
+./install.sh
+```
+
+The install script will automatically replace old skills with new versions.
+
 ## Usage Guide
 
 ### Preparation: Backup Cloudflare Configuration
