@@ -2,7 +2,7 @@
   "name": "cf-functions-converter",
   "description": "Converts Cloudflare transformation rules to CloudFront Functions",
   "resources": [
-    "skill://.kiro/skills/cloudflare-aws-converter/functions-converter/SKILL.md"
+    "skill://~/.kiro/skills/cloudflare-aws-converter/functions-converter/SKILL.md"
   ],
   "tools": ["*"]
 }
