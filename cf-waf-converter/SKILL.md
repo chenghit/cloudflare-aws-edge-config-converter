@@ -84,8 +84,15 @@ Parse JSON to Cloudflare rule expressions. Ignore managed rules and DDoS protect
 
 **This is a draft that will be verified in step 4.5. Do not ask user to confirm yet.**
 
-**Before generating summary, you MUST:**
-- Read `references/non-convertible-rules.md` completely to understand which rules cannot be converted and why
+**Before generating summary, you MUST read these reference documents:**
+
+1. `references/non-convertible-rules.md` - Which rules cannot be converted and why
+2. `references/action-conversions.md` - Rate limiting conversion algorithm (CRITICAL for rate-based rules)
+3. `references/field-conversions.md` - IP/ASN/field mapping rules
+4. `references/nesting-and-splitting.md` - Rule splitting strategy (to understand which rules will be split)
+5. `references/common-mistakes.md` - Common errors to avoid (read this LAST)
+
+**After reading all 5 references above, generate the summary.**
 
 **CRITICAL: Preserve Rule Order**
 
