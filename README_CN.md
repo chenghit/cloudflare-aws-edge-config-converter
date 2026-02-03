@@ -1,535 +1,668 @@
 # Cloudflare to AWS Edge 迁移工具 | [English](./README.md)
 
-**通过AI对话，自动将Cloudflare配置转换为AWS边缘服务配置**
+**通过 AI 对话自动将 Cloudflare 配置转换为 AWS 边缘服务配置**
 
 ---
 
 ## ⚠️ 重要：必需的输入格式
 
-**本工具仅支持由 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 生成的配置文件。**
+**此工具仅适用于由 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 生成的配置文件。**
 
-**❌ 不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)（Cloudflare官方工具）**
+**❌ 不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)（Cloudflare 官方工具）**
 
-如果你提供由 cf-terraforming 生成的 Terraform HCL 文件（`.tf`），本工具的 Skills 将不会激活。任何转换尝试将仅依赖底层大语言模型的通用能力，而不会使用本工具中编码的专业转换逻辑、验证规则和最佳实践。转换结果将不可预测且不受支持。
+如果您提供由 cf-terraforming 生成的 Terraform HCL 文件（`.tf`），此工具的技能将不会激活。任何转换尝试都将仅依赖底层 LLM 的通用能力，而不会使用此工具中编码的专门转换逻辑、验证规则和最佳实践。结果将不可预测且不受支持。
 
-**为什么必须使用 CloudflareBackup：**
-- **可预测的文件结构**：CloudflareBackup 创建标准的目录结构，使用固定的文件名（`WAF-Custom-Rules.txt`、`Rate-limits.txt`、`IP-Lists.txt` 等）
-- **一键备份**：一次运行即可备份所有配置，组织结构一致
-- **Skills 优化**：文件位置和命名约定专为本工具的工作流设计
+**为什么需要 CloudflareBackup：**
+- **可预测的文件结构**：CloudflareBackup 创建标准目录结构，具有固定文件名（`WAF-Custom-Rules.txt`、`Rate-limits.txt`、`IP-Lists.txt` 等）
+- **一键备份**：在单次运行中备份所有配置，组织一致
+- **技能优化**：文件位置和命名约定专为此工具的工作流程设计
 
 **为什么不支持 cf-terraforming：**
-- **无标准输出结构**：cf-terraforming 输出到 stdout；用户必须手动重定向到任意命名的文件
-- **需要手动执行多次**：每种资源类型（rulesets、lists、DNS records 等）都需要单独运行命令
-- **不可预测的文件组织**：Skills 无法在没有标准结构的情况下可靠地定位配置文件
+- **仍需要 API 调用**：cf-terraforming 无法从域名发现区域 ID - 您必须调用 API
+- **错误的输出格式**：生成用于管理 Cloudflare 的 Terraform HCL 代码，而不是用于迁移的配置数据
+- **更多工作，而非更少**：需要多个手动命令 vs. 一个 CloudflareBackup 命令
+- **没有实际好处**：如果您无论如何都要调用 API，CloudflareBackup 一步就能给您所需的一切
 
-如果你更喜欢在 Terraform 工作流中使用 cf-terraforming，你需要手动重新组织其输出以匹配 CloudflareBackup 的结构，这违背了本工具的自动化目的。
-
-详见 [为什么不支持 cf-terraforming？](#为什么不支持-cf-terraforming)
+详见 [为什么不用 cf-terraforming？](#why-not-cf-terraforming) 的详细说明。
 
 ---
 
-## 为什么需要这个工具
+## 为什么使用此工具
 
-从Cloudflare迁移到AWS时，手工转换数百条规则既耗时又容易出错。本工具利用GenAI能力，通过对话式交互自动完成批量配置转换，将迁移时间从数天缩短到数小时。
+从 Cloudflare 迁移到 AWS 时手动转换数百条规则既耗时又容易出错。此工具利用 GenAI 能力通过对话交互自动化批量配置转换，将迁移时间从数天缩短到数小时。
 
-## 功能概览
+## 功能概述
 
-本工具包含多个独立的Kiro Skills，每个power专注于特定类型的配置转换：
+此工具包含多个独立的代理技能，每个都专注于特定的配置转换：
 
-| Skill | 输入 | 输出 | 状态 |
-|-------|------|------|------|
-| **cf-waf-converter** | Cloudflare安全规则（WAF、Rate Limiting、IP Access等） | AWS WAF配置（Terraform） | ✅ 可用 |
-| **cf-functions-converter** | Cloudflare transformation规则（Redirect、URL Rewrite、Header Transform等） | CloudFront Functions（JavaScript） | ✅ 可用 |
-| **cf-cdn-analyzer** | Cloudflare CDN配置（Cache、Origin、Redirect等） | 基于hostname的配置摘要及用户决策模板 | ✅ 可用 |
+| 技能 | 输入 | 输出 | 状态 |
+|-------|-------|--------|--------|
+| **cf-waf-converter** | Cloudflare 安全规则（WAF、速率限制、IP 访问等） | AWS WAF 配置（Terraform） | ✅ 可用 |
+| **cf-functions-converter** | Cloudflare 转换规则（重定向、URL 重写、标头转换等） | CloudFront Functions（JavaScript） | ✅ 可用 |
+| **cf-cdn-analyzer** | Cloudflare CDN 配置（缓存、源站、重定向等） | 基于主机名的配置摘要和用户决策模板 | ✅ 可用 |
 
-**重要**：每个skill需要在独立的Kiro对话中使用，避免在同一对话中混合多种转换任务。
+**为什么使用子代理？** 每个技能在独立的 Kiro 子代理中运行，具有隔离的上下文。这防止了在处理复杂多步转换时的上下文污染，特别是对于即将推出的 CDN 迁移工作流程（技能 3-11），需要并行执行多个转换器技能。详见 [架构设计](./docs/architecture/)。
 
 ## 推荐配置
 
 ### 模型选择
 
-- **默认配置**：`claude-sonnet-4.5`（Kiro默认）
-  - 适用场景：规则数量 < 100条
-  - 足够处理大多数迁移场景
+- **默认配置**：`claude-sonnet-4.5`（Kiro 默认）
+  - 使用场景：< 100 条规则
+  - 适用于大多数迁移场景
 
 - **大规模配置**：`claude-sonnet-4.5-1m`
-  - 适用场景：规则数量 > 100条 或 多个域名且配置复杂
-  - **CDN迁移推荐**：如果有10+个代理域名且规则较多，建议使用此模型
-  - 支持更大的context window
-  - 配置方法：在Kiro中运行 `/model` 命令切换
+  - 使用场景：> 100 条规则或具有复杂配置的多个域名
+  - **推荐用于 CDN 迁移**：如果您有 10+ 个代理域名和各种规则，请使用此模型
+  - 支持更大的上下文窗口
+  - 配置：在 Kiro 中使用 `/model` 命令切换
 
-**CDN迁移注意事项**：CDN配置分析（cf-cdn-analyzer）会同时处理所有代理域名的所有规则。域名和规则越多，context占用越大。使用 `claude-sonnet-4.5-1m` 可确保有足够的context window。
+**CDN 迁移注意事项**：CDN 配置分析（cf-cdn-analyzer）同时处理所有代理域名的所有规则。当域名和规则很多时，上下文大小会快速增长。使用 `claude-sonnet-4.5-1m` 确保足够的上下文窗口。
 
 ### 系统要求
 
-- Kiro IDE（桌面应用程序）
-- 足够的磁盘空间存储Cloudflare配置备份
+- Kiro CLI（命令行工具）
+- 足够的磁盘空间用于 Cloudflare 配置备份
 
 ## 快速开始
 
 ```bash
-# 1. 安装Kiro
-# 下载地址：https://kiro.dev/downloads/
+# 1. 安装 Kiro CLI
+curl -fsSL https://cli.kiro.dev/install | bash
 
-# 2. 备份Cloudflare配置
-# 使用独立的备份工具：https://github.com/chenghit/CloudflareBackup
-# 按照该repo的README安装和使用
+# 2. 备份 Cloudflare 配置
+# 使用独立备份工具：https://github.com/chenghit/CloudflareBackup
+# 按照该仓库的 README 进行安装和使用
 
-# 3. 在Kiro中安装powers
-# 打开Kiro → Powers面板（👻⚡ 图标）
-# 点击"Add power from GitHub" → "Import power from GitHub"
-# 安装WAF转换器：
-#   输入：https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cf-waf-converter
-# 安装CloudFront Functions转换器：
-#   输入：https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cf-functions-converter
+# 3. 克隆此仓库并安装技能
+git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
+cd cloudflare-aws-edge-config-converter
+./install.sh
 
-# 4. 在Kiro IDE中打开工作区
-# 文件 → 打开文件夹 → 选择包含Cloudflare配置文件的文件夹
-# 重要：Kiro IDE只能访问已打开工作区内的文件
+# 4. 启动 Kiro CLI 聊天
+kiro-cli chat
 
-# 5. 开始转换
-# 在Kiro中打开新对话
-# 输入："请将 ./cloudflare-config 目录中的Cloudflare安全规则转换为AWS WAF配置"
+# 5. 切换到转换器子代理并开始转换
+# 在聊天中，使用 /agent swap 命令：
+/agent swap cf-waf-converter
+
+# 然后提供您的 Cloudflare 配置路径：
+# "Convert security rules in /path/to/cloudflare-config"
+
+# 或者对于转换规则：
+/agent swap cf-functions-converter
+# "Convert transformation rules in /path/to/cloudflare-config"
 ```
 
-## 前置条件
+## 前提条件
 
-### 1. 安装Terraform
+### 1. 安装 Terraform
 
-本工具生成的AWS WAF配置需要Terraform 1.8.0或更高版本。
+此工具生成的 AWS WAF 配置需要 Terraform 1.8.0 或更高版本。
 
 ```bash
 # 检查当前版本
 terraform version
 
-# 如果版本低于1.8.0，请访问以下链接升级：
+# 如果版本低于 1.8.0，请通过以下方式升级：
 # https://developer.hashicorp.com/terraform/install
 ```
 
-**重要**：AWS Provider 6.x要求Terraform >= 1.8.0。如果使用较低版本的Terraform，会在`terraform plan`时遇到"Unrecognized remote plugin message"错误。
+**重要**：AWS Provider 6.x 需要 Terraform >= 1.8.0。使用较低的 Terraform 版本会在 `terraform plan` 期间导致"Unrecognized remote plugin message"错误。
 
-### 2. 安装Kiro
+### 2. 安装 Kiro
 
-按照官方文档安装：
-- Kiro安装：https://kiro.dev/docs/getting-started/installation/
+按照官方文档：
+- Kiro 安装：https://kiro.dev/docs/getting-started/installation/
 
 ## 安装
 
-### 从GitHub安装
+运行安装脚本来安装技能和子代理配置：
 
-1. 打开Kiro IDE
-2. 点击Powers面板（👻⚡ 图标）
-3. 点击"Add power from GitHub" → "Import power from GitHub"
-4. 输入仓库URL及子目录路径：
-   - WAF转换器：`https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cf-waf-converter`
-   - CloudFront Functions转换器：`https://github.com/chenghit/cloudflare-aws-edge-config-converter/tree/main/cf-functions-converter`
-5. 点击"Install"
+```bash
+git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
+cd cloudflare-aws-edge-config-converter
+./install.sh
+```
 
-### 从本地路径安装（用于开发）
+这将：
+- 将技能复制到 `~/.kiro/skills/cloudflare-aws-converter/`
+- 将子代理配置复制到 `~/.kiro/agents/`
 
-1. 克隆本仓库
-2. 打开Kiro IDE
-3. 点击Powers面板
-4. 点击"Add power from GitHub" → "Import power from a folder"
-5. 选择power目录：
-   - `cf-waf-converter/`
-   - `cf-functions-converter/`
+已安装的子代理：
+- `cf-waf-converter` - 将 Cloudflare 安全规则转换为 AWS WAF
+- `cf-functions-converter` - 将 Cloudflare 转换规则转换为 CloudFront Functions
+
+### 更新技能
+
+要更新到最新版本：
+
+```bash
+cd cloudflare-aws-edge-config-converter
+git pull
+./install.sh
+```
+
+安装脚本将自动用新版本替换旧技能。
 
 ## 使用指南
 
-### 准备工作：备份Cloudflare配置
+### 准备：备份 Cloudflare 配置
 
-**推荐方式**（安全）：
+**推荐方法**（安全）：
 
-使用独立的备份工具：**[CloudflareBackup](https://github.com/chenghit/CloudflareBackup)**
+使用独立备份工具：**[CloudflareBackup](https://github.com/chenghit/CloudflareBackup)**
 
-按照该repo的README完成Cloudflare配置备份，然后在Kiro中引用备份目录路径进行转换。
+按照该仓库的 README 完成 Cloudflare 配置备份，然后在 Kiro 中引用备份目录路径进行转换。
 
-**为什么不推荐在Kiro中提供API token？**
+**为什么不在 Kiro 中提供 API 令牌？**
 
-Token会保留在对话历史中，存在泄露风险。使用独立备份工具在本地运行更安全。
+令牌会保留在对话历史中，存在安全风险。在本地使用独立备份工具更安全。
 
 **使用示例配置**（用于测试）：
 
-如果你想先测试工具而不备份自己的配置，可以使用项目提供的示例配置：
-- 示例配置位置：`examples/cloudflare-configs/`
-- 包含真实的Cloudflare配置结构
+如果您想在不备份自己配置的情况下测试工具，可以使用提供的示例配置：
+- 位置：`examples/cloudflare-configs/`
+- 包含真实的 Cloudflare 配置结构
 - 可直接用于测试转换功能
 
-### Skill 1: 转换安全规则到AWS WAF
+### 技能 1：将安全规则转换为 AWS WAF
 
-**触发方式**：Skill在你提到"Cloudflare"和"AWS WAF"或"安全规则"时自动激活
+**使用方法**：使用 `/agent swap cf-waf-converter` 切换到 `cf-waf-converter` 子代理
 
 **示例对话**：
 
 ```
-用户: 请将 ./cloudflare_config 目录中的Cloudflare安全规则转换为AWS WAF配置
+User: /agent swap cf-waf-converter
+
+Kiro: [切换到 WAF 转换器子代理]
+
+User: Convert security rules in /path/to/cloudflare-config
 
 Kiro: [读取配置文件，生成规则摘要]
       请确认以下规则摘要是否正确...
 
-用户: 确认正确
+User: Confirmed
 
-Kiro: 请提供一个Web ACL名称用于部署
+Kiro: 请提供用于部署的 Web ACL 名称
 
-用户: my-web-acl
+User: my-web-acl
 
-Kiro: [生成Terraform配置文件]
+Kiro: [生成 Terraform 配置文件]
 ```
 
 **输出文件**：
 
-- `versions.tf` - Terraform和AWS Provider版本约束（要求AWS Provider >= 6.4.0）
-- `main.tf` - 两个Web ACL配置（website和api-and-file）
+- `versions.tf` - Terraform 和 AWS Provider 版本约束（需要 AWS Provider >= 6.4.0）
+- `main.tf` - 两个 Web ACL 配置（website 和 api-and-file）
 - `variables.tf` - 变量定义
 - `terraform.tfvars` - 变量值
 - `README_aws-waf-terraform-deployment.md` - 部署指南
 
 **完整示例**：[examples/conversation-history/cloudflare-to-aws-waf.txt](examples/conversation-history/cloudflare-to-aws-waf.txt)
 
-### Skill 2: 转换Transformation规则到CloudFront Functions
+### 技能 2：将转换规则转换为 CloudFront Functions
 
-**触发方式**：Skill在你提到"Cloudflare"和"CloudFront"或"transformation"或"redirect"时自动激活
+**使用方法**：使用 `/agent swap cf-functions-converter` 切换到 `cf-functions-converter` 子代理
 
 **示例对话**：
 
 ```
-用户: 请将 ./cloudflare_config 目录中的Cloudflare transformation规则转换为CloudFront Function
+User: /agent swap cf-functions-converter
+
+Kiro: [切换到 Functions 转换器子代理]
+
+User: Convert transformation rules in /path/to/cloudflare-config
 
 Kiro: [读取配置文件，生成规则摘要]
       请确认以下规则摘要是否正确...
 
-用户: 确认正确
+User: Confirmed
 
-Kiro: 请提供一个CloudFront Function名称
+Kiro: 请提供 CloudFront Function 名称
 
-用户: my-viewer-request-function
+User: my-viewer-request-function
 
-Kiro: [生成JavaScript代码和部署指南]
+Kiro: [生成 JavaScript 代码和部署指南]
 ```
 
 **输出文件**：
 
 - `cloudflare-transformation-rules-summary.md` - 规则摘要
-- `viewer-request-function.js` - CloudFront Function代码
+- `viewer-request-function.js` - CloudFront Function 代码
 - `viewer-request-function.min.js` - 压缩版本（如需要）
-- `key-value-store.json` - KVS数据（如需要）
+- `key-value-store.json` - KVS 数据（如需要）
 - `README_function_and_kvs_deployment.md` - 部署指南
 
 **完整示例**：[examples/conversation-history/cloudflare-to-cloudfront-functions.txt](examples/conversation-history/cloudflare-to-cloudfront-functions.txt)
 
-### Skill 3: 分析CDN配置
+### 技能 3：分析 CDN 配置
 
-**使用方法**：使用 `/agent swap cf-cdn-analyzer` 切换到CDN分析器子代理
+**使用方法**：使用 `/agent swap cf-cdn-analyzer` 切换到 `cf-cdn-analyzer` 子代理
 
 **示例对话**：
 
 ```
-用户: /agent swap cf-cdn-analyzer
+User: /agent swap cf-cdn-analyzer
 
-Kiro: [切换到CDN分析器子代理]
+Kiro: [切换到 CDN 分析器子代理]
 
-用户: 分析 /path/to/cloudflare-config 中的Cloudflare CDN配置
+User: Analyze Cloudflare CDN config in /path/to/cloudflare-config
 
-Kiro: [读取配置文件，检测SaaS，按hostname分组规则]
+Kiro: [读取配置文件，检测 SaaS，按主机名分组规则]
       [生成 hostname-based-config-summary.md 和 README_1_analyzer.md]
       
-      请编辑 hostname-based-config-summary.md 中的"Proxied Hostnames"表格，
-      指示哪些hostname需要应用默认缓存行为...
+      请编辑 hostname-based-config-summary.md 中的"Proxied Hostnames"表
+      以指示哪些主机名需要默认缓存行为...
 ```
 
 **输出文件**：
 
-- `hostname-based-config-summary.md` - 按hostname分组的配置摘要及用户决策模板
+- `hostname-based-config-summary.md` - 按主机名分组的配置和用户决策模板
 - `README_1_analyzer.md` - 下一步指南
 
-**此Skill的功能**：
+**此技能的功能**：
 
-- 检测SaaS配置（如发现则终止）
-- 识别代理DNS记录（每个记录将成为一个CloudFront Distribution）
-- 检测基于IP的源站（标记为不可转换）
-- 按hostname分组所有规则，遵循Cloudflare执行顺序
-- 识别隐式的Cloudflare默认缓存行为
-- 生成用户决策模板用于选择默认缓存行为
+- 检测 SaaS 配置（如发现则终止）
+- 识别代理 DNS 记录（每个成为一个 CloudFront Distribution）
+- 检测基于 IP 的源站（标记为不可转换）
+- 按照 Cloudflare 执行顺序按主机名分组所有规则
+- 识别隐式 Cloudflare 默认缓存行为
+- 生成默认缓存行为的用户决策模板
 
-**下一步**：编辑摘要文件并运行Planner skill (cf-cdn-planner) 以确定CloudFront实现方法。
+**下一步**：编辑摘要文件并运行规划器技能（cf-cdn-planner）以确定 CloudFront 实现方法。
 
-**注意**：这是多阶段CDN迁移工作流程（Skills 3-11）的第一步。完整工作流程见[架构设计](./docs/architecture/skill-3-11-design-CN.md)。
+**注意**：这是多阶段 CDN 迁移工作流程（技能 3-11）的第一步。完整工作流程请参见 [架构设计](./docs/architecture/skill-3-11-design-EN.md)。
 
 ## 最佳实践
 
 ### ✅ 推荐做法
 
-1. **使用独立的子代理处理不同任务**
-
-   - 使用 `/agent swap cf-waf-converter` 转换安全规则
-   - 使用 `/agent swap cf-functions-converter` 转换transformation规则
-   - 使用 `/agent swap cf-cdn-analyzer` 分析CDN配置
-   - 每个子代理有独立的上下文，避免混淆
+1. **为不同任务使用独立的子代理**
+   - 使用 `/agent swap cf-waf-converter` 处理安全规则
+   - 使用 `/agent swap cf-functions-converter` 处理转换规则
+   - 使用 `/agent swap cf-cdn-analyzer` 进行 CDN 配置分析
+   - 每个子代理都有隔离的上下文以避免混淆
 
 2. **一次转换一个项目**
+   - 完成一个域名的转换后，开始新的聊天会话
+   - 避免混合多个项目的配置
 
-   - 完成一个domain的转换后，新开对话
-   - 避免多个项目的配置在同一对话中混淆
-
-3. **使用清晰的描述**
-
-   - 转换安全规则：提到"AWS WAF"或"安全规则"
-   - 转换transformation规则：提到"CloudFront Function"或"redirect"
-   - 分析CDN配置：提到"CDN配置"或"analyze"
+3. **提供清晰的文件路径**
+   - 始终指定 Cloudflare 配置目录的完整路径
+   - 示例："Convert security rules in /Users/me/cloudflare-backup/example.com/2026-01-12"
 
 4. **验证生成的摘要**
+   - Kiro 会生成规则摘要供您确认
+   - 仔细审查摘要以确保正确理解
+   - 如发现问题请及时纠正
 
-   - Kiro会生成规则摘要供你确认
-   - 仔细检查摘要，确保理解正确
-   - 发现问题及时纠正
-
-### ❌ 避免的做法
+### ❌ 应避免的做法
 
 1. **不要在同一对话中转换多个项目**
+   - 会导致上下文混淆
+   - AI 可能产生幻觉并混合不同项目的配置
 
-   - 会导致context混淆
-   - AI可能产生幻觉，混淆不同项目的配置
-
-2. **不要混合转换不同类型的规则**
-
-   - 例如：在同一对话中既转换WAF又转换CloudFront Functions
-   - 降低转换质量
+2. **不要混合不同规则类型的转换**
+   - 示例：在同一对话中同时转换 WAF 和 CloudFront Functions
+   - 为不同的转换类型使用独立的子代理
 
 3. **不要使用模糊的描述**
-
-   - 避免："帮我转换Cloudflare配置"（不明确转换什么）
-   - 使用："将Cloudflare安全规则转换为AWS WAF配置"（明确具体）
+   - 避免："Help me convert Cloudflare configuration"（不清楚要转换什么）
+   - 使用："Convert Cloudflare security rules to AWS WAF configuration"（具体且清晰）
 
 ## 限制和注意事项
 
 ### 不转换的内容
 
-* **托管规则（Managed Rules）**
+* **托管规则**
+  - 原因：AWS WAF 不支持 Cloudflare 特定功能（如 API 滥用检测）
+  - 替代方案：直接在 AWS WAF 中添加托管规则（反 DDoS、核心规则集、机器人控制等）
+  - 这些标准化配置不需要 AI 转换，避免幻觉
 
-  - 原因：AWS WAF不支持Cloudflare专有功能（如API Abuse Detection）
-  - 替代方案：在AWS WAF中直接添加托管规则（Anti-DDoS、Core Rule Set、Bot Control等）
-  - 这些标准化配置无需AI转换，避免幻觉
+* **页面规则（已弃用）**
+  - 原因：Cloudflare 已弃用页面规则功能
+  - 建议：首先在 Cloudflare 中迁移到现代规则类型（重定向规则、URL 重写规则等），然后使用此工具进行转换
 
-* **Page Rules（已弃用）**
+* **某些高级转换规则**
+  - 原因：Cloudflare 和 CloudFront 功能不是一对一的
+  - 注意：工具会在生成的文档中列出不可转换的规则和替代方案
 
-  - 原因：Cloudflare已弃用Page Rules功能
-  - 建议：先在Cloudflare上迁移到现代规则类型（Redirect Rules、URL Rewrite Rules等），再使用本工具转换
+### 大规模配置考虑
 
-* **部分高级Transformation规则**
-
-  - 原因：Cloudflare和CloudFront功能并非一一对应
-  - 说明：工具会在生成的文档中列出无法转换的规则及替代方案
-
-### 大规模配置的考虑
-
-* **Token消耗**
-
-  - 规则数量 > 100条时，token消耗显著增加
+* **令牌消耗**
+  - 超过 100 条规则时令牌消耗显著增加
   - 可能影响转换质量
-  - 建议：使用`claude-sonnet-4.5-1m`模型，或分批转换
+  - 建议：使用 `claude-sonnet-4.5-1m` 模型，或分批转换
 
 * **转换时间**
-
-  - 规则越多，转换时间越长
-  - 通常：50条规则约需5-10分钟
+  - 规则越多 = 转换时间越长
+  - 典型：50 条规则约 5-10 分钟
 
 ### 转换准确性
 
-* **需要人工审核**
-
-  - AI生成的配置需要人工审核
+* **需要手动审查**
+  - AI 生成的配置需要手动审查
   - 特别是复杂的条件逻辑和正则表达式
-  - 建议在测试环境先验证
+  - 建议先在测试环境中验证
 
-* **边界情况**
-
-  - 某些复杂的嵌套条件可能需要手工调整
-  - 工具会在文档中标注需要注意的地方
+* **边缘情况**
+  - 某些复杂的嵌套条件可能需要手动调整
+  - 工具会在文档中标记需要注意的区域
 
 ## 故障排除
 
-### Skill未正确激活
+### 子代理无法切换
 
-**问题**：Agent说"我将使用 [skill-name]"但没有按照skill的工作流程执行
-
-**症状**：
-- Agent生成临时分析而不是遵循定义的步骤
-- 输出文件未创建或文件名错误
-- Agent没有读取reference文档
+**问题**：`/agent swap` 命令不起作用或找不到子代理
 
 **解决方案**：
-在请求中使用与skill描述匹配的特定关键词：
-- cf-waf-converter: 说"转换**安全规则**"或"转换到**AWS WAF**"
-- cf-functions-converter: 说"转换**transformation规则**"或"转换到**CloudFront Functions**"
-- cf-cdn-analyzer: 说"分析**CDN配置**"或"analyze **CDN config**"
-
-**示例**：
-- ❌ 模糊："分析我的cloudflare配置文件"（skill可能不会激活）
-- ✅ 具体："分析我的cloudflare **CDN配置**"（skill正确激活）
+1. 验证安装：检查 `~/.kiro/agents/cf-waf-converter.json` 是否存在
+2. 重启 Kiro CLI：退出并启动新的 `kiro-cli chat` 会话
+3. 列出可用代理：使用 `/agent list` 查看已安装的子代理
 
 ### 转换结果不符合预期
 
-**问题**：生成的配置与预期不符
+**问题**：生成的配置不符合预期
 
 **解决方案**：
-
-1. 检查Cloudflare配置文件是否完整
+1. 检查 Cloudflare 配置文件是否完整
 2. 确认规则摘要阶段是否正确理解了配置
 3. 尝试在新对话中重新转换
 4. 考虑分批转换复杂配置
 
-### Context混淆
+### 上下文混淆
 
-**问题**：AI混淆了不同项目或不同类型的规则
+**问题**：AI 混合了不同项目或不同规则类型
 
 **解决方案**：
-
 1. 立即停止当前对话
-2. 新开一个对话
-3. 一次只转换一个项目的一种类型规则
+2. 使用 `/agent swap` 开始新对话到正确的子代理
+3. 一次只转换一个项目的一种规则类型
 
-## 为什么不支持 cf-terraforming？
+### 技能未正确激活
 
-[cf-terraforming](https://github.com/cloudflare/cf-terraforming) 是 Cloudflare 的官方工具，用于将配置导出为 Terraform。虽然它非常适合基于 Terraform 的基础设施管理，但由于输出结构的根本差异，它与本转换工具不兼容。
+**问题**：代理说"I will use [skill-name]"但不遵循技能的工作流程
 
-### 输出结构对比
+**症状**：
+- 代理生成临时分析而不是遵循定义的步骤
+- 输出文件未创建或文件名错误
+- 代理不读取参考文档
 
-**CloudflareBackup（支持）**：
-```
-cloudflare_backup/
-├── account/
-│   └── 2026-01-31 10-00-00/
-│       ├── IP-Lists.txt                    # 固定文件名
-│       ├── List-Items-ip-block-list.txt    # 可预测的模式
-│       └── Bulk-Redirect-Rules.txt         # 固定文件名
-└── example.com/
-    └── 2026-01-31 10-00-00/
-        ├── WAF-Custom-Rules.txt            # 固定文件名
-        ├── Rate-limits.txt                 # 固定文件名
-        └── Redirect-Rules.txt              # 固定文件名
-```
+**解决方案**：
+在请求中使用与技能描述匹配的特定关键词：
+- 对于 cf-waf-converter：说"convert **security rules**"或"convert to **AWS WAF**"
+- 对于 cf-functions-converter：说"convert **transformation rules**"或"convert to **CloudFront Functions**"
+- 对于 cf-cdn-analyzer：说"analyze **CDN configuration**"或"analyze **CDN config**"
 
-**cf-terraforming（不支持）**：
+**示例**：
+- ❌ 模糊："analyze my cloudflare config files"（技能可能不激活）
+- ✅ 具体："analyze my cloudflare **CDN config**"（技能正确激活）
+
+## 为什么不用 cf-terraforming？
+
+[cf-terraforming](https://github.com/cloudflare/cf-terraforming) 是 Cloudflare 的官方工具，用于将配置导出到 Terraform。虽然它在基于 Terraform 的基础设施管理方面很出色，但它与此迁移工具根本不兼容。
+
+### 致命缺陷：您仍然需要 API
+
+**cf-terraforming 需要区域 ID 和账户 ID 作为输入** - 它无法从域名发现它们。
+
 ```bash
-# 用户必须运行多个命令并手动命名文件：
-cf-terraforming generate --resource-type cloudflare_ruleset --zone <ID> > 用户任意命名.tf
-cf-terraforming generate --resource-type cloudflare_list --account <ID> > 另一个名字.tf
-cf-terraforming generate --resource-type cloudflare_record --zone <ID> > dns.tf
+# cf-terraforming 需要区域 ID
+cf-terraforming generate --resource-type cloudflare_dns_record --zone <ZONE_ID>
 
-# 结果：不可预测的结构
-用户选择的目录/
-├── 用户任意命名.tf      # 用户自定义名称
-├── 另一个名字.tf         # 用户自定义名称
-└── dns.tf               # 用户自定义名称
+# 但您从哪里获得区域 ID？
+# 您必须调用 Cloudflare API：
+curl -s "https://api.cloudflare.com/client/v4/zones?name=example.com" \
+  -H "Authorization: Bearer $TOKEN" | jq -r '.result[0].id'
 ```
 
-### 为什么这很重要
+**这意味着：**
+1. 您配置域名：`example.com`、`api.example.com`
+2. 您调用 API 获取区域 ID
+3. 您使用这些区域 ID 调用 cf-terraforming
+4. 您获得 Terraform HCL 代码
+5. 您需要将 HCL 转换回配置数据进行迁移
 
-**CloudflareBackup 的可预测结构**允许 Skills：
-1. **自动定位文件**：Skills 确切知道在哪里找到 `WAF-Custom-Rules.txt`
-2. **验证完整性**：Skills 可以检查预期的文件是否存在
-3. **处理关系**：Skills 知道 `List-Items-ip-<name>.txt` 对应 `IP-Lists.txt` 中的列表
+**vs. CloudflareBackup：**
+1. 您配置域名：`example.com`、`api.example.com`
+2. CloudflareBackup 调用 API 获取区域 ID 和配置数据
+3. 您获得准备迁移的配置数据
 
-**cf-terraforming 的灵活输出**造成问题：
-1. **无法发现文件**：Skills 无法猜测用户如何命名文件
-2. **无标准组织**：用户可能以任何目录结构组织文件
-3. **需要手动协调**：用户需要告诉 Skills 每个文件的位置
+**当第 2 步已经给您所需的一切时，为什么要添加第 3-5 步？**
 
-### 用户体验示例
+### "无意义绕道"问题
 
-**使用 CloudflareBackup**：
 ```
-用户："转换 ./cloudflare_backup/example.com/2026-01-31 10-00-00/ 中的 Cloudflare 安全规则"
-Skill：[自动找到 WAF-Custom-Rules.txt、Rate-limits.txt、IP-Lists.txt]
+用户目标：从 Cloudflare 迁移到 AWS
+              ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 选项 1：cf-terraforming（绕远路）                           │
+├─────────────────────────────────────────────────────────────┤
+│ 1. 调用 API 获取区域 ID                                     │
+│ 2. 调用 cf-terraforming 获取 Terraform HCL                 │
+│ 3. 解析 HCL 提取配置数据                                    │
+│ 4. 转换到 AWS                                               │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│ 选项 2：CloudflareBackup（直接路径）                       │
+├─────────────────────────────────────────────────────────────┤
+│ 1. 调用 API 获取区域 ID 和配置数据                          │
+│ 2. 转换到 AWS                                               │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**使用 cf-terraforming**（假设）：
+**cf-terraforming 添加了两个不必要的步骤**（2 和 3），对迁移没有任何价值。
+
+### cf-terraforming 实际做什么
+
+cf-terraforming 本质上是一个包装器：
+1. 调用 Cloudflare API（与 CloudflareBackup 相同）
+2. 将 JSON 响应转换为 Terraform HCL 语法
+3. 输出 Terraform 代码
+
+**对于迁移，您需要第 1 步的数据，而不是第 3 步的代码。**
+
+将 cf-terraforming 用于迁移就像：
+- 翻译英语 → 法语 → 英语（而不是直接使用英语）
+- 转换 JSON → HCL → JSON（而不是直接使用 JSON）
+- 绕道经过另一个城市到达目的地
+
+### "仍需要 API"示例
+
+#### 示例 1：获取区域 ID
+```bash
+# cf-terraforming 无法做到这一点：
+cf-terraforming generate --resource-type cloudflare_dns_record --domain example.com
+# Error: unknown flag: --domain
+
+# 您必须使用 API：
+ZONE_ID=$(curl -s "https://api.cloudflare.com/client/v4/zones?name=example.com" \
+  -H "Authorization: Bearer $TOKEN" | jq -r '.result[0].id')
+
+# 然后调用 cf-terraforming：
+cf-terraforming generate --resource-type cloudflare_dns_record --zone $ZONE_ID
 ```
-用户："转换 ./my_terraform/ 中的 Cloudflare 安全规则"
-Skill："我找不到标准配置文件。请指定：
-        - WAF 规则在哪里？（文件名？）
-        - Rate limits 在哪里？（文件名？）
-        - IP 列表在哪里？（文件名？）
-        - 列表项在哪里？（文件名？）"
-用户：[必须手动指定每个文件位置]
+
+#### 示例 2：获取列表项
+```bash
+# cf-terraforming 需要列表 ID：
+cf-terraforming generate --resource-type cloudflare_list_item \
+  --account $ACCOUNT_ID --resource-id "cloudflare_list_item=$LIST_ID"
+
+# 您从哪里获得列表 ID？从 API：
+curl -s "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/rules/lists" \
+  -H "Authorization: Bearer $TOKEN" | jq -r '.result[].id'
 ```
 
-### 设计决策
+#### 示例 3：获取账户 ID
+```bash
+# cf-terraforming 需要账户 ID：
+cf-terraforming generate --resource-type cloudflare_list --account $ACCOUNT_ID
 
-本工具优先考虑**自动化和可靠性**而非灵活性：
-- **一条备份命令**（CloudflareBackup）vs. 多条手动命令（cf-terraforming）
-- **可预测的文件位置** vs. 用户自定义组织
-- **零配置** vs. 手动文件映射
+# 您从哪里获得账户 ID？从 API：
+curl -s "https://api.cloudflare.com/client/v4/zones/$ZONE_ID" \
+  -H "Authorization: Bearer $TOKEN" | jq -r '.result.account.id'
+```
 
-如果你在 Terraform 工作流中使用 cf-terraforming，你需要手动重新组织其输出以匹配 CloudflareBackup 的结构（固定文件名、标准目录布局），这违背了本自动化工具的目的。
+**在每种情况下，您都已经在调用返回所需配置数据的 API。**
+
+### 真实对比
+
+| 步骤 | cf-terraforming 方法 | CloudflareBackup 方法 |
+|------|-------------------------|---------------------------|
+| 1. 获取区域 ID | 调用 API ✓ | 调用 API ✓ |
+| 2. 获取配置数据 | 调用 cf-terraforming | 已从第 1 步获得 |
+| 3. 解析 HCL | 解析 Terraform 语法 | 不适用 |
+| 4. 提取配置 | 转换 HCL → JSON | 不适用 |
+| 5. 迁移到 AWS | 使用转换工具 | 使用转换工具 |
+
+**cf-terraforming 添加了 3 个额外步骤（2、3、4），对迁移毫无作用。**
+
+### cf-terraforming 实际用途
+
+cf-terraforming 是为完全不同的用例设计的：
+
+**用例：采用 Terraform 管理 Cloudflare**
+```
+当前状态：通过仪表板/API 管理 Cloudflare
+目标：通过 Terraform 管理 Cloudflare
+解决方案：cf-terraforming 生成 Terraform 代码
+结果：继续使用 Cloudflare，现在使用 IaC
+```
+
+**不适用于：从 Cloudflare 迁移到 AWS**
+```
+当前状态：使用 Cloudflare
+目标：迁移到 AWS
+解决方案：??? cf-terraforming 生成 Cloudflare Terraform 代码 ???
+结果：您仍需要转换到 AWS（cf-terraforming 无法帮助）
+```
+
+### "但我已经使用 cf-terraforming"论点
+
+**问：**"我已经使用 cf-terraforming 管理我的 Cloudflare 基础设施。我不能直接使用这些文件吗？"
+
+**答：不能，因为：**
+
+1. **您仍需要来自 API 的新数据**
+   - 您的 `.tf` 文件可能已过时
+   - 迁移需要当前配置
+   - 您无论如何都需要重新运行 cf-terraforming
+
+2. **cf-terraforming 输出是为 Terraform 而非迁移设计的**
+   - 包含 Terraform 特定语法（变量、引用、函数）
+   - 缺少转换所需的元数据（ID、时间戳、启用状态）
+   - 为 Terraform 状态管理而非数据提取优化
+
+3. **您仍需要调用 API**
+   - 为 cf-terraforming 获取区域 ID
+   - 为 cf-terraforming 获取账户 ID
+   - 为列表项获取列表 ID
+   - **此时您已经拥有 CloudflareBackup 会给您的数据**
+
+**更好的方法：**
+- 继续使用 cf-terraforming 管理 Cloudflare
+- 为迁移运行一次 CloudflareBackup（5 分钟）
+- 使用此工具迁移到 AWS
+- 继续使用 cf-terraforming 管理 Cloudflare（如果您保留它）
+
+### 设计决策：不走无意义的弯路
+
+此工具拒绝支持 cf-terraforming，因为：
+
+1. ❌ **无论如何都需要 API**：无法避免调用 API 获取区域/账户 ID
+2. ❌ **增加复杂性**：HCL 解析、格式转换、错误处理
+3. ❌ **没有好处**：API 已经返回我们需要的数据
+4. ❌ **更多用户工作**：多个命令 vs. 一个命令
+5. ❌ **维护负担**：需要支持和测试两种输入格式
+
+vs. CloudflareBackup：
+
+1. ✅ **一次 API 调用**：获取区域 ID 和配置数据
+2. ✅ **简单格式**：来自 API 的 JSON，无需转换
+3. ✅ **直接路径**：API → 迁移工具 → AWS
+4. ✅ **一个命令**：用户运行一个脚本，完成
+5. ✅ **单一格式**：只需支持和测试 JSON
+
+**如果您无论如何都要调用 API（这是必须的），请以您实际需要的格式获取您实际需要的数据。**
+
+### 底线
+
+支持 cf-terraforming 就像：
+- 建造一座通往无处的桥
+- 添加一个收费但不提供服务的中间人
+- 在美国时将美元转换为欧元再转换为美元
+
+**这不仅仅是不必要的 - 它是适得其反的。**
 
 ## 相关资源
 
-- [Kiro文档](https://kiro.dev/docs/)
-- [Kiro Skills](https://kiro.dev/powers/)
-- [AWS WAF文档](https://docs.aws.amazon.com/waf/)
-- [CloudFront Functions文档](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-functions.html)
+- [Kiro 文档](https://kiro.dev/docs/)
+- [Kiro CLI 中的代理技能支持](https://kiro.dev/changelog/cli/1-24/)
+- [AWS WAF 文档](https://docs.aws.amazon.com/waf/)
+- [CloudFront Functions 文档](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-functions.html)
 
-## Roadmap
+## 路线图
 
-### 🚧 Skills 3-11: 完整的CDN配置迁移方案（架构设计中）
+### 🚧 技能 3-11：完整的 CDN 配置迁移解决方案（架构设计阶段）
 
-我们正在设计一套更完整的CDN配置迁移方案，将当前的单一power重构为多个专门的powers：
+我们正在设计一个全面的 CDN 配置迁移解决方案，将当前的单一技能重构为多个专门的技能：
 
 **架构设计文档：**
-- [Skill 3-11 Architecture Design (English)](./docs/architecture/power-3-11-design-EN.md)
-- [Skill 3-11 架构设计 (中文)](./docs/architecture/power-3-11-design-CN.md)
+- [技能 3-11 架构设计（英文）](./docs/architecture/skill-3-11-design-EN.md)
+- [技能 3-11 架构设计（中文）](./docs/architecture/skill-3-11-design-CN.md)
 - [架构变更日志](./docs/architecture/CHANGELOG.md)
 
-**计划中的Powers：**
+**计划的技能：**
 
-| Power | 职责 | 输出 | 状态 |
-|-------|-----|------|------|
-| **Skill 3** | 配置分析器 - 解析Cloudflare CDN配置并按hostname分组 | 基于hostname的配置汇总 + 用户输入模板 | 🎨 架构设计中 |
-| **Skill 4** | 实施规划器 - 确定CloudFront实现方法 | 实施计划 | 🎨 架构设计中 |
-| **Skill 5** | 计划验证器 - 验证实施计划正确性 | 验证报告（关键：错误的计划=错误的转换器） | 🎨 架构设计中 |
-| **Skill 6** | 任务编排器 - 生成任务分配和执行指南 | 任务分配文件、执行指南 | 🎨 架构设计中 |
-| **Skill 7** | Viewer Request Function转换器 | CloudFront Function代码（每域名一个文件） | 📝 待设计 |
-| **Skill 8** | Viewer Response Function转换器 | CloudFront Function代码（每域名一个文件） | 📝 待设计 |
-| **Skill 9** | Origin Request Lambda转换器 | Lambda@Edge代码 | 📝 待设计 |
-| **Skill 10** | Origin Response Lambda转换器 | Lambda@Edge代码 | 📝 待设计 |
-| **Skill 11** | CloudFront配置生成器 | Terraform配置、部署指南 | 📝 待设计 |
+| 技能 | 职责 | 输出 | 状态 |
+|-------|---------------|--------|--------|
+| **技能 3** | 配置分析器 - 解析 Cloudflare CDN 配置并按主机名分组 | 基于主机名的配置摘要 + 用户输入模板 | 🎨 架构设计 |
+| **技能 4** | 实现规划器 - 确定 CloudFront 实现方法 | 实现计划 | 🎨 架构设计 |
+| **技能 5** | 计划验证器 - 验证实现计划的正确性 | 验证报告（关键：错误计划 = 错误转换器） | 🎨 架构设计 |
+| **技能 6** | 任务编排器 - 生成任务分配和执行指南 | 任务分配文件，执行指南 | 🎨 架构设计 |
+| **技能 7** | Viewer Request Function 转换器 | CloudFront Function 代码（每个域名一个文件） | 📝 待设计 |
+| **技能 8** | Viewer Response Function 转换器 | CloudFront Function 代码（每个域名一个文件） | 📝 待设计 |
+| **技能 9** | Origin Request Lambda 转换器 | Lambda@Edge 代码 | 📝 待设计 |
+| **技能 10** | Origin Response Lambda 转换器 | Lambda@Edge 代码 | 📝 待设计 |
+| **技能 11** | CloudFront 配置生成器 | Terraform 配置，部署指南 | 📝 待设计 |
 
-**核心改进：**
-- ✅ **从一开始就采用subagent架构** - 所有Skills（3-11）都实现为Kiro subagents，具有隔离的context
+**关键改进：**
+- ✅ **从第一天开始的子代理架构** - 所有技能（3-11）都作为具有隔离上下文的 Kiro 子代理实现
 - ✅ **关注点分离** - 分析器（解析）、规划器（决策）、验证器（验证）、编排器（分配）
-- ✅ **规划前的用户决策** - 业务上下文指导技术实施决策
+- ✅ **规划前的用户决策** - 业务上下文指导技术实现决策
 - ✅ **计划验证** - 在转换器执行前捕获错误（转换后无法恢复）
-- ✅ **按域名分组规则** - 满足CloudFront Function 10KB大小限制
-- ✅ **基于实现方式的任务分配** - 而非按Cloudflare规则类型
-- ✅ **多阶段转换流程** - 分析→决策→规划→验证→编排→转换→部署
-- ✅ **成本意识设计** - 标记高成本方案（Viewer Lambda@Edge）为不可转换
-- ✅ **无状态工作流** - 通过Markdown文件传递状态，支持分批处理
+- ✅ **基于域名的规则分组** - 满足 CloudFront Function 10KB 大小限制
+- ✅ **基于实现的任务分配** - 不是按 Cloudflare 规则类型
+- ✅ **多阶段转换工作流程** - 分析 → 决策 → 规划 → 验证 → 编排 → 转换 → 部署
+- ✅ **成本感知设计** - 将高成本解决方案（Viewer Lambda@Edge）标记为不可转换
+- ✅ **无状态工作流程** - 通过 Markdown 文件进行状态传输，支持批处理
 - ✅ **自动化脚本** - 一键安装和配置
 
-**实施后的影响：**
+**实现后的影响：**
 
-⚠️ **当Skills 3-11实现后，当前的`cf-functions-converter`将被废弃（deprecated）。**
+⚠️ **当技能 3-11 实现后，当前的 `cf-functions-converter` 将被弃用。**
 
 原因：
-- Skills 3-11提供更完整的CDN配置转换（不仅是Functions）
-- 按域名分组，更好地处理Function大小限制
-- 支持更复杂的转换场景（Lambda@Edge、Policies、Cache Behaviors）
-- 更清晰的工作流和任务分配，包含验证步骤
+- 技能 3-11 提供更完整的 CDN 配置转换（不仅仅是 Functions）
+- 基于域名的分组更好地处理 Function 大小限制
+- 支持更复杂的转换场景（Lambda@Edge、策略、缓存行为）
+- 更清晰的工作流程和任务分配，带有验证
 
-**时间线：**
-- 2026 Q1: 完成架构设计，实现Skill 3（分析器）作为subagent原型
-- 2026 Q2: 实现Skills 4-11作为subagents，实现context隔离
-  - 提供自动化脚本用于Kiro Skills安装和subagent配置
-  - 废弃`cf-functions-converter`
-- 2026 Q3: 优化subagent工作流和用户体验
-  - 并行subagent执行的性能调优
-  - 增强错误处理和恢复机制
-  - 基于反馈的用户体验改进
+**时间表：**
+- 2026 Q1：完成架构设计，实现技能 3（分析器）作为子代理原型
+- 2026 Q2：实现技能 4-11 作为具有上下文隔离的子代理
+  - 提供 Kiro 技能安装和子代理配置的自动化脚本
+  - 弃用 `cf-functions-converter`
+- 2026 Q3：优化子代理工作流程和用户体验
+  - 并行子代理执行的性能调优
+  - 基于反馈的增强错误处理和恢复机制
+  - 用户体验改进
 
 ---
 
 ## 反馈和贡献
 
-如有问题或建议，欢迎提交Issue或Pull Request。
+如有问题或建议，请提交 Issue 或 Pull Request。
