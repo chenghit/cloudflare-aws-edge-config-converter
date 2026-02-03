@@ -324,6 +324,21 @@ Kiro: [读取配置文件，检测 SaaS，按主机名分组规则]
   - 原因：Cloudflare 已弃用页面规则功能
   - 建议：首先在 Cloudflare 中迁移到现代规则类型（重定向规则、URL 重写规则等），然后使用此工具进行转换
 
+* **Snippets 和 Workers**
+  - 原因：这些是自定义 JavaScript/TypeScript 函数，而非配置规则
+  - 建议：需要手动转换 - 审查逻辑并重写为 CloudFront Functions 或 Lambda@Edge
+  - 注意：未来版本可能提供转换指导
+
+* **SaaS 和 mTLS 配置**
+  - 原因：复杂的多租户和证书管理配置需要手动架构设计
+  - 注意：Cloudflare Custom Hostnames (SaaS) 和 CloudFront SaaS 的实现模型根本不同
+  - 建议：需要仔细规划的手动迁移
+
+* **图像优化和高级功能**
+  - 原因：CloudFront 不原生支持 Cloudflare 的图像优化、Zaraz 等功能
+  - 替代方案：部署 AWS 解决方案（例如 Dynamic Image Transformation for Amazon CloudFront）
+  - 注意：这些需要单独的基础设施设置，超出简单配置转换范围
+
 * **某些高级转换规则**
   - 原因：Cloudflare 和 CloudFront 功能不是一对一的
   - 注意：工具会在生成的文档中列出不可转换的规则和替代方案

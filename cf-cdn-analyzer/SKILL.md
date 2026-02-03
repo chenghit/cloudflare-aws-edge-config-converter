@@ -178,78 +178,72 @@ Parse `DNS.txt` to identify:
 
 **CRITICAL: Only assign rules to specific DNS records if the rule explicitly matches that hostname. If a rule has no hostname match or uses wildcard for all subdomains, it MUST be listed as Global Rule.**
 
-**CRITICAL: Hostname Matching Rules**
+**CRITICAL: Rule Classification Algorithm**
 
-1. **For rules using `http.host`:**
-   - Extract hostname from expression
-   - Use EXACT match with DNS record hostname
-   - Example: `http.host eq "example.com"` ONLY matches `example.com`, NOT `cdn.example.com`
+For EVERY rule, follow this decision tree:
 
-2. **For rules using `http.request.full_uri`:**
-   - Extract hostname from the URI pattern
-   - Use EXACT match with DNS record hostname
-   - Example: `https://example.com/path` ONLY matches `example.com`, NOT `cdn.example.com`
-   - Example: `https://*.example.com/path` is wildcard → Global Rule
+```
+Step 1: Does the rule expression contain hostname reference?
+├─ NO (e.g., "true", "http.request.uri.path eq '/test'")
+│  └─ → GLOBAL RULE (stop here)
+│
+└─ YES (contains http.host or hostname in http.request.full_uri)
+   │
+   Step 2: Does it use wildcard matching ALL subdomains?
+   ├─ YES (e.g., "*.example.com", ".*\\.example\\.com")
+   │  └─ → GLOBAL RULE (stop here)
+   │
+   └─ NO (specific hostname like "cdn.example.com")
+      │
+      Step 3: Is this hostname in proxied DNS records?
+      ├─ YES
+      │  └─ → SPECIFIC RULE (list under that DNS record)
+      │
+      └─ NO
+         └─ → ORPHANED RULE (list under Orphaned Rules section)
+```
 
-3. **For Bulk Redirects:**
-   - Extract hostname from source URL (format: `hostname/path`)
-   - Use EXACT match with DNS record hostname
-   - Example: `example.com/path` ONLY matches `example.com`, NOT `cdn.example.com`
+**Examples:**
 
-4. **If hostname not in proxied DNS records:**
-   - List under "Orphaned Rules", NOT "Global Rules"
+| Expression | Classification | Reason |
+|------------|---------------|--------|
+| `true` | Global Rule | No hostname reference |
+| `http.request.uri.path eq "/test"` | Global Rule | No hostname reference |
+| `http.user_agent contains "bot"` | Global Rule | No hostname reference |
+| `http.host wildcard "*.example.com"` | Global Rule | Wildcard for all subdomains |
+| `http.request.full_uri wildcard r"https://*.example.com/path/*"` | Global Rule | Wildcard for all subdomains |
+| `http.host eq "cdn.example.com"` | Specific Rule (if cdn.example.com is proxied) | Exact hostname match |
+| `http.host eq "old.example.com"` | Orphaned Rule (if old.example.com is NOT proxied) | Hostname not in DNS records |
+| `cdn.example.com/path` (Bulk Redirect) | Specific Rule (if cdn.example.com is proxied) | Exact hostname match |
 
-For each proxied hostname, collect all relevant configuration:
+**CRITICAL: Wildcard Detection Patterns**
 
-**Redirect Rules:**
-- URL redirect rules matching this hostname
-- Preserve rule priority order
+A rule uses wildcard for all subdomains if it contains ANY of these patterns:
 
-**URL Rewrite Rules:**
-- URL rewrite rules matching this hostname
-- Preserve rule priority order
+1. `*.example.com` (literal asterisk-dot)
+2. `.*\.example\.com` (regex dot-asterisk-backslash-dot)
+3. `.*\\.example\\.com` (escaped regex)
+
+**Test each rule against these patterns. If ANY match → Global Rule.**
+
+---
+
+**For each proxied hostname, collect relevant configuration using the classification algorithm above.**
+
+**Special cases:**
 
 **Bulk Redirects:**
-- Extract hostname from source URL and match with this DNS record
+- Extract hostname from source URL (format: `hostname/path`)
+- If `include_subdomains: true` AND source is apex domain → Global Rule
 - Include referenced list items from `List-Items-redirect-*.txt`
 
-**Request Header Transform Rules:**
-- Header manipulation rules for requests
-- Preserve rule priority order
-
 **Managed Transforms:**
-- Managed transform settings (e.g., True-Client-IP header)
-
-**Cache Rules:**
-- Rules that match this hostname (via `http.host` field or wildcard)
-- Rules with no `http.host` match → mark as "Global Rule" (needs user assignment)
-- Preserve rule priority order
-
-**Origin Rules:**
-- Origin selection rules for this hostname
-- Host header overrides
-- SNI configuration
-
-**Custom Error Rules:**
-- Custom error page configuration
+- Always Global Rule (zone-level configuration)
 
 **Custom Pages:**
-- Custom error page templates (from Custom-Pages.txt)
-- Note which error codes use custom pages vs. Cloudflare defaults
-- If `state: "default"` and `url: null` → using Cloudflare default page
-- If `url` has value → using custom page
-
-**Response Header Transform Rules:**
-- Header manipulation rules for responses
-- Preserve rule priority order
-
-**Compression Rules:**
-- Compression settings for this hostname
-
-**Global Rules (no http.host match):**
-- Rules that don't specify a hostname
-- These may apply to multiple DNS records
-- User decision required for assignment
+- Always separate section (not under Global Rules or specific DNS records)
+- Note: `state: "default"` with `url: null` = using Cloudflare default
+- Note: `url` has value = using custom page
 
 ### 6. Generate Hostname-Based Configuration Summary
 
