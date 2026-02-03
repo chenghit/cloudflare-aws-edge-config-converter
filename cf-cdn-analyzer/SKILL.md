@@ -9,6 +9,8 @@ Analyze Cloudflare CDN configuration and group by proxied hostname for CloudFron
 
 YOU MUST follow the Workflow section below step-by-step.
 
+**Language Adaptation**: Generate output files in the same language as the user's conversation. If user speaks Chinese, generate Chinese markdown files. If user speaks English, generate English markdown files.
+
 ## Path Resolution
 
 Reference files in `references/` directory. User data from path provided by user.
