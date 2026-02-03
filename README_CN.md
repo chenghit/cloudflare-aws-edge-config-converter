@@ -349,6 +349,25 @@ Kiro: [读取配置文件，检测SaaS，按hostname分组规则]
 
 ## 故障排除
 
+### Skill未正确激活
+
+**问题**：Agent说"我将使用 [skill-name]"但没有按照skill的工作流程执行
+
+**症状**：
+- Agent生成临时分析而不是遵循定义的步骤
+- 输出文件未创建或文件名错误
+- Agent没有读取reference文档
+
+**解决方案**：
+在请求中使用与skill描述匹配的特定关键词：
+- cf-waf-converter: 说"转换**安全规则**"或"转换到**AWS WAF**"
+- cf-functions-converter: 说"转换**transformation规则**"或"转换到**CloudFront Functions**"
+- cf-cdn-analyzer: 说"分析**CDN配置**"或"analyze **CDN config**"
+
+**示例**：
+- ❌ 模糊："分析我的cloudflare配置文件"（skill可能不会激活）
+- ✅ 具体："分析我的cloudflare **CDN配置**"（skill正确激活）
+
 ### Power未激活
 
 **问题**：Kiro没有激活对应的power进行转换
