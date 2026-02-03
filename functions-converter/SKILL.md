@@ -1,8 +1,6 @@
 ---
-name: "cloudflare-to-cloudfront-functions-converter"
-displayName: "Cloudflare to CloudFront Functions Converter"
-description: 'Converts Cloudflare transformation rules (redirects, URL rewrites, header modifications, bulk redirects) to AWS CloudFront Functions JavaScript Runtime 2.0. Use this skill when user request contains ANY of these patterns: "Cloudflare" AND ("CloudFront" OR "CloudFront Function" OR "CloudFront Functions" OR "AWS"); ("convert" OR "migrate" OR "transform" OR "port") AND "Cloudflare" AND ("rules" OR "configuration" OR "config"); "Cloudflare" AND ("redirect" OR "rewrite" OR "header" OR "transformation") AND ("AWS" OR "CloudFront")'
-keywords: ["cloudflare to cloudfront function", "convert cloudflare transform", "translate cloudflare redirect", "migrate cloudflare rewrite", "cloudflare rules to function", "cloudflare转cloudfront function", "转换cloudflare转换规则", "cloudflare规则转function"]
+name: cloudflare-to-cloudfront-functions-converter
+description: Converts Cloudflare transformation rules (redirect rules, URL rewrite rules, request/response header transforms, bulk redirects, managed transforms) to AWS CloudFront Functions JavaScript Runtime 2.0. Use this skill when you need to migrate Cloudflare transformation rules to CloudFront Functions, convert Cloudflare redirects and rewrites to CloudFront, or transform Cloudflare header manipulation rules to CloudFront Functions. This skill reads CloudflareBackup configuration files, identifies convertible and non-convertible rules, generates CloudFront Function code with proper syntax constraints (no optional chaining, sequential await), handles bulk redirects with Key Value Store, manages continent/EU country mappings, validates against 10KB size limits, generates minified versions when needed, and produces deployment-ready JavaScript code with KVS data and deployment guides.
 ---
 
 # Cloudflare to CloudFront Functions Converter
@@ -11,26 +9,14 @@ Convert Cloudflare transformation rules to CloudFront Functions (JavaScript Runt
 
 ## Path Resolution
 
-**Steering files**: Reference files in this power's `steering/` directory
-- `steering/field-mapping.md`
-- `steering/operator-conversion.md`
-- `steering/cloudfront-function-limits.md`
-- `steering/cloudfront-event-structure.md`
-- `steering/cloudfront-viewer-headers.md`
-- `steering/cloudfront-helper-methods.md`
-- `steering/kvs-usage-and-limits.md`
-- `steering/bulk-redirects-handling.md`
-- `steering/convertible-rules.md`
-- `steering/non-convertible-rules.md`
-- `steering/continent-countries.md`
-- `steering/conversion-examples.md`
-- `steering/cloudflare-rule-execution-order.md`
-- `steering/validation-checklist.md`
-- `steering/unsupported-syntax.md`
+**Reference files**: Reference files in this skill's `references/` directory
+- `references/field-mapping.md`
+- `references/operator-conversion.md`
+- (... other reference files)
 
 **User data**: Cloudflare configuration files provided by user (e.g., `./cloudflare_config/`)
 
-When reading reference documentation, use relative paths like `steering/xxx.md`.
+When reading reference documentation, use relative paths like `references/xxx.md`.
 When reading user's Cloudflare configs, use the path provided by user.
 
 ## Scope
@@ -54,14 +40,14 @@ This power converts **transformation rules only**, not security rules:
 ## Core Principles
 
 Read these references before conversion:
-- `steering/operator-conversion.md` - **CRITICAL**: Cloudflare operators to CloudFront conversion rules
-- `steering/cloudflare-rule-execution-order.md` - **CRITICAL**: Cloudflare rule execution order (must follow this order in generated code)
-- `steering/cloudfront-function-limits.md` - All constraints (10KB size, 2MB memory, ~1ms execution)
-- `steering/cloudfront-event-structure.md` - Event object structure
-- `steering/cloudfront-viewer-headers.md` - Available viewer headers
-- `steering/cloudfront-helper-methods.md` - Runtime 2.0 helper methods
-- `steering/kvs-usage-and-limits.md` - Key Value Store usage
-- `steering/bulk-redirects-handling.md` - **CRITICAL**: Bulk redirects processing rules
+- `references/operator-conversion.md` - **CRITICAL**: Cloudflare operators to CloudFront conversion rules
+- `references/cloudflare-rule-execution-order.md` - **CRITICAL**: Cloudflare rule execution order (must follow this order in generated code)
+- `references/cloudfront-function-limits.md` - All constraints (10KB size, 2MB memory, ~1ms execution)
+- `references/cloudfront-event-structure.md` - Event object structure
+- `references/cloudfront-viewer-headers.md` - Available viewer headers
+- `references/cloudfront-helper-methods.md` - Runtime 2.0 helper methods
+- `references/kvs-usage-and-limits.md` - Key Value Store usage
+- `references/bulk-redirects-handling.md` - **CRITICAL**: Bulk redirects processing rules
 
 **CRITICAL constraints**:
 - Do NOT use optional chaining (`?.`) or array/object destructuring
@@ -83,7 +69,7 @@ Cloudflare and CloudFront handle URLs fundamentally differently:
 - Bulk Redirects → Check `preserve_query_string` in KVS value
 - Single Redirects (wildcard) → Reconstruct path + query for `${1}`, `${2}`, etc.
 
-**See `steering/conversion-examples.md` for detailed code examples.**
+**See `references/conversion-examples.md` for detailed code examples.**
 
 ## Workflow
 
@@ -195,9 +181,9 @@ If `Bulk-Redirect-Rules.txt` exists:
 ### 3. Convert to Cloudflare Rule Expressions
 
 **Before conversion, you MUST:**
-- Read `steering/convertible-rules.md` to understand which rules can be converted
-- Read `steering/non-convertible-rules.md` to understand which rules cannot be converted and why
-- Read `steering/field-mapping.md` section "Device Detection" to identify device detection rules
+- Read `references/convertible-rules.md` to understand which rules can be converted
+- Read `references/non-convertible-rules.md` to understand which rules cannot be converted and why
+- Read `references/field-mapping.md` section "Device Detection" to identify device detection rules
 
 Convert JSON configurations to Cloudflare rule expressions following [Cloudflare Rules Language](https://developers.cloudflare.com/ruleset-engine/rules-language/) specifications.
 
@@ -268,12 +254,12 @@ Ask user to confirm completeness and correctness.
 ### 5. Generate CloudFront Function Code
 
 **Before generation, you MUST:**
-1. Read `steering/operator-conversion.md` completely to understand Cloudflare operator to CloudFront conversion rules
-2. Read `steering/field-mapping.md` completely to understand Cloudflare to CloudFront field mappings
-3. Read `steering/cloudflare-rule-execution-order.md` completely to understand Cloudflare rule execution order (must follow this order in generated code)
-4. Read `steering/cloudfront-helper-methods.md` for available helper methods
-5. Read `steering/bulk-redirects-handling.md` for bulk redirect KVS generation rules
-6. Read `steering/unsupported-syntax.md` for forbidden JavaScript syntax
+1. Read `references/operator-conversion.md` completely to understand Cloudflare operator to CloudFront conversion rules
+2. Read `references/field-mapping.md` completely to understand Cloudflare to CloudFront field mappings
+3. Read `references/cloudflare-rule-execution-order.md` completely to understand Cloudflare rule execution order (must follow this order in generated code)
+4. Read `references/cloudfront-helper-methods.md` for available helper methods
+5. Read `references/bulk-redirects-handling.md` for bulk redirect KVS generation rules
+6. Read `references/unsupported-syntax.md` for forbidden JavaScript syntax
 7. Ask user for custom function name (default: `cloudflare-migrated-viewer-request`)
 
 **CRITICAL: Continent Matching Logic**
@@ -411,7 +397,7 @@ After user confirms, execute in order:
 
 **MUST complete validation before proceeding to Step 7.**
 
-Read and apply `steering/validation-checklist.md` completely. This checklist covers:
+Read and apply `references/validation-checklist.md` completely. This checklist covers:
 
 1. **Syntax validation** - No forbidden ES6+ features (optional chaining, destructuring, etc.)
 2. **Async operations** - Sequential await, no Promise.all()
@@ -548,16 +534,16 @@ Before delivering files to user, verify:
 
 Read these references as needed during conversion:
 
-- `steering/operator-conversion.md` - Cloudflare operators to CloudFront conversion rules
-- `steering/cloudfront-function-limits.md` - Size, memory, execution time limits
-- `steering/cloudfront-event-structure.md` - Event object structure
-- `steering/cloudfront-viewer-headers.md` - Available CloudFront headers
-- `steering/cloudfront-helper-methods.md` - Runtime 2.0 helper methods
-- `steering/kvs-usage-and-limits.md` - Key Value Store usage and limits
-- `steering/bulk-redirects-handling.md` - Bulk redirects processing rules
-- `steering/convertible-rules.md` - Rules that can be converted
-- `steering/non-convertible-rules.md` - Rules requiring manual intervention
-- `steering/field-mapping.md` - Cloudflare to CloudFront field mappings
-- `steering/continent-countries.md` - Country-to-continent mapping
-- `steering/conversion-examples.md` - Detailed URL conversion code examples
-- `steering/cloudflare-rule-execution-order.md` - Cloudflare rule execution order (must follow this order in generated code)
+- `references/operator-conversion.md` - Cloudflare operators to CloudFront conversion rules
+- `references/cloudfront-function-limits.md` - Size, memory, execution time limits
+- `references/cloudfront-event-structure.md` - Event object structure
+- `references/cloudfront-viewer-headers.md` - Available CloudFront headers
+- `references/cloudfront-helper-methods.md` - Runtime 2.0 helper methods
+- `references/kvs-usage-and-limits.md` - Key Value Store usage and limits
+- `references/bulk-redirects-handling.md` - Bulk redirects processing rules
+- `references/convertible-rules.md` - Rules that can be converted
+- `references/non-convertible-rules.md` - Rules requiring manual intervention
+- `references/field-mapping.md` - Cloudflare to CloudFront field mappings
+- `references/continent-countries.md` - Country-to-continent mapping
+- `references/conversion-examples.md` - Detailed URL conversion code examples
+- `references/cloudflare-rule-execution-order.md` - Cloudflare rule execution order (must follow this order in generated code)

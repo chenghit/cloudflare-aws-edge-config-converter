@@ -1,8 +1,6 @@
 ---
-name: "cloudflare-to-aws-waf-converter"
-displayName: "Cloudflare to AWS WAF Converter"
-description: 'Converts Cloudflare security configurations (WAF custom rules, rate limiting, IP access rules) to AWS WAF Terraform configuration. Use this skill when user request contains ANY of these patterns: "Cloudflare" AND ("AWS WAF" OR "WAF"); (convert OR migrate OR transform OR port) AND "Cloudflare" AND ("security" OR "WAF" OR "firewall" OR "IP" OR "rate limit"); "Cloudflare" AND ("IP access" OR "IP list" OR "rate limiting" OR "custom rules")'
-keywords: ["convert cloudflare waf", "translate cloudflare waf", "cloudflare to aws waf", "migrate cloudflare security", "cloudflare waf to aws", "转换cloudflare waf", "翻译cloudflare waf", "迁移cloudflare安全", "cloudflare转aws waf"]
+name: cloudflare-to-aws-waf-converter
+description: Converts Cloudflare security configurations (WAF custom rules, rate limiting rules, IP access rules, IP/ASN lists) to AWS WAF Terraform configuration for CloudFront distributions. Use this skill when you need to migrate Cloudflare security rules to AWS WAF, convert Cloudflare firewall rules to AWS, or transform Cloudflare IP access controls and rate limiting to AWS WAF. This skill reads CloudflareBackup configuration files, analyzes rule convertibility, generates conversion plans, produces Terraform modules with proper nesting and splitting strategies, and validates the output against AWS WAF constraints. It handles skip actions, rate-based rules with fallback configurations, IP set management, and generates deployment-ready Terraform code with two Web ACL configurations (website and API/file variants).
 ---
 
 # Cloudflare to AWS WAF Converter
@@ -11,11 +9,11 @@ Convert Cloudflare security configurations to AWS WAF Terraform configuration fo
 
 ## Path Resolution
 
-Steering files in `steering/` directory. User data from path provided by user.
+Reference files in `references/` directory. User data from path provided by user.
 
 ## Scope
 
-**⚠️ CRITICAL: ALL rate-based rules are ALWAYS convertible.** If marking as "cannot convert" due to limit < 10, you're wrong. Read `steering/common-mistakes.md` Mistake 0.
+**⚠️ CRITICAL: ALL rate-based rules are ALWAYS convertible.** If marking as "cannot convert" due to limit < 10, you're wrong. Read `references/common-mistakes.md` Mistake 0.
 
 **In Scope:** WAF custom rules, rate limiting rules, IP access rules, IP/ASN lists
 
@@ -87,7 +85,7 @@ Parse JSON to Cloudflare rule expressions. Ignore managed rules and DDoS protect
 **This is a draft that will be verified in step 4.5. Do not ask user to confirm yet.**
 
 **Before generating summary, you MUST:**
-- Read `steering/non-convertible-rules.md` completely to understand which rules cannot be converted and why
+- Read `references/non-convertible-rules.md` completely to understand which rules cannot be converted and why
 
 **CRITICAL: Preserve Rule Order**
 
@@ -152,9 +150,9 @@ Save the summary as `cloudflare-security-rules-summary.md` to avoid conflicts wi
 
 **MANDATORY VERIFICATION STEP - DO NOT SKIP**
 
-Before asking user to confirm, you MUST verify the summary against steering rules and fix any mistakes:
+Before asking user to confirm, you MUST verify the summary against reference rules and fix any mistakes:
 
-1. **Read `steering/common-mistakes.md` completely** - Pay special attention to Mistake 0 (rate-based rules)
+1. **Read `references/common-mistakes.md` completely** - Pay special attention to Mistake 0 (rate-based rules)
 
 2. **Verify each rate-based rule in the summary:**
    - Search for any rate-based rule marked as "❌ Cannot convert" or "cannot convert" due to low calculated limit
@@ -173,19 +171,19 @@ Before asking user to confirm, you MUST verify the summary against steering rule
 
 5. **Report verification results:**
    - If mistakes were found and fixed: Tell user "I found and fixed X mistakes in the summary. Please review the corrected version."
-   - If no mistakes: Tell user "Summary verified against steering rules. No mistakes found."
+   - If no mistakes: Tell user "Summary verified against reference rules. No mistakes found."
 
 Ask user to confirm completeness and correctness.
 
 ### 5. Convert to AWS WAF Terraform
 
 **Before conversion, you MUST:**
-1. Read `steering/terraform-architecture.md` completely to understand the module structure and IP set sharing pattern
-2. Read `steering/nesting-and-splitting.md` completely to understand Terraform nesting constraints and default splitting strategy
-3. Read `steering/field-conversions.md` for IP/ASN/field mapping rules
-4. Read `steering/action-conversions.md` for action and rate limiting conversion rules
-5. Read `steering/aws-managed-rules.md` completely to understand AWS managed rules requirements
-6. Read `steering/common-mistakes.md` completely, including the "Quick Checklist Before Generating Terraform" at the end
+1. Read `references/terraform-architecture.md` completely to understand the module structure and IP set sharing pattern
+2. Read `references/nesting-and-splitting.md` completely to understand Terraform nesting constraints and default splitting strategy
+3. Read `references/field-conversions.md` for IP/ASN/field mapping rules
+4. Read `references/action-conversions.md` for action and rate limiting conversion rules
+5. Read `references/aws-managed-rules.md` completely to understand AWS managed rules requirements
+6. Read `references/common-mistakes.md` completely, including the "Quick Checklist Before Generating Terraform" at the end
 7. **CRITICAL for rate-based rules - READ THIS FIRST**: 
    - **ALL rate-based rules are ALWAYS convertible** - If you're about to mark one as "cannot convert" due to low limit, you're making a mistake
    - **MANDATORY FALLBACK**: If calculated limit < 10 for all windows, use `Limit=10, EvaluationWindowSec=600` (this is NOT optional)
@@ -210,7 +208,7 @@ Ask user to confirm completeness and correctness.
 **For rate-limiting rules:**
 - If ≤10 rules AND all scope_down_statements ≤3 nesting levels: Convert directly without splitting
 - If >10 rules OR any scope_down_statement >3 levels: Mark as "Cannot convert - too complex"
-- See `steering/action-conversions.md` section "Rate-Based Rule Limit and Complexity Constraints" for details
+- See `references/action-conversions.md` section "Rate-Based Rule Limit and Complexity Constraints" for details
 
 **For IP Access Rules and WAF Custom Rules only**, apply splitting in this order:
 
@@ -410,7 +408,7 @@ The generated `modules/waf/main.tf` MUST include rules in this exact order to ma
 
 **Rationale**: In Cloudflare, IP Access Rules execute before WAF Custom Rules. This ordering must be preserved in AWS WAF to maintain equivalent behavior. IP Access Rules should NOT be affected by skip rules from WAF Custom Rules because they execute earlier in the request processing pipeline.
 
-See `steering/aws-managed-rules.md` for complete Terraform HCL templates.
+See `references/aws-managed-rules.md` for complete Terraform HCL templates.
 
 **Skip Action Implementation:**
 
@@ -556,10 +554,10 @@ Create `README_aws-waf-terraform-deployment.md` with:
 
 ## Reference
 
-- `steering/terraform-architecture.md` - Terraform module architecture and IP set sharing pattern
-- `steering/nesting-and-splitting.md` - Terraform nesting constraints and cascading split strategy
-- `steering/field-conversions.md` - IP/ASN/field mapping and conversion rules
-- `steering/action-conversions.md` - Action conversions and rate limiting rules
-- `steering/non-convertible-rules.md` - Rules that require manual intervention and why
-- `steering/aws-managed-rules.md` - AWS managed rules configuration templates and ordering requirements
-- `steering/common-mistakes.md` - Common conversion errors and how to avoid them
+- `references/terraform-architecture.md` - Terraform module architecture and IP set sharing pattern
+- `references/nesting-and-splitting.md` - Terraform nesting constraints and cascading split strategy
+- `references/field-conversions.md` - IP/ASN/field mapping and conversion rules
+- `references/action-conversions.md` - Action conversions and rate limiting rules
+- `references/non-convertible-rules.md` - Rules that require manual intervention and why
+- `references/aws-managed-rules.md` - AWS managed rules configuration templates and ordering requirements
+- `references/common-mistakes.md` - Common conversion errors and how to avoid them

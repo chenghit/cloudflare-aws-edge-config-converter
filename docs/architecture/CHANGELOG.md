@@ -74,7 +74,7 @@ Main Conversation (Coordinator):
 
 ### File Naming
 
-- Design doc renamed: `power-3-4-design-EN.md` → `power-3-11-design-EN.md`
-- Reflects complete Power range: 3 (Analyzer) through 11 (Config Generator)
-- Powers 3-6 are in architecture design phase
-- Powers 7-11 (Converters + Generator) to be designed later
+- Design doc renamed: `power-3-4-design-EN.md` → `skill-3-11-design-EN.md`
+- Reflects complete Skill range: 3 (Analyzer) through 11 (Config Generator)
+- Skills 3-6 are in architecture design phase
+- Skills 7-11 (Converters + Generator) to be designed later
