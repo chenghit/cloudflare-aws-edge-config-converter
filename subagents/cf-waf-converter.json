@@ -4,5 +4,5 @@
   "resources": [
     "skill://~/.kiro/skills/cloudflare-aws-converter/cf-waf-converter/SKILL.md"
   ],
-  "tools": ["*"]
+  "tools": ["fs_read", "fs_write", "glob", "grep", "execute_bash"]
 }
