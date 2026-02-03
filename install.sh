@@ -13,6 +13,7 @@ mkdir -p "$AGENTS_DIR"
 
 # Copy skills
 echo "Copying skills to $SKILLS_DIR..."
+rm -rf "$SKILLS_DIR/waf-converter" "$SKILLS_DIR/functions-converter"
 cp -r waf-converter "$SKILLS_DIR/"
 cp -r functions-converter "$SKILLS_DIR/"
 
