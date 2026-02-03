@@ -52,9 +52,12 @@ This tool contains multiple independent Agent Skills, each focused on specific c
   - Sufficient for most migration scenarios
 
 - **Large-Scale Configuration**: `claude-sonnet-4.5-1m`
-  - Use case: > 100 rules
+  - Use case: > 100 rules OR multiple domains with complex configurations
+  - **Recommended for CDN migration**: If you have 10+ proxied domains with various rules, use this model
   - Supports larger context window
   - Configuration: Use `/model` command in Kiro to switch
+
+**Note for CDN Migration**: CDN configuration analysis (cf-cdn-analyzer) processes all rules across all proxied domains simultaneously. With many domains and rules, context size grows quickly. Using `claude-sonnet-4.5-1m` ensures sufficient context window.
 
 ### System Requirements
 
