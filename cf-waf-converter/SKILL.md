@@ -23,13 +23,19 @@ Reference files in `references/` directory. User data from path provided by user
 
 ## Workflow
 
-### 1. Obtain Cloudflare Configuration
+### 1. Validate Input
 
-Ask user for configuration directory path.
+**CRITICAL: Configuration path must be provided by main agent in the initial query.**
 
-**If no files yet:** Recommend https://github.com/chenghit/CloudflareBackup
+Expected format: "Convert security rules in /path/to/cloudflare-config"
 
-**If summary exists:** Ask user: "Found existing summary. Use it (skip to step 5) or regenerate?"
+**If path not provided:**
+- STOP immediately
+- Return error: "Configuration directory path is required. Please provide the path to CloudflareBackup output directory."
+
+**If summary files already exist in the path:**
+- STOP immediately  
+- Return message: "Found existing summary files (cloudflare-security-rules-summary.md). Please specify whether to use existing summary or regenerate."
 
 ### 2. Discover and Read Configuration Files
 
@@ -39,7 +45,7 @@ Ask user for configuration directory path.
 
 **Step 2.2:** **MANDATORY VALIDATION - If NO configuration files found, STOP immediately:**
 
-Display this message to user:
+Return error message:
 
 ```
 ⚠️ CRITICAL: No CloudflareBackup configuration files found.
@@ -54,18 +60,14 @@ Expected files:
 - IP-Lists.txt
 - List-Items-*.txt
 
-⚠️ IMPORTANT NOTICE:
-If you continue without providing correct configuration files, any conversion 
-attempt will rely solely on the underlying LLM's general capabilities, without 
-the specialized conversion logic, validation rules, and best practices encoded 
-in this tool. Results will be unpredictable and unsupported.
-
-Please provide the correct CloudflareBackup output directory and try again.
+Please provide the correct CloudflareBackup output directory.
 ```
 
-**Do NOT proceed to Step 2.3 if no files found. Stop the workflow here.**
+**Do NOT proceed if no files found. Stop the workflow here.**
 
-**Step 2.3:** If duplicates found, STOP and ask user to remove duplicates.
+**Step 2.3:** If duplicate files found (same filename in multiple locations):
+- STOP immediately
+- Return error: "Found duplicate configuration files: [list files]. Please remove duplicates and specify which directory to use."
 
 **Step 2.4:** Read all discovered files. For each list in `IP-Lists.txt`, read corresponding `List-Items-ip-<name>.txt` or `List-Items-asn-<name>.txt`.
 
@@ -82,9 +84,7 @@ Parse JSON to Cloudflare rule expressions. Ignore managed rules and DDoS protect
 - Convertible OR non-convertible: Partial (convert convertible parts)
 - Convertible AND non-convertible: Fully non-convertible (AND requires both conditions)
 
-### 4. Generate Markdown Summary (Initial Draft)
-
-**This is a draft that will be verified in step 4.5. Do not ask user to confirm yet.**
+### 4. Generate Markdown Summary
 
 **Before generating summary, you MUST read these reference documents:**
 
@@ -179,10 +179,8 @@ Before asking user to confirm, you MUST verify the summary against reference rul
    - Document what was fixed in your response to user
 
 5. **Report verification results:**
-   - If mistakes were found and fixed: Tell user "I found and fixed X mistakes in the summary. Please review the corrected version."
-   - If no mistakes: Tell user "Summary verified against reference rules. No mistakes found."
-
-Ask user to confirm completeness and correctness.
+   - If mistakes were found and fixed: Document what was fixed
+   - If no mistakes: Proceed to next step
 
 ### 5. Convert to AWS WAF Terraform
 
