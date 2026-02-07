@@ -14,19 +14,19 @@
       "description": "This is the Managed Cloudflare L3/4 DDoS Ruleset. Cloudflare routinely adds signatures to address new attack vectors. Additional configuration allows you to customize the sensitivity of each rule and the performed mitigation action.",
       "id": "3b64149bfa6e4220bbbc2bd6db589552",
       "kind": "managed",
-      "last_updated": "2026-01-09T23:26:02.875911Z",
+      "last_updated": "2026-02-04T14:50:47.890662Z",
       "name": "Cloudflare L3/4 DDoS Ruleset",
       "phase": "ddos_l4",
-      "version": "3023"
+      "version": "3057"
     },
     {
       "description": "Automatic mitigation of HTTP-based DDoS attacks. Cloudflare routinely adds signatures to address new attack vectors. Additional configuration allows you to customize the sensitivity of each rule and the performed mitigation action.",
       "id": "4d21379b4f9f4bb088e0729962c8b3cf",
       "kind": "managed",
-      "last_updated": "2026-01-09T23:26:04.845582Z",
+      "last_updated": "2026-02-04T14:50:50.712719Z",
       "name": "DDoS L7 ruleset",
       "phase": "ddos_l7",
-      "version": "3139"
+      "version": "3173"
     },
     {
       "description": "",

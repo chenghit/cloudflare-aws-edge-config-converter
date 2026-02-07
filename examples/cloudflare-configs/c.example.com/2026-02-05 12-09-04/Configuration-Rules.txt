@@ -15,7 +15,7 @@
         },
         "description": "Enable Email Obfuscation and Browser Integrity Check [Template]",
         "enabled": true,
-        "expression": "(http.request.full_uri wildcard \"https://*.example.com/emails/*\")",
+        "expression": "(http.request.full_uri wildcard \"https://*.c.example.com/emails/*\")",
         "id": "2772cea5c0774fe1ade76abdb521a56e",
         "last_updated": "2025-12-29T02:22:44.488601Z",
         "ref": "2772cea5c0774fe1ade76abdb521a56e",

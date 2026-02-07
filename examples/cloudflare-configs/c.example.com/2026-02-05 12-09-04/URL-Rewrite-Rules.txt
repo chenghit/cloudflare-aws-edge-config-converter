@@ -3,7 +3,7 @@
     "description": "",
     "id": "e3fc795ebd9c4d37b031c3de3d4c1008",
     "kind": "zone",
-    "last_updated": "2025-12-31T13:37:10.452044Z",
+    "last_updated": "2026-02-04T07:40:57.917904Z",
     "name": "default",
     "phase": "http_request_transform",
     "rules": [
@@ -18,7 +18,7 @@
         },
         "description": "Rewrite path for object storage bucket [Template]",
         "enabled": true,
-        "expression": "(http.request.full_uri wildcard r\"https://*.example.com/files/*\")",
+        "expression": "(http.request.full_uri wildcard r\"https://*.c.example.com/files/*\")",
         "id": "d8d16b6a91e841009f8f5aba3b3df4be",
         "last_updated": "2025-12-29T02:18:05.690967Z",
         "ref": "d8d16b6a91e841009f8f5aba3b3df4be",
@@ -35,7 +35,7 @@
         },
         "description": "Rewrite path of moved section [Template]",
         "enabled": true,
-        "expression": "(http.request.full_uri wildcard r\"https://*.example.com/news/2012/*\")",
+        "expression": "(http.request.full_uri wildcard r\"https://*.c.example.com/news/2012/*\")",
         "id": "92ec6ee8e32d4afc9f538381ff076b87",
         "last_updated": "2025-12-29T02:19:26.380314Z",
         "ref": "92ec6ee8e32d4afc9f538381ff076b87",
@@ -57,9 +57,43 @@
         "last_updated": "2025-12-31T13:37:10.452044Z",
         "ref": "03d2002ed02941f9af867ab541c0e767",
         "version": "2"
+      },
+      {
+        "action": "rewrite",
+        "action_parameters": {
+          "uri": {
+            "path": {
+              "expression": "concat(\"/path\", http.request.uri.path)"
+            }
+          }
+        },
+        "description": "Rewrite path for regex",
+        "enabled": true,
+        "expression": "(http.request.uri.path matches r\"^/mt-storage/(.*)|^/mt-storageV2/(.*)|^/market_maker_report/(.*)|^/data-statistics-download/(.*)|^/broker_download/(.*)|^/upex-broker/(.*)\")",
+        "id": "53da5cf261d444d7bd938520d4e12fcf",
+        "last_updated": "2026-01-13T04:17:29.256077Z",
+        "ref": "53da5cf261d444d7bd938520d4e12fcf",
+        "version": "1"
+      },
+      {
+        "action": "rewrite",
+        "action_parameters": {
+          "uri": {
+            "path": {
+              "expression": "regex_replace(http.request.uri.path, \"^/remove-[^/]+(/.*)\", \"${1}\")"
+            }
+          }
+        },
+        "description": "remove-xx",
+        "enabled": true,
+        "expression": "(http.host eq \"serverauto.c.example.com\" and starts_with(http.request.uri.path, \"/remove-\"))",
+        "id": "06a9d115786545ffb352ad3159c520aa",
+        "last_updated": "2026-02-04T07:40:57.917904Z",
+        "ref": "06a9d115786545ffb352ad3159c520aa",
+        "version": "1"
       }
     ],
-    "version": "4"
+    "version": "6"
   },
   "success": true,
   "errors": [],

@@ -19,7 +19,7 @@
       },
       "scope": {
         "id": "fdad34f991d50651deb299889ae1e83c",
-        "name": "example.com",
+        "name": "c.example.com",
         "type": "zone"
       },
       "created_on": "2025-12-15T06:43:25.28864221Z"
