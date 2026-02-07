@@ -202,25 +202,27 @@ git pull
 
 ### 技能 1：将安全规则转换为 AWS WAF
 
-**使用方法**：使用 `/agent swap cf-waf-converter` 切换到 `cf-waf-converter` 子代理
+**推荐用法**（主代理自动调用子代理）：
 
-**示例对话**：
+```
+User: Convert Cloudflare security rules in /path/to/cloudflare-config to AWS WAF using cf-waf-converter
+
+Kiro: [自动调用 cf-waf-converter 子代理]
+      [读取配置文件，生成 Terraform 文件]
+      ✅ 转换完成！生成的文件：
+      - versions.tf
+      - main.tf
+      - variables.tf
+      - terraform.tfvars
+      - README_aws-waf-terraform-deployment.md
+```
+
+**备选用法**（手动切换子代理）：
 
 ```
 User: /agent swap cf-waf-converter
 
-Kiro: [切换到 WAF 转换器子代理]
-
 User: Convert security rules in /path/to/cloudflare-config
-
-Kiro: [读取配置文件，生成规则摘要]
-      请确认以下规则摘要是否正确...
-
-User: Confirmed
-
-Kiro: 请提供用于部署的 Web ACL 名称
-
-User: my-web-acl
 
 Kiro: [生成 Terraform 配置文件]
 ```
@@ -237,25 +239,27 @@ Kiro: [生成 Terraform 配置文件]
 
 ### 技能 2：将转换规则转换为 CloudFront Functions
 
-**使用方法**：使用 `/agent swap cf-functions-converter` 切换到 `cf-functions-converter` 子代理
+**推荐用法**（主代理自动调用子代理）：
 
-**示例对话**：
+```
+User: Convert Cloudflare transformation rules in /path/to/cloudflare-config to CloudFront Functions using cf-functions-converter
+
+Kiro: [自动调用 cf-functions-converter 子代理]
+      [读取配置文件，生成 JavaScript 代码]
+      ✅ 转换完成！生成的文件：
+      - cloudflare-transformation-rules-summary.md
+      - viewer-request-function.js
+      - viewer-request-function.min.js（如果需要）
+      - key-value-store.json（如果需要）
+      - README_function_and_kvs_deployment.md
+```
+
+**备选用法**（手动切换子代理）：
 
 ```
 User: /agent swap cf-functions-converter
 
-Kiro: [切换到 Functions 转换器子代理]
-
 User: Convert transformation rules in /path/to/cloudflare-config
-
-Kiro: [读取配置文件，生成规则摘要]
-      请确认以下规则摘要是否正确...
-
-User: Confirmed
-
-Kiro: 请提供 CloudFront Function 名称
-
-User: my-viewer-request-function
 
 Kiro: [生成 JavaScript 代码和部署指南]
 ```
@@ -272,22 +276,26 @@ Kiro: [生成 JavaScript 代码和部署指南]
 
 ### 技能 3：分析 CDN 配置
 
-**使用方法**：使用 `/agent swap cf-cdn-analyzer` 切换到 `cf-cdn-analyzer` 子代理
+**推荐用法**（主代理自动调用子代理）：
 
-**示例对话**：
+```
+User: Analyze Cloudflare CDN configuration in /path/to/cloudflare-config using cf-cdn-analyzer
+
+Kiro: [自动调用 cf-cdn-analyzer 子代理]
+      [读取配置文件，检测 SaaS，按主机名分组规则]
+      ✅ 分析完成！生成的文件：
+      - hostname-based-config-summary.md
+      - README_1_analyzer.md
+```
+
+**备选用法**（手动切换子代理）：
 
 ```
 User: /agent swap cf-cdn-analyzer
 
-Kiro: [切换到 CDN 分析器子代理]
+User: Analyze CDN configuration in /path/to/cloudflare-config
 
-User: Analyze Cloudflare CDN config in /path/to/cloudflare-config
-
-Kiro: [读取配置文件，检测 SaaS，按主机名分组规则]
-      [生成 hostname-based-config-summary.md 和 README_1_analyzer.md]
-      
-      请编辑 hostname-based-config-summary.md 中的"Proxied Hostnames"表
-      以指示哪些主机名需要默认缓存行为...
+Kiro: [生成配置摘要和下一步指南]
 ```
 
 **输出文件**：
