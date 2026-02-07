@@ -202,25 +202,27 @@ If you want to test the tool without backing up your own configuration, you can 
 
 ### Skill 1: Convert Security Rules to AWS WAF
 
-**How to use**: Switch to `cf-waf-converter` subagent using `/agent swap cf-waf-converter`
+**Recommended Usage** (Main agent invokes subagent automatically):
 
-**Example Conversation**:
+```
+User: Convert Cloudflare security rules in /path/to/cloudflare-config to AWS WAF using cf-waf-converter
+
+Kiro: [Automatically invokes cf-waf-converter subagent]
+      [Reads configuration files, generates Terraform files]
+      ✅ Conversion complete! Generated files:
+      - versions.tf
+      - main.tf
+      - variables.tf
+      - terraform.tfvars
+      - README_aws-waf-terraform-deployment.md
+```
+
+**Alternative Usage** (Manual subagent switch):
 
 ```
 User: /agent swap cf-waf-converter
 
-Kiro: [Switches to WAF converter subagent]
-
 User: Convert security rules in /path/to/cloudflare-config
-
-Kiro: [Reads configuration files, generates rule summary]
-      Please confirm if the following rule summary is correct...
-
-User: Confirmed
-
-Kiro: Please provide a Web ACL name for deployment
-
-User: my-web-acl
 
 Kiro: [Generates Terraform configuration files]
 ```
@@ -237,25 +239,27 @@ Kiro: [Generates Terraform configuration files]
 
 ### Skill 2: Convert Transformation Rules to CloudFront Functions
 
-**How to use**: Switch to `cf-functions-converter` subagent using `/agent swap cf-functions-converter`
+**Recommended Usage** (Main agent invokes subagent automatically):
 
-**Example Conversation**:
+```
+User: Convert Cloudflare transformation rules in /path/to/cloudflare-config to CloudFront Functions using cf-functions-converter
+
+Kiro: [Automatically invokes cf-functions-converter subagent]
+      [Reads configuration files, generates JavaScript code]
+      ✅ Conversion complete! Generated files:
+      - cloudflare-transformation-rules-summary.md
+      - viewer-request-function.js
+      - viewer-request-function.min.js (if needed)
+      - key-value-store.json (if needed)
+      - README_function_and_kvs_deployment.md
+```
+
+**Alternative Usage** (Manual subagent switch):
 
 ```
 User: /agent swap cf-functions-converter
 
-Kiro: [Switches to Functions converter subagent]
-
 User: Convert transformation rules in /path/to/cloudflare-config
-
-Kiro: [Reads configuration files, generates rule summary]
-      Please confirm if the following rule summary is correct...
-
-User: Confirmed
-
-Kiro: Please provide a CloudFront Function name
-
-User: my-viewer-request-function
 
 Kiro: [Generates JavaScript code and deployment guide]
 ```
@@ -272,22 +276,26 @@ Kiro: [Generates JavaScript code and deployment guide]
 
 ### Skill 3: Analyze CDN Configuration
 
-**How to use**: Switch to `cf-cdn-analyzer` subagent using `/agent swap cf-cdn-analyzer`
+**Recommended Usage** (Main agent invokes subagent automatically):
 
-**Example Conversation**:
+```
+User: Analyze Cloudflare CDN configuration in /path/to/cloudflare-config using cf-cdn-analyzer
+
+Kiro: [Automatically invokes cf-cdn-analyzer subagent]
+      [Reads configuration files, detects SaaS, groups rules by hostname]
+      ✅ Analysis complete! Generated files:
+      - hostname-based-config-summary.md
+      - README_1_analyzer.md
+```
+
+**Alternative Usage** (Manual subagent switch):
 
 ```
 User: /agent swap cf-cdn-analyzer
 
-Kiro: [Switches to CDN analyzer subagent]
+User: Analyze CDN configuration in /path/to/cloudflare-config
 
-User: Analyze Cloudflare CDN config in /path/to/cloudflare-config
-
-Kiro: [Reads configuration files, detects SaaS, groups rules by hostname]
-      [Generates hostname-based-config-summary.md and README_1_analyzer.md]
-      
-      Please edit the "Proxied Hostnames" table in hostname-based-config-summary.md
-      to indicate which hostnames need default cache behavior...
+Kiro: [Generates configuration summary and next steps guide]
 ```
 
 **Output Files**:
