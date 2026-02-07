@@ -61,10 +61,12 @@ This tool contains multiple independent Agent Skills, each focused on specific c
 
 ### System Requirements
 
-- Kiro CLI (command-line tool)
+- Kiro CLI or Kiro IDE
 - Sufficient disk space for Cloudflare configuration backups
 
 ## Quick Start
+
+### Using Kiro CLI
 
 ```bash
 # 1. Install Kiro CLI
@@ -94,6 +96,30 @@ kiro-cli chat
 # "Convert transformation rules in /path/to/cloudflare-config"
 ```
 
+### Using Kiro IDE
+
+```bash
+# 1. Install Kiro IDE extension in VS Code
+# Download from: https://kiro.dev/downloads/
+
+# 2. Backup Cloudflare configuration (same as CLI)
+# Use the standalone backup tool: https://github.com/chenghit/CloudflareBackup
+
+# 3. Clone this repository and install skills
+git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
+cd cloudflare-aws-edge-config-converter
+./install.sh
+
+# 4. Open your project in VS Code with Kiro IDE
+
+# 5. Switch to converter subagent
+# Use Command Palette (Cmd/Ctrl+Shift+P) → "Kiro: Switch Agent"
+# Select: cf-waf-converter, cf-functions-converter, or cf-cdn-analyzer
+
+# 6. Start conversation in Kiro chat panel
+# "Convert security rules in /path/to/cloudflare-config"
+```
+
 ## Prerequisites
 
 ### 1. Install Terraform
@@ -112,8 +138,16 @@ terraform version
 
 ### 2. Install Kiro
 
-Follow official documentation:
-- Kiro installation: https://kiro.dev/docs/getting-started/installation/
+Choose either Kiro CLI or Kiro IDE:
+
+**Kiro CLI** (Command-line interface):
+- Installation: https://kiro.dev/docs/getting-started/installation/
+- Skills support: Since version 1.24
+
+**Kiro IDE** (Visual Studio Code extension):
+- Installation: https://kiro.dev/downloads/
+- Skills support: Since version 0.9
+- Skills work the same way in both CLI and IDE
 
 ## Installation
 
@@ -615,6 +649,7 @@ Supporting cf-terraforming would be like:
 ## Related Resources
 
 - [Kiro Documentation](https://kiro.dev/docs/)
+- [Kiro IDE: Custom Subagents and Skills](https://kiro.dev/blog/custom-subagents-skills-and-enterprise-controls/)
 - [Agent Skills Support in Kiro CLI](https://kiro.dev/changelog/cli/1-24/)
 - [AWS WAF Documentation](https://docs.aws.amazon.com/waf/)
 - [CloudFront Functions Documentation](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-functions.html)
