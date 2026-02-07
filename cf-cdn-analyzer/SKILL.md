@@ -57,13 +57,19 @@ Reference files in `references/` directory. User data from path provided by user
 
 **After reading all 3 references, proceed to Step 1.**
 
-### 1. Obtain Cloudflare Configuration
+### 1. Validate Input
 
-Ask user for configuration directory path.
+**CRITICAL: Configuration path must be provided by main agent in the initial query.**
 
-**If no files yet:** Recommend https://github.com/chenghit/CloudflareBackup
+Expected format: "Analyze CDN configuration in /path/to/cloudflare-config"
 
-**If summary exists:** Ask user: "Found existing summary. Use it or regenerate?"
+**If path not provided:**
+- STOP immediately
+- Return error: "Configuration directory path is required. Please provide the path to CloudflareBackup output directory."
+
+**If summary files already exist in the path:**
+- STOP immediately
+- Return message: "Found existing summary files (hostname-based-config-summary.md). Please specify whether to use existing summary or regenerate."
 
 ### 2. Discover and Read Configuration Files
 
@@ -101,7 +107,7 @@ Extract the zone name from the path (parent directory of the timestamp directory
 
 **Step 2.3:** MANDATORY VALIDATION - If NO configuration files found, STOP immediately:
 
-Display this message to user:
+Return error message:
 
 ```
 ⚠️ CRITICAL: No CloudflareBackup configuration files found.
@@ -132,7 +138,9 @@ Please provide the correct CloudflareBackup output directory and try again.
 
 **Do NOT proceed if no files found. Stop the workflow here.**
 
-**Step 2.4:** If duplicates found, STOP and ask user to remove duplicates.
+**Step 2.4:** If duplicate files found (same filename in multiple locations):
+- STOP immediately
+- Return error: "Found duplicate configuration files: [list files]. Please remove duplicates and specify which directory to use."
 
 **Step 2.5:** Read all discovered files.
 
@@ -337,29 +345,10 @@ The Planner skill will:
 
 Save as `README_1_analyzer.md`.
 
-### 8. Prompt User to Review and Edit
-
-Display this message to user:
-
-```
-✅ Analysis complete! Files generated:
-- hostname-based-config-summary.md (configuration summary)
-- README_1_analyzer.md (next steps guide)
-
-⚠️ ACTION REQUIRED:
-
-Please edit the "Proxied Hostnames" table in hostname-based-config-summary.md:
-1. Open the file
-2. Find the "Proxied Hostnames (CNAME Records Only)" table
-3. For each hostname, keep either "Yes" or "No" in the last column
-4. Save the file
-
-See README_1_analyzer.md for detailed instructions and next steps.
-```
-
 ## Output Files
 
 1. **hostname-based-config-summary.md** - Hostname-based configuration summary (pure data extraction, no implementation decisions)
+2. **README_1_analyzer.md** - Next steps guide for user
 
 ## Reference
 

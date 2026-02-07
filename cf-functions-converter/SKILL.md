@@ -75,45 +75,34 @@ Cloudflare and CloudFront handle URLs fundamentally differently:
 
 ## Workflow
 
-### 1. Obtain Cloudflare Configuration
+### 1. Validate Input
 
-Ask user to provide Cloudflare configuration directory path.
+**CRITICAL: Configuration path must be provided by main agent in the initial query.**
 
-**If user doesn't have configuration files yet:**
+Expected format: "Convert transformation rules in /path/to/cloudflare-config"
 
-Recommend using the standalone backup tool: https://github.com/chenghit/CloudflareBackup
+**If path not provided:**
+- STOP immediately
+- Return error: "Configuration directory path is required. Please provide the path to CloudflareBackup output directory."
 
-This tool safely exports Cloudflare configuration to local JSON files. Once backed up, user should provide the directory path.
-
-**If a summary file already exists** in the user's Cloudflare configuration directory (e.g., `cloudflare-transformation-rules-summary.md`), ask the user:
-> "I found an existing summary file. Would you like to:
-> 1. Use the existing summary and proceed directly to CloudFront Function generation
-> 2. Re-analyze the Cloudflare configuration files and generate a new summary"
+**If summary files already exist in the path:**
+- STOP immediately
+- Return message: "Found existing summary files (cloudflare-transformation-rules-summary.md). Please specify whether to use existing summary or regenerate."
 
 ### 2. Read Configuration Files
 
 **CRITICAL: Robust file discovery - never assume file locations, always search and verify**
 
-**Step 2.1: Discover and validate user data directory**
+**Step 2.1: Discover configuration files**
 
-Ask user for Cloudflare configuration directory path. Then use glob patterns to recursively search for all required files:
-
-```bash
-# Search for all relevant configuration files
-find {user_provided_path} -name "*.txt" -type f 2>/dev/null
-find {user_provided_path} -name "*.json" -type f 2>/dev/null
-```
-
-**Step 2.2: Discover configuration structure**
-
-Use glob patterns to find:
+Use glob patterns to recursively search for all required files:
 - Zone-specific directories: `**/*/Redirect-Rules.txt` (parent dir is zone)
 - Account-level directories: `**/*/Bulk-Redirect-Rules.txt` (parent dir is account)
 - Bulk redirect lists: `**/List-Items-redirect-*.txt`
 
-**Step 2.3: MANDATORY VALIDATION - If NO configuration files found, STOP immediately:**
+**Step 2.2: MANDATORY VALIDATION - If NO configuration files found, STOP immediately:**
 
-Display this message to user:
+Return error message:
 
 ```
 ⚠️ CRITICAL: No CloudflareBackup configuration files found.
@@ -128,28 +117,20 @@ Expected files:
 - Bulk-Redirect-Rules.txt
 - List-Items-redirect-*.txt
 
-⚠️ IMPORTANT NOTICE:
-If you continue without providing correct configuration files, any conversion 
-attempt will rely solely on the underlying LLM's general capabilities, without 
-the specialized conversion logic, validation rules, and best practices encoded 
-in this tool. Results will be unpredictable and unsupported.
-
-Please provide the correct CloudflareBackup output directory and try again.
+Please provide the correct CloudflareBackup output directory.
 ```
 
-**Do NOT proceed to Step 2.4 if no files found. Stop the workflow here.**
+**Do NOT proceed if no files found. Stop the workflow here.**
 
-**Step 2.4: Check for duplicates and validate**
+**Step 2.3: Check for duplicates**
 
-For each file type, check for duplicates:
-```bash
-# Example: Check for duplicate redirect rules
-find {user_provided_path} -name "Redirect-Rules.txt" -type f 2>/dev/null
-```
+For each file type, check for duplicates using glob patterns.
 
-**If duplicates found**: Stop and ask user to resolve - which file to use or merge them.
+**If duplicates found:**
+- STOP immediately
+- Return error: "Found duplicate configuration files: [list files]. Please remove duplicates and specify which directory to use."
 
-**Step 2.5: Read discovered files**
+**Step 2.4: Read discovered files**
 
 Read all discovered files by category:
 
@@ -263,8 +244,6 @@ Example: If Redirect Rules JSON has 7 rules in array positions [0-6], list them 
   - CloudFront Functions run on EVERY request (including cache hits)
   - Lambda@Edge origin-response runs only on cache misses
 - List as "Requires Manual Conversion" with cost analysis
-
-Ask user to confirm completeness and correctness.
 
 ### 5. Generate CloudFront Function Code
 
