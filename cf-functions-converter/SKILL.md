@@ -21,6 +21,22 @@ Convert Cloudflare transformation rules to CloudFront Functions (JavaScript Runt
 When reading reference documentation, use relative paths like `references/xxx.md`.
 When reading user's Cloudflare configs, use the path provided by user.
 
+## Output Directory
+
+**All output files will be written to**: `cloudflare-to-cloudfront-functions/` in current working directory.
+
+**File Structure:**
+```
+cloudflare-to-cloudfront-functions/
+├── cloudflare-transformation-rules-summary.md   # Step 4: Rule summary
+├── viewer-request-function.js                   # Step 5: CloudFront Function code
+├── viewer-request-function.min.js               # Step 5: Minified version (if needed)
+├── key-value-store.json                         # Step 5: KVS data (if needed)
+└── README_function_and_kvs_deployment.md        # Step 5: Deployment guide
+```
+
+**CRITICAL**: Create the output directory at the start of workflow. All file write operations use this directory as base path.
+
 ## Scope
 
 This power converts **transformation rules only**, not security rules:

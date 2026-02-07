@@ -22,6 +22,19 @@ Analyze Cloudflare CDN configuration and group by proxied hostname for CloudFron
 
 Reference files in `references/` directory. User data from path provided by user.
 
+## Output Directory
+
+**All output files will be written to**: `cloudflare-cdn-analysis/` in current working directory.
+
+**File Structure:**
+```
+cloudflare-cdn-analysis/
+├── hostname-based-config-summary.md   # Step 6: Configuration summary grouped by hostname
+└── README_1_analyzer.md               # Step 7: Next steps guide
+```
+
+**CRITICAL**: Create the output directory at the start of workflow. All file write operations use this directory as base path.
+
 ## Scope
 
 **Key Point:** This skill does NOT make implementation decisions. It only parses and organizes Cloudflare configurations.
