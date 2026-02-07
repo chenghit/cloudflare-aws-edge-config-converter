@@ -13,6 +13,27 @@ Convert Cloudflare security configurations to AWS WAF Terraform configuration fo
 
 Reference files in `references/` directory. User data from path provided by user.
 
+## Output Directory
+
+**All output files will be written to**: `cloudflare-to-aws-waf/` in current working directory.
+
+**File Structure:**
+```
+cloudflare-to-aws-waf/
+├── cloudflare-security-rules-summary.md    # Step 4: Rule summary
+├── versions.tf                              # Step 5: Terraform version constraints
+├── ip_sets.tf                               # Step 5: Shared IP sets
+├── main.tf                                  # Step 5: Root module
+├── modules/
+│   └── waf/
+│       ├── main.tf                          # Step 5: Web ACL module
+│       ├── variables.tf                     # Step 5: Module variables
+│       └── outputs.tf                       # Step 5: Module outputs
+└── README_aws-waf-terraform-deployment.md   # Step 7: Deployment guide
+```
+
+**CRITICAL**: Create the output directory at the start of workflow. All file write operations use this directory as base path.
+
 ## Scope
 
 **⚠️ CRITICAL: ALL rate-based rules are ALWAYS convertible.** If marking as "cannot convert" due to limit < 10, you're wrong. Read `references/common-mistakes.md` Mistake 0.
@@ -286,20 +307,7 @@ Before writing any Terraform code, verify:
    - Each rule (including split variants) must not exceed 3 nesting levels
    - If any rule would exceed 3 levels, STOP and revise split strategy
 
-**After user confirms plan, generate Terraform files using module structure:**
-
-**File Structure:**
-```
-waf-terraform/
-├── versions.tf
-├── ip_sets.tf (shared IP sets)
-├── main.tf (calls module twice)
-└── modules/
-    └── waf/
-        ├── main.tf (Web ACL definition only)
-        ├── variables.tf
-        └── outputs.tf
-```
+**Generate Terraform files using module structure:**
 
 **Generation Steps:**
 
