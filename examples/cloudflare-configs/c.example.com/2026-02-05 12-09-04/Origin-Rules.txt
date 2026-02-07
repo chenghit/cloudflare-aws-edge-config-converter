@@ -1,0 +1,84 @@
+{
+  "result": {
+    "description": "",
+    "id": "8c4d0050da6644d996e8efafd6515a73",
+    "kind": "zone",
+    "last_updated": "2026-02-04T08:13:52.7122Z",
+    "name": "default",
+    "phase": "http_request_origin",
+    "rules": [
+      {
+        "action": "route",
+        "action_parameters": {
+          "host_header": "www.c.example.com",
+          "sni": {
+            "value": "www.c.example.com"
+          }
+        },
+        "description": "Rewrites Host and SNI",
+        "enabled": true,
+        "expression": "(http.request.full_uri wildcard \"https://cdn.c.example.com/host/*\")",
+        "id": "c62f825bc0564567acc261f877fbce50",
+        "last_updated": "2025-12-29T02:59:24.048928Z",
+        "ref": "c62f825bc0564567acc261f877fbce50",
+        "version": "2"
+      },
+      {
+        "action": "route",
+        "action_parameters": {
+          "host_header": "gs-top-query-cache-ru.rus-mosc.example.com"
+        },
+        "description": "gsquery-ru",
+        "enabled": true,
+        "expression": "(http.host eq \"gsquery.c.example.com\" and ip.src.country eq \"RU\")",
+        "id": "f4ccb7b598aa485aa055666b55c9c138",
+        "last_updated": "2026-02-04T08:06:30.745975Z",
+        "ref": "f4ccb7b598aa485aa055666b55c9c138",
+        "version": "2"
+      },
+      {
+        "action": "route",
+        "action_parameters": {
+          "host_header": "gs-top-query-cache.s3.ap-south-1.amazonaws.com"
+        },
+        "description": "gsquery-in",
+        "enabled": true,
+        "expression": "(http.host eq \"gsquery.c.example.com\" and ip.src.country eq \"IN\")",
+        "id": "9f64cb81981842819acbdd7b444f8264",
+        "last_updated": "2026-02-04T08:11:33.126416Z",
+        "ref": "9f64cb81981842819acbdd7b444f8264",
+        "version": "1"
+      },
+      {
+        "action": "route",
+        "action_parameters": {
+          "host_header": "gs-top-query-cache-eu.s3.eu-west-3.amazonaws.com"
+        },
+        "description": "gsquery-EU",
+        "enabled": true,
+        "expression": "(http.host eq \"gsquery.c.example.com\" and ip.src.continent eq \"EU\")",
+        "id": "8b557dcb8f03488088435930b0dfae45",
+        "last_updated": "2026-02-04T08:12:49.243564Z",
+        "ref": "8b557dcb8f03488088435930b0dfae45",
+        "version": "1"
+      },
+      {
+        "action": "route",
+        "action_parameters": {
+          "host_header": "gs-top-query-cache-gl.s3.ap-southeast-1.amazonaws.com"
+        },
+        "description": "gsquery-default",
+        "enabled": true,
+        "expression": "(http.host eq \"gsquery.c.example.com\")",
+        "id": "763cb07fdd344cc286061dca342574d0",
+        "last_updated": "2026-02-04T08:13:52.7122Z",
+        "ref": "763cb07fdd344cc286061dca342574d0",
+        "version": "1"
+      }
+    ],
+    "version": "7"
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

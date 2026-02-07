@@ -3,7 +3,7 @@
     "description": "",
     "id": "459e17bbb8e443aa941b92aed6531312",
     "kind": "zone",
-    "last_updated": "2025-12-29T06:13:15.082183Z",
+    "last_updated": "2026-02-04T08:38:00.001342Z",
     "name": "default",
     "phase": "http_response_headers_transform",
     "rules": [
@@ -24,9 +24,31 @@
         "last_updated": "2025-12-29T06:13:15.082183Z",
         "ref": "07fb4635d2af42b2808e134a5d819f55",
         "version": "2"
+      },
+      {
+        "action": "rewrite",
+        "action_parameters": {
+          "headers": {
+            "Access-Control-Allow-Credentials": {
+              "operation": "add",
+              "value": "true"
+            },
+            "Access-Control-Allow-Origin": {
+              "operation": "add",
+              "value": "*"
+            }
+          }
+        },
+        "description": "cors-all-origin",
+        "enabled": true,
+        "expression": "(http.host eq \"cors1.c.example.com\")",
+        "id": "44e344402fa24894a674ed39e57931ed",
+        "last_updated": "2026-02-04T08:38:00.001342Z",
+        "ref": "44e344402fa24894a674ed39e57931ed",
+        "version": "1"
       }
     ],
-    "version": "2"
+    "version": "3"
   },
   "success": true,
   "errors": [],

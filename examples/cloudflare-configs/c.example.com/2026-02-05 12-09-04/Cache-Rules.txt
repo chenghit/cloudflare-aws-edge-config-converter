@@ -1,0 +1,177 @@
+{
+  "result": {
+    "description": "",
+    "id": "7d166a2a9cd64c669f740dc2b50f2b81",
+    "kind": "zone",
+    "last_updated": "2026-02-04T08:50:32.404318Z",
+    "name": "default",
+    "phase": "http_request_cache_settings",
+    "rules": [
+      {
+        "action": "set_cache_settings",
+        "action_parameters": {
+          "cache": true,
+          "cache_key": {
+            "custom_key": {
+              "query_string": {
+                "exclude": {
+                  "all": true
+                }
+              }
+            }
+          },
+          "edge_ttl": {
+            "mode": "respect_origin",
+            "status_code_ttl": [
+              {
+                "status_code": 404,
+                "value": 30
+              }
+            ]
+          }
+        },
+        "description": "Cache URIs for default ttl with 120min",
+        "enabled": true,
+        "expression": "(http.request.uri.path wildcard r\"/content/*\") or (http.request.uri.path wildcard r\"/cache/*\")",
+        "id": "306094b43d41402eb16f86fb8f5ad1d4",
+        "last_updated": "2025-12-15T11:29:41.539279Z",
+        "ref": "306094b43d41402eb16f86fb8f5ad1d4",
+        "version": "1"
+      },
+      {
+        "action": "set_cache_settings",
+        "action_parameters": {
+          "cache": true,
+          "edge_ttl": {
+            "default": 10,
+            "mode": "override_origin"
+          }
+        },
+        "description": "Cache index.html for 10s",
+        "enabled": true,
+        "expression": "(ends_with(http.request.uri.path, \"index.html\"))",
+        "id": "9b306b3150b046b98c8e3f755a948e25",
+        "last_updated": "2026-02-04T07:22:16.890694Z",
+        "ref": "9b306b3150b046b98c8e3f755a948e25",
+        "version": "2"
+      },
+      {
+        "action": "set_cache_settings",
+        "action_parameters": {
+          "browser_ttl": {
+            "default": 10,
+            "mode": "override_origin"
+          },
+          "cache": true,
+          "cache_key": {
+            "custom_key": {
+              "header": {
+                "contains": {
+                  "custom-header3": [
+                    "value1",
+                    "value2",
+                    "value3",
+                    "value4",
+                    "value5",
+                    "value6",
+                    "value7",
+                    "value8",
+                    "value9",
+                    "value10"
+                  ]
+                },
+                "include": [
+                  "custom-header1",
+                  "custom-header2"
+                ]
+              },
+              "host": {
+                "resolved": true
+              },
+              "query_string": {
+                "include": {
+                  "list": [
+                    "key1",
+                    "key2",
+                    "key3"
+                  ]
+                }
+              },
+              "user": {
+                "device_type": true,
+                "geo": true,
+                "lang": true
+              }
+            },
+            "ignore_query_strings_order": true
+          },
+          "origin_cache_control": false,
+          "origin_error_page_passthru": false,
+          "read_timeout": 100,
+          "respect_strong_etags": true,
+          "serve_stale": {
+            "disable_stale_while_updating": false
+          }
+        },
+        "description": "cache-images",
+        "enabled": true,
+        "expression": "(http.request.uri.path wildcard r\"/images/*\")",
+        "id": "dba2a9a29b7941d49b250403d4731785",
+        "last_updated": "2026-02-04T07:16:43.336382Z",
+        "ref": "dba2a9a29b7941d49b250403d4731785",
+        "version": "1"
+      },
+      {
+        "action": "set_cache_settings",
+        "action_parameters": {
+          "cache": true,
+          "edge_ttl": {
+            "default": 300,
+            "mode": "override_origin"
+          }
+        },
+        "description": "checkUpdate",
+        "enabled": true,
+        "expression": "(http.request.uri.path matches r\"/v2/[^/]+/checkUpdate$\")",
+        "id": "5dfe02d6498340c08adb1812e76d028c",
+        "last_updated": "2026-02-04T07:26:21.362113Z",
+        "ref": "5dfe02d6498340c08adb1812e76d028c",
+        "version": "1"
+      },
+      {
+        "action": "set_cache_settings",
+        "action_parameters": {
+          "cache": false
+        },
+        "description": "extension-bypass-cache",
+        "enabled": true,
+        "expression": "(http.request.uri.path.extension in {\"php\" \"jsp\" \"asp\" \"aspx\"} and http.host eq \"ext.c.example.com\")",
+        "id": "ed57b09a08bc4031b23b82125049824b",
+        "last_updated": "2026-02-04T08:50:32.404318Z",
+        "ref": "ed57b09a08bc4031b23b82125049824b",
+        "version": "2"
+      },
+      {
+        "action": "set_cache_settings",
+        "action_parameters": {
+          "cache": true,
+          "edge_ttl": {
+            "default": 86400,
+            "mode": "override_origin"
+          }
+        },
+        "description": "extension-1day",
+        "enabled": true,
+        "expression": "(http.request.uri.path.extension in {\"jpg\" \"png\" \"gif\" \"bmp\" \"svg\" \"webp\" \"aif\" \"aiff\" \"au\" \"avi\" \"bin\" \"cab\" \"carb\" \"cct\" \"cdf\" \"class\" \"css\" \"doc\" \"dcr\" \"dtd\" \"exe\" \"flv\" \"gcf\" \"gff\" \"grv\" \"hdml\" \"hqx\"} and http.host eq \"ext.c.example.com\")",
+        "id": "20239f666ab44cf9b7f73edcad399b0a",
+        "last_updated": "2026-02-04T08:50:06.020593Z",
+        "ref": "20239f666ab44cf9b7f73edcad399b0a",
+        "version": "1"
+      }
+    ],
+    "version": "8"
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

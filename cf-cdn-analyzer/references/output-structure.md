@@ -5,6 +5,10 @@
 ```markdown
 # Cloudflare CDN Configuration Summary
 
+## Zone Information
+- **Zone Domain**: example.com
+- **Apex Domain**: example.com
+
 ## Summary
 - Total Proxied DNS Records: X
 - Total Rules: Y
@@ -19,17 +23,28 @@ All proxied hostnames rely on Cloudflare's default cache behavior (not visible i
 - See reference: `cloudflare-default-cache-behavior.md`
 
 ### Proxied Hostnames (CNAME Records Only)
-| Hostname | Record Type | Value | Apply Default Cache Behavior? |
-|----------|-------------|-------|-------------------------------|
-| example.com | CNAME | origin.example.com | Yes / No |
-| www.example.com | CNAME | origin.example.com | Yes / No |
-| cdn.example.com | CNAME | cdn-origin.example.com | Yes / No |
+| Hostname | Record Type | Value | CNAME Flattening | Content Type | Apply Default Cache Behavior? |
+|----------|-------------|-------|------------------|--------------|-------------------------------|
+| example.com | CNAME | origin.example.com | No | dynamic / static / mixed | Yes / No |
+| www.example.com | CNAME | origin.example.com | No | dynamic / static / mixed | Yes / No |
+| cdn.example.com | CNAME | cdn-origin.example.com | No | dynamic / static / mixed | Yes / No |
 
-**Instructions:** For each hostname, edit the last column to keep ONLY your choice (delete the other option).
+**Instructions:** For each hostname, edit the columns to keep ONLY your choice (delete the other options).
+
+**Content Type column:**
+- `dynamic`: Only serves dynamic content (APIs, server-rendered pages)
+- `static`: Only serves static files (images, CSS, JS, fonts)
+- `mixed`: Serves both dynamic and static content
+
+**Apply Default Cache Behavior column:**
+- `Yes`: Apply Cloudflare's default cache behavior (2-hour TTL for 70+ static file extensions)
+- `No`: Do not apply default cache behavior
 
 Example:
-- If you want default cache behavior: Change `Yes / No` to `Yes`
-- If you don't want default cache behavior: Change `Yes / No` to `No`
+```
+Before: | example.com | CNAME | origin.example.com | No | dynamic / static / mixed | Yes / No |
+After:  | example.com | CNAME | origin.example.com | No | mixed | Yes |
+```
 
 **When to choose "Yes":**
 - This hostname serves static files (images, CSS, JS, fonts, etc.) AND
@@ -44,6 +59,7 @@ Example:
 ## DNS Record: example.com
 - Type: CNAME
 - Value: origin.example.com
+- CNAME Flattening: No
 - Proxied: Yes
 - Status: ✅ Convertible
 - Total Rules: 5

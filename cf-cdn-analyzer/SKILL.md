@@ -69,7 +69,17 @@ Ask user for configuration directory path.
 
 **CRITICAL: Search entire directory tree, don't assume locations.**
 
-**Step 2.1:** Use glob to find all configuration files:
+**Step 2.1:** Extract Zone domain name from directory structure
+
+CloudflareBackup creates directory structure: `<zone-name>/<timestamp>/`
+
+Example:
+- `example.com/2026-01-12 14-58-47/DNS.txt` → Zone: `example.com`
+- `c.example.com/2026-01-13 12-33-15/DNS.txt` → Zone: `c.example.com`
+
+Extract the zone name from the path (parent directory of the timestamp directory).
+
+**Step 2.2:** Use glob to find all configuration files:
 
 **Zone-level files:**
 - `**/DNS.txt` (CRITICAL - must exist)
@@ -89,7 +99,7 @@ Ask user for configuration directory path.
 - `**/Bulk-Redirect-Rules.txt`
 - `**/List-Items-redirect-*.txt`
 
-**Step 2.2:** MANDATORY VALIDATION - If NO configuration files found, STOP immediately:
+**Step 2.3:** MANDATORY VALIDATION - If NO configuration files found, STOP immediately:
 
 Display this message to user:
 
@@ -122,11 +132,11 @@ Please provide the correct CloudflareBackup output directory and try again.
 
 **Do NOT proceed if no files found. Stop the workflow here.**
 
-**Step 2.3:** If duplicates found, STOP and ask user to remove duplicates.
+**Step 2.4:** If duplicates found, STOP and ask user to remove duplicates.
 
-**Step 2.4:** Read all discovered files.
+**Step 2.5:** Read all discovered files.
 
-**Step 2.5:** Missing files = assume no configuration of that type. Continue processing.
+**Step 2.6:** Missing files = assume no configuration of that type. Continue processing.
 
 ### 3. SaaS Detection (CRITICAL - Must be first check)
 
@@ -162,10 +172,12 @@ Parse `DNS.txt` to identify:
 - Which records are proxied (proxied: true)
 - Record types (A, AAAA, CNAME)
 - Record values (IP addresses, domain names)
+- CNAME flattening status (settings.flatten_cname for CNAME records)
 
 **For each proxied record:**
 - Extract hostname (e.g., example.com, www.example.com, api.example.com)
 - Note record type and value
+- For CNAME records: Extract CNAME flattening status from `settings.flatten_cname` (true/false)
 - **CRITICAL: If value is IP address (A or AAAA record):**
   - Mark as "⚠️ Non-convertible - IP-based origin"
   - Reason: CloudFront doesn't support IP addresses as origins
@@ -250,11 +262,19 @@ A rule uses wildcard for all subdomains if it contains ANY of these patterns:
 Output a Markdown file (`hostname-based-config-summary.md`) following the structure defined in `references/output-structure.md`.
 
 **Key requirements:**
+- Include Zone Information section at the top with Zone Domain and Apex Domain (both are the same value extracted from directory structure)
 - Group all rules by proxied hostname
 - Preserve rule priority order within each category
-- Include proxied hostnames overview table
+- Include proxied hostnames overview table with CNAME flattening status
 - Mark IP-based origins as non-convertible
 - List global rules (no http.host match) separately
+
+**For the Proxied Hostnames table:**
+- Include columns: Hostname, Record Type, Value, CNAME Flattening, Content Type, Apply Default Cache Behavior?
+- CNAME Flattening column: Show "Yes" if `settings.flatten_cname` is true, "No" if false or not present
+- Content Type column: Show "dynamic / static / mixed" (user will choose one)
+- Apply Default Cache Behavior column: Show "Yes / No" (user will choose one)
+- Only CNAME records have CNAME flattening status (A/AAAA records show "N/A")
 
 Save as `hostname-based-config-summary.md`.
 
