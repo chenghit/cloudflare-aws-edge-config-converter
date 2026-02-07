@@ -199,9 +199,6 @@ Ask user to confirm completeness and correctness.
    - AWS WAF `limit` is request count in ONE evaluation window
    - Use algorithm from action-conversions.md: try windows [60,120,300,600]s in order, use first where calculated limit ≥ 10, otherwise use fallback
 8. **Verify your conversion plan** against the checklist in common-mistakes.md before generating Terraform code
-9. Ask user for custom Web ACL names:
-   - Web ACL for websites (default: `cloudflare-migrated-waf-website`)
-   - Web ACL for APIs and files (default: `cloudflare-migrated-waf-api-and-file`)
 
 **Generate conversion plan first:**
 
@@ -368,7 +365,7 @@ locals {
 module "waf_website" {
   source = "./modules/waf"
   
-  web_acl_name                   = "<USER_CONFIRMED_WEBSITE_NAME>"
+  web_acl_name                   = "cloudflare-migrated-waf-website"
   anti_ddos_use_advanced_config  = false
   anti_ddos_challenge_action     = "ENABLED"
   anti_ddos_block_sensitivity    = "LOW"
@@ -378,7 +375,7 @@ module "waf_website" {
 module "waf_api_file" {
   source = "./modules/waf"
   
-  web_acl_name                   = "<USER_CONFIRMED_API_FILE_NAME>"
+  web_acl_name                   = "cloudflare-migrated-waf-api-and-file"
   anti_ddos_use_advanced_config  = true
   anti_ddos_challenge_action     = "DISABLED"
   anti_ddos_block_sensitivity    = "MEDIUM"
