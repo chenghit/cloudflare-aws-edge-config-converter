@@ -61,7 +61,7 @@
 
 ### 系统要求
 
-- Kiro CLI 或 Kiro IDE
+- Kiro CLI
 - 足够的磁盘空间用于 Cloudflare 配置备份
 
 ## 快速开始
@@ -96,29 +96,6 @@ kiro-cli chat
 # "Convert transformation rules in /path/to/cloudflare-config"
 ```
 
-### 使用 Kiro IDE
-
-```bash
-# 1. 安装 Kiro IDE 扩展到 VS Code
-# 下载地址：https://kiro.dev/downloads/
-
-# 2. 备份 Cloudflare 配置（与 CLI 相同）
-# 使用独立备份工具：https://github.com/chenghit/CloudflareBackup
-
-# 3. 克隆此仓库并安装技能
-git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
-cd cloudflare-aws-edge-config-converter
-./install.sh
-
-# 4. 在 VS Code 中打开您的项目（已安装 Kiro IDE）
-
-# 5. 切换到转换器子代理
-# 使用命令面板（Cmd/Ctrl+Shift+P）→ "Kiro: Switch Agent"
-# 选择：cf-waf-converter、cf-functions-converter 或 cf-cdn-analyzer
-
-# 6. 在 Kiro 聊天面板中开始对话
-# "Convert security rules in /path/to/cloudflare-config"
-```
 
 ## 前提条件
 
@@ -138,16 +115,15 @@ terraform version
 
 ### 2. 安装 Kiro
 
-选择 Kiro CLI 或 Kiro IDE：
+选择 Kiro CLI：
 
 **Kiro CLI**（命令行界面）：
 - 安装：https://kiro.dev/docs/getting-started/installation/
 - 技能支持：自 1.24 版本起
 
 **Kiro IDE**（Visual Studio Code 扩展）：
-- 安装：https://kiro.dev/downloads/
-- 技能支持：自 0.9 版本起
-- 技能在 CLI 和 IDE 中的工作方式相同
+- ⚠️ **不支持**本工具
+- 原因：Kiro IDE 子代理不支持 Agent Skills。Skills（SKILL.md + references/）只能由主代理加载，无法在子代理中使用。由于本工具的转换质量依赖于子代理能够访问完整的技能上下文（包括参考文档），Kiro IDE 无法提供与 Kiro CLI 同等的转换效果。
 
 ## 安装
 
@@ -657,7 +633,6 @@ vs. CloudflareBackup：
 ## 相关资源
 
 - [Kiro 文档](https://kiro.dev/docs/)
-- [Kiro IDE：自定义子代理和技能](https://kiro.dev/blog/custom-subagents-skills-and-enterprise-controls/)
 - [Kiro CLI 中的代理技能支持](https://kiro.dev/changelog/cli/1-24/)
 - [AWS WAF 文档](https://docs.aws.amazon.com/waf/)
 - [CloudFront Functions 文档](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-functions.html)

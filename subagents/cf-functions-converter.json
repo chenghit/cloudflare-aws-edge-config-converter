@@ -1,6 +1,6 @@
 {
   "name": "cf-functions-converter",
-  "description": "Converts Cloudflare transformation rules to CloudFront Functions",
+  "description": "Converts Cloudflare redirect rules, bulk redirects, URL rewrite rules, and request transformation rules to AWS CloudFront Functions",
   "resources": [
     "skill://~/.kiro/skills/cloudflare-aws-converter/cf-functions-converter/SKILL.md"
   ],

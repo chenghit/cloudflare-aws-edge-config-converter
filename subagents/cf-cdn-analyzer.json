@@ -1,6 +1,6 @@
 {
   "name": "cf-cdn-analyzer",
-  "description": "Analyzes Cloudflare CDN configuration and groups rules by proxied hostname",
+  "description": "Analyzes Cloudflare CDN configuration including proxied hostnames, routing rules, page rules, and cache settings",
   "resources": [
     "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-analyzer/SKILL.md"
   ],
