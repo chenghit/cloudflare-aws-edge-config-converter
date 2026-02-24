@@ -5,5 +5,5 @@
     "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-analyzer/SKILL.md"
   ],
   "tools": ["fs_read", "fs_write", "glob", "grep"],
-  "allowTools": ["fs_read", "fs_write", "glob", "grep"]
+  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
 }
