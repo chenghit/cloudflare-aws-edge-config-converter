@@ -122,8 +122,8 @@ terraform version
 - 技能支持：自 1.24 版本起
 
 **Kiro IDE**（Visual Studio Code 扩展）：
-- ⚠️ **不支持**本工具
-- 原因：Kiro IDE 子代理不支持 Agent Skills。Skills（SKILL.md + references/）只能由主代理加载，无法在子代理中使用。由于本工具的转换质量依赖于子代理能够访问完整的技能上下文（包括参考文档），Kiro IDE 无法提供与 Kiro CLI 同等的转换效果。
+- ⚠️ **不推荐** — 强烈建议使用 Kiro CLI
+- 原因：本工具的 Skills 存放在父目录（`cloudflare-aws-converter/`）下，以确保只有子代理能通过显式的 `skill://` 引用加载它们，防止主代理绕过子代理直接激活 Skills。Kiro IDE 的子代理不支持 `skill://` 资源绑定，因此 Skills 无法正确限定在子代理范围内。主代理仍可加载这些 Skills，但上下文隔离和并行执行将无法按预期工作。
 
 ## 安装
 

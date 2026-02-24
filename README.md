@@ -123,8 +123,8 @@ Choose Kiro CLI:
 - Skills support: Since version 1.24
 
 **Kiro IDE** (Visual Studio Code extension):
-- ⚠️ **Not supported** for this tool
-- Reason: Kiro IDE subagents do not support Agent Skills. Skills (SKILL.md + references/) can only be loaded by the main agent, not by subagents. Since this tool's conversion quality depends on subagents having access to the full skill context (including reference documents), Kiro IDE cannot provide equivalent results to Kiro CLI.
+- ⚠️ **Not recommended** — Kiro CLI is strongly preferred
+- Reason: This tool's skills are stored under a parent directory (`cloudflare-aws-converter/`) so that only subagents can load them via explicit `skill://` references, preventing the main agent from bypassing subagents and activating skills directly. Kiro IDE does not support this `skill://` resource binding in subagents, so skills cannot be properly scoped to subagents. The main agent can still load the skills, but context isolation and parallel execution will not work as intended.
 
 ## Installation
 
