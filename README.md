@@ -84,16 +84,13 @@ cd cloudflare-aws-edge-config-converter
 # 4. Start Kiro CLI chat
 kiro-cli chat
 
-# 5. Switch to converter subagent and start conversion
-# In the chat, use /agent swap command:
-/agent swap cf-waf-converter
-
-# Then provide the path to your Cloudflare configuration:
-# "Convert security rules in /path/to/cloudflare-config"
-
-# Or for transformation rules:
-/agent swap cf-functions-converter
-# "Convert transformation rules in /path/to/cloudflare-config"
+# 5. Start conversion — just describe what you want in natural language:
+# "Convert Cloudflare security rules in /path/to/cloudflare-config to AWS WAF"
+# "Convert transformation rules in /path/to/cloudflare-config to CloudFront Functions"
+# "Analyze CDN configuration in /path/to/cloudflare-config"
+#
+# Kiro will automatically invoke the appropriate subagent.
+# No /agent swap needed.
 ```
 
 
@@ -179,10 +176,10 @@ If you want to test the tool without backing up your own configuration, you can 
 
 ### Skill 1: Convert Security Rules to AWS WAF
 
-**Recommended Usage** (Main agent invokes subagent automatically):
+**Recommended Usage** (Main agent automatically invokes subagent):
 
 ```
-User: Convert Cloudflare security rules in /path/to/cloudflare-config to AWS WAF using cf-waf-converter
+User: Convert Cloudflare security rules in /path/to/cloudflare-config to AWS WAF
 
 Kiro: [Automatically invokes cf-waf-converter subagent]
       [Reads configuration files, generates Terraform files]
@@ -216,10 +213,10 @@ Kiro: [Generates Terraform configuration files]
 
 ### Skill 2: Convert Transformation Rules to CloudFront Functions
 
-**Recommended Usage** (Main agent invokes subagent automatically):
+**Recommended Usage** (Main agent automatically invokes subagent):
 
 ```
-User: Convert Cloudflare transformation rules in /path/to/cloudflare-config to CloudFront Functions using cf-functions-converter
+User: Convert Cloudflare transformation rules in /path/to/cloudflare-config to CloudFront Functions
 
 Kiro: [Automatically invokes cf-functions-converter subagent]
       [Reads configuration files, generates JavaScript code]
@@ -253,10 +250,10 @@ Kiro: [Generates JavaScript code and deployment guide]
 
 ### Skill 3: Analyze CDN Configuration
 
-**Recommended Usage** (Main agent invokes subagent automatically):
+**Recommended Usage** (Main agent automatically invokes subagent):
 
 ```
-User: Analyze Cloudflare CDN configuration in /path/to/cloudflare-config using cf-cdn-analyzer
+User: Analyze Cloudflare CDN configuration in /path/to/cloudflare-config
 
 Kiro: [Automatically invokes cf-cdn-analyzer subagent]
       [Reads configuration files, detects SaaS, groups rules by hostname]
@@ -298,9 +295,11 @@ Kiro: [Generates configuration summary and next steps guide]
 ### ✅ Recommended Practices
 
 1. **Use Separate Subagents for Different Tasks**
-   - Use `/agent swap cf-waf-converter` for security rules
-   - Use `/agent swap cf-functions-converter` for transformation rules
-   - Use `/agent swap cf-cdn-analyzer` for CDN configuration analysis
+   - Kiro automatically routes to the right subagent based on your request
+   - For WAF: mention "security rules" or "AWS WAF"
+   - For CloudFront Functions: mention "transformation rules" or "CloudFront Functions"
+   - For CDN analysis: mention "CDN configuration" or "CDN config"
+   - You can also manually switch with `/agent swap cf-waf-converter` etc.
    - Each subagent has isolated context to avoid confusion
 
 2. **Convert One Project at a Time**
@@ -432,6 +431,7 @@ Use specific keywords in your request that match the skill's description:
 **Example**:
 - ❌ Vague: "analyze my cloudflare config files" (skill may not activate)
 - ✅ Specific: "analyze my cloudflare **CDN config**" (skill activates correctly)
+- ✅ Specific: "convert **security rules** in /path/to/config to **AWS WAF**" (routes to cf-waf-converter)
 
 ## Why Not cf-terraforming?
 

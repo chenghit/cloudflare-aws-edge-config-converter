@@ -84,16 +84,12 @@ cd cloudflare-aws-edge-config-converter
 # 4. 启动 Kiro CLI 聊天
 kiro-cli chat
 
-# 5. 切换到转换器子代理并开始转换
-# 在聊天中，使用 /agent swap 命令：
-/agent swap cf-waf-converter
-
-# 然后提供您的 Cloudflare 配置路径：
-# "Convert security rules in /path/to/cloudflare-config"
-
-# 或者对于转换规则：
-/agent swap cf-functions-converter
-# "Convert transformation rules in /path/to/cloudflare-config"
+# 5. 直接用自然语言描述需求，Kiro 会自动调用对应的子代理：
+# "Convert Cloudflare security rules in /path/to/cloudflare-config to AWS WAF"
+# "Convert transformation rules in /path/to/cloudflare-config to CloudFront Functions"
+# "Analyze CDN configuration in /path/to/cloudflare-config"
+#
+# 无需手动执行 /agent swap。
 ```
 
 
@@ -181,7 +177,7 @@ git pull
 **推荐用法**（主代理自动调用子代理）：
 
 ```
-User: Convert Cloudflare security rules in /path/to/cloudflare-config to AWS WAF using cf-waf-converter
+User: Convert Cloudflare security rules in /path/to/cloudflare-config to AWS WAF
 
 Kiro: [自动调用 cf-waf-converter 子代理]
       [读取配置文件，生成 Terraform 文件]
@@ -218,7 +214,7 @@ Kiro: [生成 Terraform 配置文件]
 **推荐用法**（主代理自动调用子代理）：
 
 ```
-User: Convert Cloudflare transformation rules in /path/to/cloudflare-config to CloudFront Functions using cf-functions-converter
+User: Convert Cloudflare transformation rules in /path/to/cloudflare-config to CloudFront Functions
 
 Kiro: [自动调用 cf-functions-converter 子代理]
       [读取配置文件，生成 JavaScript 代码]
@@ -255,7 +251,7 @@ Kiro: [生成 JavaScript 代码和部署指南]
 **推荐用法**（主代理自动调用子代理）：
 
 ```
-User: Analyze Cloudflare CDN configuration in /path/to/cloudflare-config using cf-cdn-analyzer
+User: Analyze Cloudflare CDN configuration in /path/to/cloudflare-config
 
 Kiro: [自动调用 cf-cdn-analyzer 子代理]
       [读取配置文件，检测 SaaS，按主机名分组规则]
@@ -297,9 +293,11 @@ Kiro: [生成配置摘要和下一步指南]
 ### ✅ 推荐做法
 
 1. **为不同任务使用独立的子代理**
-   - 使用 `/agent swap cf-waf-converter` 处理安全规则
-   - 使用 `/agent swap cf-functions-converter` 处理转换规则
-   - 使用 `/agent swap cf-cdn-analyzer` 进行 CDN 配置分析
+   - Kiro 会根据您的请求自动路由到正确的子代理
+   - WAF 转换：提及"security rules"或"AWS WAF"
+   - CloudFront Functions 转换：提及"transformation rules"或"CloudFront Functions"
+   - CDN 分析：提及"CDN configuration"或"CDN config"
+   - 也可以手动切换：`/agent swap cf-waf-converter` 等
    - 每个子代理都有隔离的上下文以避免混淆
 
 2. **一次转换一个项目**
@@ -431,6 +429,7 @@ Kiro: [生成配置摘要和下一步指南]
 **示例**：
 - ❌ 模糊："analyze my cloudflare config files"（技能可能不激活）
 - ✅ 具体："analyze my cloudflare **CDN config**"（技能正确激活）
+- ✅ 具体："convert **security rules** in /path/to/config to **AWS WAF**"（路由到 cf-waf-converter）
 
 ## 为什么不用 cf-terraforming？
 
