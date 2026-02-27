@@ -288,7 +288,8 @@ Follow the Path Pattern Grouping Algorithm in `references/cloudfront-cache-behav
 **Custom Pages:**
 - Always in their own `## Custom Pages (Zone-level)` section
 - Do NOT place under any hostname section, Global Rules, or Non-Convertible Items
-- List all entries from `Custom-Pages.txt` in this section
+- Only list entries from `Custom-Pages.txt` where `state` is NOT `"default"` (i.e., user has customized the page)
+- If all entries have `state: "default"`, write: "未配置自定义页面。" (or "No custom pages configured.")
 - Custom Pages are NOT counted in the rule total (they are zone-level settings, not rules)
 
 ### 6. Generate Hostname-Based Configuration Summary
