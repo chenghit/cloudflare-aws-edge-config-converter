@@ -52,10 +52,10 @@ cloudflare-cdn-analysis/
 - Request/Response header transform rules
 - Managed transforms
 - Custom error rules (custom responses for HTTP error codes like 429, 403, 404, 500)
+- Custom Pages (zone-level Cloudflare challenge/error page templates — listed for reference, no migration action required)
 
 **Out of Scope:** 
 - Security rules (use cf-waf-converter)
-- Custom Pages (`Custom-Pages.txt`) — Cloudflare-specific challenge/error page templates (waf_block, basic_challenge, 500_errors, etc.) that have no CloudFront equivalent
 - Implementation decisions (handled by Planner skill)
 - Actual CloudFront configuration generation (handled by downstream skills)
 
@@ -112,6 +112,7 @@ Extract the zone name from the path (parent directory of the timestamp directory
 - `**/Request-Header-Transform.txt`
 - `**/Response-Header-Transform.txt`
 - `**/Custom-Error-Rules.txt`
+- `**/Custom-Pages.txt`
 - `**/Managed-Transforms.txt`
 
 **Account-level files:**
@@ -274,9 +275,10 @@ A rule uses wildcard for all subdomains if it contains ANY of these patterns:
 - Always Global Rule (zone-level configuration)
 
 **Custom Pages:**
-- Always separate section (not under Global Rules or specific DNS records)
-- Note: `state: "default"` with `url: null` = using Cloudflare default
-- Note: `url` has value = using custom page
+- Always in their own `## Custom Pages (Zone-level)` section
+- Do NOT place under any hostname section, Global Rules, or Non-Convertible Items
+- List all entries from `Custom-Pages.txt` in this section
+- Custom Pages are NOT counted in the rule total (they are zone-level settings, not rules)
 
 ### 6. Generate Hostname-Based Configuration Summary
 

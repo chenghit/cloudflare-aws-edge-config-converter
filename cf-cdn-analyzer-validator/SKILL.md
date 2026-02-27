@@ -31,7 +31,7 @@ cloudflare-cdn-analysis/
 
 1. Read `cloudflare-cdn-analysis/hostname-based-config-summary.md`
 2. Use glob to find all original Cloudflare configuration files (same patterns as analyzer):
-   - Zone-level: `**/DNS.txt`, `**/SaaS-Fallback-Origin.txt`, `**/Cache-Rules.txt`, `**/Origin-Rules.txt`, `**/Compression-Rules.txt`, `**/Redirect-Rules.txt`, `**/URL-Rewrite-Rules.txt`, `**/Request-Header-Transform.txt`, `**/Response-Header-Transform.txt`, `**/Custom-Error-Rules.txt`, `**/Managed-Transforms.txt`
+   - Zone-level: `**/DNS.txt`, `**/SaaS-Fallback-Origin.txt`, `**/Cache-Rules.txt`, `**/Origin-Rules.txt`, `**/Compression-Rules.txt`, `**/Redirect-Rules.txt`, `**/URL-Rewrite-Rules.txt`, `**/Request-Header-Transform.txt`, `**/Response-Header-Transform.txt`, `**/Custom-Error-Rules.txt`, `**/Custom-Pages.txt`, `**/Managed-Transforms.txt`
    - Account-level: `**/Bulk-Redirect-Rules.txt`, `**/List-Items-redirect-*.txt`
 3. Read all found configuration files
 4. Note the validation round number from the prompt (default: 1 if not specified)
@@ -62,7 +62,7 @@ Compare with the number of DNS record sections in the summary.
 
 For each rule type file (Cache-Rules.txt, Origin-Rules.txt, Redirect-Rules.txt, URL-Rewrite-Rules.txt, Request-Header-Transform.txt, Response-Header-Transform.txt, Compression-Rules.txt, Custom-Error-Rules.txt), count the total number of rules.
 
-**Note: Do NOT count Custom-Pages.txt — it is out of scope for CDN analysis.**
+**Custom Pages (`Custom-Pages.txt`) are NOT rules — they are zone-level settings. They must appear in their own `## Custom Pages (Zone-level)` section and are NOT counted in the rule total. Do NOT add Custom Pages to the Non-Convertible Items section.**
 
 Compare with the total number of rows across all sections (Specific + Global + Orphaned) in the summary for that rule type.
 

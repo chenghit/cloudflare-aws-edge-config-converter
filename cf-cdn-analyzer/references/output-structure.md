@@ -99,12 +99,6 @@ After:  | example.com | CNAME | origin.example.com | No | mixed | Yes |
 |------------|-----------------|
 | 404 | Custom 404 page |
 
-### Custom Pages
-| Error Type | State | Custom URL |
-|------------|-------|------------|
-| 500_errors | default | (Using Cloudflare default) |
-| 1000_errors | custom | https://example.com/errors/cloudflare.html |
-
 ### Response Header Transform Rules (1 rule)
 | Priority | Match Expression | Header Action |
 |----------|------------------|---------------|
@@ -148,6 +142,20 @@ These rules reference hostnames that are not proxied. This may indicate outdated
 | 2 | old.example.com/contact | /contact-us | 301 |
 
 **Note**: These rules will not take effect because the hostname is not proxied through Cloudflare. Consider deleting these rules or proxying the hostname.
+
+---
+
+## Custom Pages (Zone-level)
+
+Cloudflare-specific challenge and error page templates. These are zone-level settings and do NOT map to specific hostnames.
+
+| Error Type | State | Custom URL |
+|------------|-------|------------|
+| basic_challenge | default | (Using Cloudflare default) |
+| waf_block | custom | https://example.com/errors/blocked.html |
+| 500_errors | default | (Using Cloudflare default) |
+
+**Note**: Custom Pages are Cloudflare-specific and have no direct CloudFront equivalent. They are listed here for reference only. No migration action required.
 
 ---
 
