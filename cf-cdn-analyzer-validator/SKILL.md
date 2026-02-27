@@ -72,7 +72,7 @@ For each rule type file (Cache-Rules.txt, Origin-Rules.txt, Redirect-Rules.txt, 
 
 Compare with the total number of rows across all Cache Behavior sections (all hostname sections + Global Rules + Orphaned Rules combined) in the summary for that rule type. Rules are now grouped by Cache Behavior path pattern, not by rule type — count all rows of each rule type across all Cache Behavior tables.
 
-**Important exception:** Rules that were split due to OR paths, multiple extensions (`extension in {...}`), or simple regex OR branches will appear as multiple rows in the summary but count as one rule in the original file. When a count mismatch is found, check whether it can be explained by split rules before flagging as an error.
+**Important exception:** Rules that were split due to OR paths, simple regex OR branches, or multiple extensions with **≤ 5 extensions** will appear as multiple rows in the summary but count as one rule in the original file. Rules with **> 5 extensions** are NOT split — they appear as ONE row under `* (Default)`. When a count mismatch is found, check whether it can be explained by split rules before flagging as an error.
 
 **Pass condition:** Total rule count matches for each rule type (accounting for split rules).
 

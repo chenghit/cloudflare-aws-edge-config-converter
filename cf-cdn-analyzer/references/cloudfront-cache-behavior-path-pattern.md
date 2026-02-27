@@ -83,10 +83,11 @@ These expressions cannot map to a single path pattern but can be converted after
 
 | Cloudflare Expression | How to Handle |
 |----------------------|---------------|
-| `http.request.uri.path.extension in {"jpg" "png" "gif"}` | Split into `*.jpg`, `*.png`, `*.gif` — each becomes a separate Cache Behavior |
-| `http.request.uri.path.extension in {"jpg" "png" ... }` (> 5 extensions) | Too many to split — place under `* (Default)` with note `⚠️ Too many extensions to split into Cache Behaviors — recommend Lambda@Edge` |
+| `http.request.uri.path.extension in {"jpg" "png" "gif"}` (≤ 5 extensions) | Split into `*.jpg`, `*.png`, `*.gif` — each becomes a separate Cache Behavior |
 | `path eq "/a" or path eq "/b"` | Split into `/a` and `/b` — each becomes a separate Cache Behavior |
 | `http.request.uri.path matches r"^/foo/(.*)"` with multiple branches separated by `\|` | Simple regex OR with `^/prefix/(.*)` branches — split into `/foo/*`, `/bar/*` — each becomes a separate Cache Behavior |
+
+**Note:** `extension in {...}` with **> 5 extensions** does NOT require splitting — place directly under `* (Default)` with note `⚠️ Too many extensions to split into Cache Behaviors — recommend Lambda@Edge`. The original rule counts as 1 row in the summary (not split).
 
 **Simple regex OR pattern (convertible):** A `matches r"..."` expression is convertible if ALL of the following are true:
 1. The regex consists of multiple branches separated by `|`
