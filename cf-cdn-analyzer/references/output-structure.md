@@ -280,9 +280,9 @@ All rules within a hostname or Global Rules section are grouped by Cache Behavio
 
 ### Unified Cache Behavior Table
 - **Rule Type**: Type of Cloudflare rule (Cache Rule, Origin Rule, Redirect Rule, URL Rewrite Rule, Request Header Transform, Response Header Transform, Compression Rule, Custom Error Rule, Bulk Redirect)
-- **Priority**: Cloudflare rule priority (lower = higher priority). Preserve original order within each rule type.
-- **Match Expression**: Full Cloudflare expression
-- **Action**: What the rule does (e.g., "Override origin: backend.example.com", "TTL: 0s", "Redirect to /new 301", "Set X-Header: value", "Gzip, Brotli")
+- **Priority**: Cloudflare rule priority (lower = higher priority). Preserve original order within each rule type. Use `-` for rule types that have no priority (Custom Error Rules).
+- **Match Expression**: Full Cloudflare expression. For Custom Error Rules, use the HTTP error code (e.g., `404`, `429`) instead of an expression.
+- **Action**: What the rule does (e.g., "Override origin: backend.example.com", "TTL: 0s", "Redirect to /new 301", "Set X-Header: value", "Gzip, Brotli", "Custom XML response")
 - **Notes**: Any special conditions, e.g.:
   - `⚠️ Non-convertible path` — path expression uses regex/negation, cannot be a CloudFront path pattern
   - `⚠️ Contains non-path condition` — expression has both a path condition and a non-path condition (geo, IP, UA, etc.)
