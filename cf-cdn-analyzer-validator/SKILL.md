@@ -12,7 +12,7 @@ Validate `cloudflare-cdn-analysis/hostname-based-config-summary.md` by cross-che
 ## Input
 
 - `cloudflare-cdn-analysis/hostname-based-config-summary.md` — the file to validate and fix
-- Original Cloudflare configuration files (same path used by the analyzer)
+- Cloudflare configuration directory path (provided in the invocation prompt, same path used by the analyzer, e.g. "Validate CDN analysis in /path/to/cloudflare-config")
 - Validation round number (provided in the invocation prompt, e.g. "This is validation round 2")
 
 ## Output Directory
@@ -29,12 +29,18 @@ cloudflare-cdn-analysis/
 
 ### 1. Read Inputs
 
+**CRITICAL: The Cloudflare configuration directory path must be provided in the invocation prompt.**
+
+Expected format: "Validate CDN analysis in /path/to/cloudflare-config. This is validation round N."
+
 1. Read `cloudflare-cdn-analysis/hostname-based-config-summary.md`
-2. Use glob to find all original Cloudflare configuration files (same patterns as analyzer):
+2. Use glob to find all original Cloudflare configuration files under the provided config path:
    - Zone-level: `**/DNS.txt`, `**/SaaS-Fallback-Origin.txt`, `**/Cache-Rules.txt`, `**/Origin-Rules.txt`, `**/Compression-Rules.txt`, `**/Redirect-Rules.txt`, `**/URL-Rewrite-Rules.txt`, `**/Request-Header-Transform.txt`, `**/Response-Header-Transform.txt`, `**/Custom-Error-Rules.txt`, `**/Custom-Pages.txt`, `**/Managed-Transforms.txt`
    - Account-level: `**/Bulk-Redirect-Rules.txt`, `**/List-Items-redirect-*.txt`
 3. Read all found configuration files
 4. Note the validation round number from the prompt (default: 1 if not specified)
+
+**If config path not provided in prompt:** Stop immediately. Return error: "Cloudflare configuration directory path is required. The main agent must include the config path in the invocation prompt."
 
 **If `hostname-based-config-summary.md` does not exist:** Stop immediately. Return error: "hostname-based-config-summary.md not found in cloudflare-cdn-analysis/. Run cf-cdn-analyzer first."
 
