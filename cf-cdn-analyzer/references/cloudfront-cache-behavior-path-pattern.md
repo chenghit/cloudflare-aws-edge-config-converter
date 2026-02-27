@@ -118,19 +118,13 @@ If there is no path condition → default behavior (`*`).
 - Convertible path condition → assign to that path pattern
 - No path condition or non-convertible → assign to default behavior (`*`)
 
-**Step 4: Handle OR across multiple paths**
-
-If a rule's expression contains OR across multiple distinct paths (e.g., `path eq "/a" or path eq "/b"`):
-- Split into separate rules, one per path
-- Place each under its corresponding path pattern group
-
-**Step 5: Handle mixed conditions (path + non-path)**
+**Step 4: Handle mixed conditions (path + non-path)**
 
 If a rule has both a convertible path condition AND a non-path condition (e.g., `path wildcard "/api/*" and ip.src.country eq "CN"`):
 - Assign to the path pattern group (`/api/*`)
 - Mark the non-path condition with a note: "⚠️ Contains non-path condition"
 
-**Step 6: Handle `http.request.full_uri` with query string**
+**Step 5: Handle `http.request.full_uri` with query string**
 
 If the expression is `http.request.full_uri wildcard "https://hostname/path/*?key=value"`:
 - Extract path portion only: `/path/*`

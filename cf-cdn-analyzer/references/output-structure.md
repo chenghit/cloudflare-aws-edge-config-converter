@@ -11,7 +11,7 @@
 
 ## Summary
 - Total Proxied DNS Records: X
-- Total Rules: Y
+- Total Rules: Y  ← count of all rule rows across all Cache Behavior tables (hostname + global + orphaned), including Custom Error Rules. Does NOT include Custom Pages or Managed Transforms (they are zone-level settings, not rules).
 - IP-based Origins (Non-convertible): Z
 
 ⚠️ **Important: Implicit Cloudflare Default Cache Behavior**
@@ -280,7 +280,7 @@ All rules within a hostname or Global Rules section are grouped by Cache Behavio
 
 ### Unified Cache Behavior Table
 - **Rule Type**: Type of Cloudflare rule (Cache Rule, Origin Rule, Redirect Rule, URL Rewrite Rule, Request Header Transform, Response Header Transform, Compression Rule, Custom Error Rule, Bulk Redirect)
-- **Priority**: Cloudflare rule priority (lower = higher priority). Preserve original order within each rule type. Use `-` for rule types that have no priority (Custom Error Rules).
+- **Priority**: Cloudflare rule priority (lower = higher priority). Preserve original order within each rule type. Use `-` for rule types that have no priority (Custom Error Rules). **Priority is independent per rule type** — e.g., Cache Rules have their own 1, 2, 3... sequence, and Redirect Rules have their own separate 1, 2, 3... sequence within the same Cache Behavior.
 - **Match Expression**: Full Cloudflare expression. For Custom Error Rules, use the HTTP error code (e.g., `404`, `429`) instead of an expression.
 - **Action**: What the rule does (e.g., "Override origin: backend.example.com", "TTL: 0s", "Redirect to /new 301", "Set X-Header: value", "Gzip, Brotli", "Custom XML response")
 - **Notes**: Any special conditions, e.g.:
