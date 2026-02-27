@@ -171,7 +171,8 @@ Status: PASS | FIXED | CANNOT_FIX
 
 ## Changelog
 {Append one line per round, newest first}
-- Round {N}: {PASS | FIXED (X issues) | CANNOT_FIX (X issues)}
+- Round {N}: {PASS | FIXED (X issues) | CANNOT_FIX (X issues)} — {one-sentence summary of what was fixed or what cannot be fixed, e.g. "added missing Custom Error Rules section" or "moved 2 misclassified rules to Global Rules"}
+- Round {N-1}: ...
 ```
 
 **CRITICAL**: Preserve the existing Changelog section from the previous report when overwriting. Read the old report first, extract the Changelog, append the new entry, then write the new report.
