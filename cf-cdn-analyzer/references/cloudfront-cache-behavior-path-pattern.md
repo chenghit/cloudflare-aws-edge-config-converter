@@ -127,7 +127,7 @@ If the path condition uses multiple extensions (`extension in {...}`):
 
 If the path condition uses OR across multiple distinct paths → split into separate rows, one per path.
 
-If the path condition uses simple regex OR (all branches match `^/prefix(.*)`) → split into separate rows, one per branch.
+If there is no path condition → default behavior (`*`).
 
 **CRITICAL: OR path splitting is mandatory.** `path wildcard "/a/*" or path wildcard "/b/*"` MUST produce TWO rows — one under `### Cache Behavior: /a/*` and one under `### Cache Behavior: /b/*`. Never assign only the first path and drop the rest.
 
@@ -137,8 +137,6 @@ http.request.uri.path eq "/welcome.html" and ip.src.country eq "CN"
 or http.request.uri.path eq "/welcome.html" and ip.src.country eq "DE"
 ```
 → ONE row under `### Cache Behavior: /welcome.html`, note `⚠️ Contains non-path condition`. Do NOT split.
-
-If there is no path condition → default behavior (`*`).
 
 **CRITICAL: `starts_with()` and `ends_with()` are ALWAYS convertible.**
 - `starts_with(http.request.uri.path, "/foo")` → `/foo*`

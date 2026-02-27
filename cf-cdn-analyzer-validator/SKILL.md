@@ -126,11 +126,13 @@ If either is placed under `* (Default)` with `⚠️ 非可转换路径`, that i
 Requires splitting (not non-convertible):
 - Uses `http.request.uri.path.extension in {...}` (multiple extensions):
   - **≤ 5 extensions** → split into one row per extension, each under its own `### Cache Behavior: *.<ext>`
-  - **> 5 extensions** → must be under `### Cache Behavior: * (Default)` with note `⚠️ Too many extensions to split into Cache Behaviors — recommend Lambda@Edge`
+  - **> 5 extensions** → must be under `### Cache Behavior: * (Default)` with note `⚠️ Too many extensions to split into Cache Behaviors — recommend Lambda@Edge`. If it is incorrectly split into individual `*.<ext>` Cache Behaviors, that is an error — consolidate into default.
 - OR across multiple paths → split into one row per path
 - Uses `matches r"..."` where ALL branches match `^/prefix(.*)` or `^/prefix/(.*)` (simple regex OR) → split into one row per branch, each under `### Cache Behavior: /prefix/*`
 
 **CRITICAL: OR path splitting must be complete.** If a rule expression contains `path wildcard "/a/*" or path wildcard "/b/*"`, the summary MUST have TWO rows for this rule — one under `### Cache Behavior: /a/*` and one under `### Cache Behavior: /b/*`. If only one path is present, that is an error — add the missing row(s).
+
+**CRITICAL: Simple regex OR splitting must be complete.** If a rule uses `matches r"^/a/(.*)|^/b/(.*)"`, the summary MUST have one row per branch. If any branch is missing, that is an error — add the missing row(s).
 
 **CRITICAL: OR expressions where ALL branches share the same path do NOT require splitting.** Extract the path from each OR branch. If all branches have the same path, it must be ONE row under that path's Cache Behavior with `⚠️ Contains non-path condition`. If it is incorrectly placed under `* (Default)` or split into multiple rows, that is an error.
 
