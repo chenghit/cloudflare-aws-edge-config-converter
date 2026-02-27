@@ -65,3 +65,4 @@ After all subagents complete, summarize what was done and where output files wer
 - **Pass the exact path** the user provided; do not modify or resolve it
 - **Serial execution only** — wait for each subagent to finish before starting the next
 - If the user's request is ambiguous about which conversion is needed, infer from context rather than asking
+- **When re-invoking the same subagent**, always explicitly state what action to perform and what inputs to use. Never assume the subagent remembers a previous invocation. Each call is a fresh session with no context. A vague re-invoke query (e.g. "run again") may cause the subagent to skip all tool calls and return immediately.
