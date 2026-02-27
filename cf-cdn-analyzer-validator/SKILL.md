@@ -114,7 +114,7 @@ Within the correct hostname section, determine which Cache Behavior the rule bel
 
 **Step 2: Check if path condition is convertible**
 Non-convertible if ANY of:
-- Uses `matches r"..."` (regex)
+- Uses `matches r"..."` with complex regex (character classes `[...]`, quantifiers `+`/`{n,m}`, lookaheads, or anchors other than `^` at start of each branch)
 - Uses `not` on a path condition
 - Contains only non-path fields: `ip.src`, `http.user_agent`, `http.cookie`, `http.request.headers`, `http.host` alone, `true`, etc.
 
@@ -126,6 +126,7 @@ If either is placed under `* (Default)` with `⚠️ 非可转换路径`, that i
 Requires splitting (not non-convertible):
 - Uses `http.request.uri.path.extension in {...}` (multiple extensions) → split into one row per extension, each under its own `### Cache Behavior: *.<ext>`
 - OR across multiple paths → split into one row per path
+- Uses `matches r"..."` where ALL branches match `^/prefix(.*)` or `^/prefix/(.*)` (simple regex OR) → split into one row per branch, each under `### Cache Behavior: /prefix/*`
 
 **CRITICAL: OR path splitting must be complete.** If a rule expression contains `path wildcard "/a/*" or path wildcard "/b/*"`, the summary MUST have TWO rows for this rule — one under `### Cache Behavior: /a/*` and one under `### Cache Behavior: /b/*`. If only one path is present, that is an error — add the missing row(s).
 
