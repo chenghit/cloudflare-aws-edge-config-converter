@@ -126,10 +126,6 @@ Requires splitting (not non-convertible):
 - No path condition OR non-convertible → must be under `### Cache Behavior: * (Default)`
 - Mixed (convertible path + non-path condition like geo/IP/UA) → must be under `### Cache Behavior: {path pattern}` with `⚠️ Contains non-path condition` note
 
-**Step 4: Special split cases**
-- OR across multiple paths (e.g., `path eq "/a" or path eq "/b"`) → must be split into separate rows, one per path pattern
-- `extension in {"jpg" "png"}` → must be split into `*.jpg` and `*.png` separate rows
-
 **Pass condition:** Each sampled rule is in the correct hostname section AND the correct Cache Behavior subsection.
 
 **Fail:** Record the rule expression, its current location, and where it should be.

@@ -62,7 +62,7 @@ After:  | example.com | CNAME | origin.example.com | No | mixed | Yes |
 - CNAME Flattening: No
 - Proxied: Yes
 - Status: ✅ Convertible
-- Total Rules: 5
+- Total Rules: 8
 
 ### Cache Behavior: /api/*
 | Rule Type | Priority | Match Expression | Action | Notes |
@@ -85,9 +85,9 @@ Rules with no convertible path condition (no path, non-convertible path, or host
 
 | Rule Type | Priority | Match Expression | Action | Notes |
 |-----------|----------|------------------|--------|-------|
-| URL Rewrite Rule | 2 | `http.host eq "example.com" and http.request.uri.path matches "^/api/v1/(.*)"` | `/v2/$1` | ⚠️ Non-convertible path |
-| Request Header Transform | 3 | `http.host eq "example.com" and http.request.uri.path matches "^/api/.*"` | Set `X-API-Version: 2.0` | ⚠️ Non-convertible path |
-| Compression Rule | 4 | `http.host eq "example.com"` | Gzip, Brotli | |
+| URL Rewrite Rule | 1 | `http.host eq "example.com" and http.request.uri.path matches "^/api/v1/(.*)"` | `/v2/$1` | ⚠️ Non-convertible path |
+| Request Header Transform | 1 | `http.host eq "example.com" and http.request.uri.path matches "^/api/.*"` | Set `X-API-Version: 2.0` | ⚠️ Non-convertible path |
+| Compression Rule | 1 | `http.host eq "example.com"` | Gzip, Brotli | |
 | Custom Error Rule | - | 404 | Custom 404 page | |
 
 ---
