@@ -172,14 +172,14 @@ All rule types (Cache Rules, Origin Rules, Redirect Rules, URL Rewrite Rules, He
 | Rule Type | Priority | Match Expression | Action | Notes |
 |-----------|----------|------------------|--------|-------|
 | Origin Rule | 1 | `...` | Override origin: api-backend.example.com | |
-| Cache Rule | 2 | `...` | TTL: 0s | |
-| Request Header Transform | 3 | `... and ip.src.country eq "CN"` | Set X-Region: CN | ⚠️ Contains non-path condition |
+| Cache Rule | 1 | `...` | TTL: 0s | |
+| Request Header Transform | 1 | `... and ip.src.country eq "CN"` | Set X-Region: CN | ⚠️ Contains non-path condition |
 
 ### Cache Behavior: /static/*
 | Rule Type | Priority | Match Expression | Action | Notes |
 |-----------|----------|------------------|--------|-------|
 | Cache Rule | 1 | `...` | TTL: 86400s | |
-| Compression Rule | 2 | `...` | Brotli + Gzip | |
+| Compression Rule | 1 | `...` | Brotli + Gzip | |
 
 ### Cache Behavior: * (Default)
 Rules with no convertible path condition.
@@ -187,6 +187,6 @@ Rules with no convertible path condition.
 | Rule Type | Priority | Match Expression | Action | Notes |
 |-----------|----------|------------------|--------|-------|
 | Request Header Transform | 1 | `true` | Set X-CDN-Vendor: CloudFront | |
-| Redirect Rule | 2 | `ip.src.country eq "CN"` | Redirect to /cn/ | |
-| Cache Rule | 3 | `http.request.uri.path matches r"^/v[0-9]+"` | TTL: 300s | ⚠️ Non-convertible path |
+| Redirect Rule | 1 | `ip.src.country eq "CN"` | Redirect to /cn/ | |
+| Cache Rule | 1 | `http.request.uri.path matches r"^/v[0-9]+"` | TTL: 300s | ⚠️ Non-convertible path |
 ```
