@@ -331,23 +331,19 @@ After:  | example.com | CNAME | origin.example.com | Yes |
 Check the "Non-Convertible Items" section in the summary:
 - **IP-based Origins**: These require manual setup (ALB/NLB or domain names) before proceeding
 
-### Action 3: Run the Planner Skill
+### Action 3: Continue in This Conversation (Planner - Coming Soon)
 
-Once you've edited the summary and addressed non-convertible items:
+Once you've edited the summary and addressed non-convertible items, tell Kiro in this conversation:
 
-```bash
-# Switch to Planner subagent
-/agent swap cf-cdn-planner
+> "Continue with CDN planning using the summary in `cloudflare-cdn-analysis/`"
 
-# Provide the edited summary
-"Plan CloudFront implementation using hostname-based-config-summary.md"
-```
-
-The Planner skill will:
+Kiro will automatically invoke the Planner subagent, which will:
 1. Read your edited summary
 2. Determine CloudFront implementation methods for each rule
 3. Generate implementation plan and user decision template
-4. Output: README_2_planner.md for next steps
+4. Output: `README_2_planner.md` for next steps
+
+> ⚠️ **Note**: The Planner skill (`cf-cdn-planner`) is not yet available. This step will be enabled in a future release.
 
 ## Questions?
 
