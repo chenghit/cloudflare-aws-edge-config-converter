@@ -65,6 +65,7 @@ Source: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Downl
 | `http.request.uri.path wildcard "/images/*.jpg"` | `/images/*.jpg` |
 | `http.request.uri.path.extension eq "css"` | `*.css` |
 | `starts_with(http.request.uri.path, "/static/")` | `/static/*` |
+| `ends_with(http.request.uri.path, "index.html")` | `*index.html` |
 | `http.request.full_uri wildcard "https://hostname/path/*"` | `/path/*` (extract path portion only) |
 
 ### Non-Convertible Path Conditions
@@ -74,7 +75,6 @@ These Cloudflare path expressions **cannot** be directly represented as a CloudF
 | Cloudflare Expression | Reason |
 |----------------------|--------|
 | `http.request.uri.path matches r"^/api/v[0-9]+/"` | Regex not supported |
-| `ends_with(http.request.uri.path, "/index.html")` | Suffix-only match not supported |
 | `not http.request.uri.path wildcard "/api/*"` | Negation not supported |
 
 ### Requires Splitting (Convertible After Split)
@@ -103,6 +103,7 @@ Look for path-related fields in the expression:
 - `http.request.uri.path wildcard "..."` → wildcard path
 - `http.request.uri.path.extension eq "..."` → `*.<ext>`
 - `starts_with(http.request.uri.path, "/foo/")` → `/foo/*` (**CONVERTIBLE** — do NOT mark as non-convertible)
+- `ends_with(http.request.uri.path, "index.html")` → `*index.html` (**CONVERTIBLE** — do NOT mark as non-convertible)
 - `http.request.full_uri wildcard "https://hostname/path/*"` → extract `/path/*`
 
 **Step 2: Check convertibility**
@@ -115,7 +116,10 @@ If the path condition uses multiple extensions (`extension in {...}`) or OR acro
 
 If there is no path condition → default behavior (`*`).
 
-**CRITICAL: `starts_with()` is ALWAYS convertible.** `starts_with(http.request.uri.path, "/foo")` → `/foo*`. Never classify `starts_with()` as non-convertible.
+**CRITICAL: `starts_with()` and `ends_with()` are ALWAYS convertible.**
+- `starts_with(http.request.uri.path, "/foo")` → `/foo*`
+- `ends_with(http.request.uri.path, "index.html")` → `*index.html`
+Never classify these as non-convertible.
 
 **Step 3: Assign to group**
 

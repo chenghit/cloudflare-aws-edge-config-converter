@@ -108,6 +108,7 @@ Within the correct hostname section, determine which Cache Behavior the rule bel
 - `http.request.uri.path wildcard "/api/*"` → `/api/*`
 - `http.request.uri.path.extension eq "css"` → `*.css`
 - `starts_with(http.request.uri.path, "/static/")` → `/static/*` (**CONVERTIBLE** — never non-convertible)
+- `ends_with(http.request.uri.path, "index.html")` → `*index.html` (**CONVERTIBLE** — never non-convertible)
 - `http.request.full_uri wildcard "https://hostname/path/*"` → extract path portion `/path/*` only (ignore hostname and query string)
 - No path field in expression → no path condition
 
@@ -117,7 +118,10 @@ Non-convertible if ANY of:
 - Uses `not` on a path condition
 - Contains only non-path fields: `ip.src`, `http.user_agent`, `http.cookie`, `http.request.headers`, `http.host` alone, `true`, etc.
 
-**CRITICAL: `starts_with()` is ALWAYS convertible.** If a rule using `starts_with()` is placed under `* (Default)` with `⚠️ 非可转换路径`, that is an error — move it to the correct `### Cache Behavior: {prefix}*` section.
+**CRITICAL: `starts_with()` and `ends_with()` are ALWAYS convertible.**
+- `starts_with(http.request.uri.path, "/foo")` → `/foo*`
+- `ends_with(http.request.uri.path, "index.html")` → `*index.html`
+If either is placed under `* (Default)` with `⚠️ 非可转换路径`, that is an error — move it to the correct Cache Behavior section.
 
 Requires splitting (not non-convertible):
 - Uses `http.request.uri.path.extension in {...}` (multiple extensions) → split into one row per extension, each under its own `### Cache Behavior: *.<ext>`
