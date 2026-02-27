@@ -47,17 +47,23 @@ This tool contains multiple independent Agent Skills, each focused on specific c
 
 ### Model Selection
 
-- **Default Configuration**: `claude-sonnet-4.5` (Kiro default)
-  - Use case: < 100 rules
-  - Sufficient for most migration scenarios
+> ⚠️ **Minimum Required Model: `claude-sonnet-4.6`**
+>
+> This tool relies on Kiro's subagent system. When a skill is activated, the main agent must read the full SKILL.md content and invoke the correct named subagent (e.g. `cf-cdn-analyzer`). Testing shows that `claude-sonnet-4.5` and earlier models only read the skill's **description** (one-line frontmatter) but do not fully load the SKILL.md body. As a result, they know a subagent should be invoked but cannot identify which one, and fall back to `kiro_default` — causing the task to fail silently.
+>
+> **`claude-sonnet-4.6` or later is required for correct subagent routing.**
 
-- **Large-Scale Configuration**: `claude-sonnet-4.5-1m`
+- **Recommended**: `claude-sonnet-4.6`
+  - Use case: < 100 rules
+  - Minimum version that correctly loads SKILL.md and routes to named subagents
+
+- **Large-Scale Configuration**: `claude-sonnet-4.6-1m`
   - Use case: > 100 rules OR multiple domains with complex configurations
   - **Recommended for CDN migration**: If you have 10+ proxied domains with various rules, use this model
   - Supports larger context window
   - Configuration: Use `/model` command in Kiro to switch
 
-**Note for CDN Migration**: CDN configuration analysis (cf-cdn-analyzer) processes all rules across all proxied domains simultaneously. With many domains and rules, context size grows quickly. Using `claude-sonnet-4.5-1m` ensures sufficient context window.
+**Note for CDN Migration**: CDN configuration analysis (cf-cdn-analyzer) processes all rules across all proxied domains simultaneously. With many domains and rules, context size grows quickly. Using `claude-sonnet-4.6-1m` ensures sufficient context window.
 
 ### System Requirements
 
