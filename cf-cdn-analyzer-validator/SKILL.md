@@ -124,7 +124,9 @@ Non-convertible if ANY of:
 If either is placed under `* (Default)` with `⚠️ 非可转换路径`, that is an error — move it to the correct Cache Behavior section.
 
 Requires splitting (not non-convertible):
-- Uses `http.request.uri.path.extension in {...}` (multiple extensions) → split into one row per extension, each under its own `### Cache Behavior: *.<ext>`
+- Uses `http.request.uri.path.extension in {...}` (multiple extensions):
+  - **≤ 5 extensions** → split into one row per extension, each under its own `### Cache Behavior: *.<ext>`
+  - **> 5 extensions** → must be under `### Cache Behavior: * (Default)` with note `⚠️ Too many extensions to split into Cache Behaviors — recommend Lambda@Edge`
 - OR across multiple paths → split into one row per path
 - Uses `matches r"..."` where ALL branches match `^/prefix(.*)` or `^/prefix/(.*)` (simple regex OR) → split into one row per branch, each under `### Cache Behavior: /prefix/*`
 

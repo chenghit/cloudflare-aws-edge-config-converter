@@ -84,6 +84,7 @@ These expressions cannot map to a single path pattern but can be converted after
 | Cloudflare Expression | How to Handle |
 |----------------------|---------------|
 | `http.request.uri.path.extension in {"jpg" "png" "gif"}` | Split into `*.jpg`, `*.png`, `*.gif` — each becomes a separate Cache Behavior |
+| `http.request.uri.path.extension in {"jpg" "png" ... }` (> 5 extensions) | Too many to split — place under `* (Default)` with note `⚠️ Too many extensions to split into Cache Behaviors — recommend Lambda@Edge` |
 | `path eq "/a" or path eq "/b"` | Split into `/a` and `/b` — each becomes a separate Cache Behavior |
 | `http.request.uri.path matches r"^/foo/(.*)\|^/bar/(.*)"` | Simple regex OR with `^/prefix/(.*)` branches — split into `/foo/*`, `/bar/*` — each becomes a separate Cache Behavior |
 
@@ -120,7 +121,9 @@ If the path condition uses regex (`matches r"..."`), check if it is a simple OR 
 - **Simple regex OR** (all branches match `^/prefix(.*)` or `^/prefix/(.*)`): → requires splitting → split into one row per branch
 - **Complex regex** (contains character classes, quantifiers, lookaheads, etc.): → non-convertible → default behavior (`*`)
 
-If the path condition uses multiple extensions (`extension in {...}`) or OR across multiple paths → requires splitting → split into separate rows, one per path pattern.
+If the path condition uses multiple extensions (`extension in {...}`):
+- **≤ 5 extensions** → split into separate rows, one per extension
+- **> 5 extensions** → assign to default behavior (`*`) with note `⚠️ Too many extensions to split into Cache Behaviors — recommend Lambda@Edge`
 
 **CRITICAL: OR path splitting is mandatory.** `path wildcard "/a/*" or path wildcard "/b/*"` MUST produce TWO rows — one under `### Cache Behavior: /a/*` and one under `### Cache Behavior: /b/*`. Never assign only the first path and drop the rest.
 
@@ -177,12 +180,9 @@ If a Bulk Redirect has `include_subdomains: true` and the source is an apex doma
 
 ### Multiple Extensions (`extension in {...}`)
 
-`http.request.uri.path.extension in {"jpg" "png" "gif"}` cannot be a single path pattern. Split into separate rules:
-- Rule copy 1 → `*.jpg`
-- Rule copy 2 → `*.png`
-- Rule copy 3 → `*.gif`
-
-Each copy gets the same action as the original rule.
+- **≤ 5 extensions**: Split into separate rows, one per extension. Each copy gets the same action as the original rule.
+  - `extension in {"jpg" "png" "gif"}` → Row 1: `*.jpg`, Row 2: `*.png`, Row 3: `*.gif`
+- **> 5 extensions**: Too many Cache Behaviors — place under `* (Default)` with note `⚠️ Too many extensions to split into Cache Behaviors — recommend Lambda@Edge`
 
 ---
 
