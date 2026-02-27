@@ -1,6 +1,6 @@
 ---
 name: cloudflare-aws-converter
-description: Orchestrates Cloudflare-to-AWS conversion by delegating to specialized subagents. Use when the user wants to convert Cloudflare configurations to AWS (WAF, CloudFront Functions, or CDN analysis) and provides a Cloudflare config directory path. This skill determines which subagents to invoke and in what order based on the user's request, then passes the config path directly to each subagent. Triggers on requests like "convert my Cloudflare config to AWS", "migrate Cloudflare WAF and CDN to AWS", or any combination of WAF/Functions/CDN conversion tasks.
+description: Orchestrates Cloudflare-to-AWS conversion and analysis by delegating to specialized subagents. Use when the user wants to analyze, convert, or migrate Cloudflare configurations (WAF, CloudFront Functions, or CDN) and provides a Cloudflare config directory path. This skill determines which subagents to invoke and in what order based on the user's request, then passes the config path directly to each subagent. Triggers on requests like "analyze my Cloudflare CDN config", "convert my Cloudflare config to AWS", "migrate Cloudflare WAF and CDN to AWS", or any combination of WAF/Functions/CDN analysis or conversion tasks.
 ---
 
 # Cloudflare to AWS Converter
