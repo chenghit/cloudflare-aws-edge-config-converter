@@ -111,6 +111,8 @@ If the path condition uses regex (`matches r"..."`), negation (`not`) → non-co
 
 If the path condition uses multiple extensions (`extension in {...}`) or OR across multiple paths → requires splitting → split into separate rows, one per path pattern.
 
+**CRITICAL: OR path splitting is mandatory.** `path wildcard "/a/*" or path wildcard "/b/*"` MUST produce TWO rows — one under `### Cache Behavior: /a/*` and one under `### Cache Behavior: /b/*`. Never assign only the first path and drop the rest.
+
 If there is no path condition → default behavior (`*`).
 
 **CRITICAL: `starts_with()` is ALWAYS convertible.** `starts_with(http.request.uri.path, "/foo")` → `/foo*`. Never classify `starts_with()` as non-convertible.

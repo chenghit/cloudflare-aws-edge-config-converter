@@ -123,6 +123,8 @@ Requires splitting (not non-convertible):
 - Uses `http.request.uri.path.extension in {...}` (multiple extensions) → split into one row per extension, each under its own `### Cache Behavior: *.<ext>`
 - OR across multiple paths → split into one row per path
 
+**CRITICAL: OR path splitting must be complete.** If a rule expression contains `path wildcard "/a/*" or path wildcard "/b/*"`, the summary MUST have TWO rows for this rule — one under `### Cache Behavior: /a/*` and one under `### Cache Behavior: /b/*`. If only one path is present, that is an error — add the missing row(s).
+
 **Step 3: Assign**
 - Convertible path → must be under `### Cache Behavior: {path pattern}`
 - No path condition OR non-convertible → must be under `### Cache Behavior: * (Default)`
