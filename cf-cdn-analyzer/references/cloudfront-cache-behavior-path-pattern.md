@@ -125,6 +125,10 @@ If the path condition uses multiple extensions (`extension in {...}`):
 - **≤ 5 extensions** → split into separate rows, one per extension
 - **> 5 extensions** → assign to default behavior (`*`) with note `⚠️ Too many extensions to split into Cache Behaviors — recommend Lambda@Edge`
 
+If the path condition uses OR across multiple distinct paths → split into separate rows, one per path.
+
+If the path condition uses simple regex OR (all branches match `^/prefix(.*)`) → split into separate rows, one per branch.
+
 **CRITICAL: OR path splitting is mandatory.** `path wildcard "/a/*" or path wildcard "/b/*"` MUST produce TWO rows — one under `### Cache Behavior: /a/*` and one under `### Cache Behavior: /b/*`. Never assign only the first path and drop the rest.
 
 **CRITICAL: OR expressions where ALL branches share the same path do NOT require splitting.** First extract the path from each OR branch. If all branches have the same path, it is ONE rule under that path's Cache Behavior with `⚠️ Contains non-path condition`. Example:
