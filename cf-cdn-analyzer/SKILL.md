@@ -189,9 +189,9 @@ Conversion terminated.
 
 ### 4. Parse DNS Records and Identify Proxied Hostnames
 
-Parse `DNS.txt` to identify:
-- All DNS records
-- Which records are proxied (proxied: true)
+Parse `DNS.txt` to identify proxied records only (proxied: true). DNS-only records (proxied: false) are not in scope for CDN migration — ignore them completely.
+
+For each proxied record, extract:
 - Record types (A, AAAA, CNAME)
 - Record values (IP addresses, domain names)
 - CNAME flattening status (settings.flatten_cname for CNAME records)

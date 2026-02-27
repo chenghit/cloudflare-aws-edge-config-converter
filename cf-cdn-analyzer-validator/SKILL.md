@@ -48,7 +48,7 @@ Run all checks below. Collect all issues before fixing anything.
 
 #### Check 1: Proxied Hostname Count
 
-Count proxied records in `DNS.txt` (records where `proxied: true`, type A, AAAA, or CNAME).
+Count proxied records in `DNS.txt` (records where `proxied: true`, type A, AAAA, or CNAME). DNS-only records (proxied: false) are not in scope — ignore them completely. If the summary contains any non-proxied hostname sections, remove them.
 
 Compare with the number of DNS record sections in the summary.
 
