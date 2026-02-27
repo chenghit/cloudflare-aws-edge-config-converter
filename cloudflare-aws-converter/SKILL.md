@@ -44,7 +44,7 @@ Run the analyzer → validator loop:
 3. Invoke `cf-cdn-analyzer-validator` with: `"Validate CDN analysis in {config_path}. This is validation round {validation_round}."`
 4. Check the `---RESULT---` block in the validator's response:
    - `STATUS: PASS` → proceed to Step 4
-   - `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise go back to step 3.
+   - `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise invoke validator again with: `"Validate CDN analysis in {config_path}. This is validation round {validation_round}. The previous round had STATUS: FIXED. Re-run all validation checks against the current hostname-based-config-summary.md to confirm all issues are resolved."`
    - `STATUS: CANNOT_FIX` → stop and tell the user which issues require manual intervention (from the ISSUES section)
 
 #### For WAF and Functions requests:
