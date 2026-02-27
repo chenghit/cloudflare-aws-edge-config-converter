@@ -126,8 +126,8 @@ These rules reference hostnames that are not proxied. This may indicate outdated
 #### Cache Behavior: * (Default)
 | Rule Type | Priority | Match Expression | Action | Notes |
 |-----------|----------|------------------|--------|-------|
-| Bulk Redirect | 1 | old.example.com/about → /about-us 301 | | |
-| Bulk Redirect | 2 | old.example.com/contact → /contact-us 301 | | |
+| Bulk Redirect | 1 | old.example.com/about | /about-us 301 | |
+| Bulk Redirect | 2 | old.example.com/contact | /contact-us 301 | |
 
 **Note**: These rules will not take effect because the hostname is not proxied through Cloudflare. Consider deleting these rules or proxying the hostname.
 

@@ -115,8 +115,11 @@ Within the correct hostname section, determine which Cache Behavior the rule bel
 Non-convertible if ANY of:
 - Uses `matches r"..."` (regex)
 - Uses `not` on a path condition
-- Uses `http.request.uri.path.extension in {...}` (multiple extensions)
 - Contains only non-path fields: `ip.src`, `http.user_agent`, `http.cookie`, `http.request.headers`, `http.host` alone, `true`, etc.
+
+Requires splitting (not non-convertible):
+- Uses `http.request.uri.path.extension in {...}` (multiple extensions) → split into one row per extension, each under its own `### Cache Behavior: *.<ext>`
+- OR across multiple paths → split into one row per path
 
 **Step 3: Assign**
 - Convertible path → must be under `### Cache Behavior: {path pattern}`

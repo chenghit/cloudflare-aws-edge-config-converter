@@ -107,7 +107,9 @@ Look for path-related fields in the expression:
 
 **Step 2: Check convertibility**
 
-If the path condition uses regex (`matches r"..."`), negation (`not`), or multiple extensions (`extension in {...}`) → non-convertible → default behavior (`*`).
+If the path condition uses regex (`matches r"..."`), negation (`not`) → non-convertible → default behavior (`*`).
+
+If the path condition uses multiple extensions (`extension in {...}`) or OR across multiple paths → requires splitting → split into separate rows, one per path pattern.
 
 If there is no path condition → default behavior (`*`).
 
