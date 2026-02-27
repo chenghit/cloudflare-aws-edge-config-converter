@@ -92,12 +92,6 @@ For each rule type, sample up to 5 rules (or all rules if fewer than 5). For eac
 ```
 
 **Level 2 — Path pattern (Cache Behavior) classification:**
-```
-Within the correct hostname section, check which Cache Behavior the rule is under:
-
-1. Does the expression have a convertible path condition?
-   (eq, wildcard, starts_with, extension eq → convertible)
-**Level 2 — Path pattern (Cache Behavior) classification:**
 
 Within the correct hostname section, determine which Cache Behavior the rule belongs to:
 

@@ -70,7 +70,7 @@ cloudflare-cdn-analysis/
 3. `references/output-structure.md` - Output file structure and formatting requirements
 4. `references/cloudfront-cache-behavior-path-pattern.md` - CloudFront path pattern rules and grouping algorithm (CRITICAL for Step 5)
 
-**After reading all 3 references, proceed to Step 1.**
+**After reading all 4 references, proceed to Step 1.**
 
 ### 1. Validate Input
 
