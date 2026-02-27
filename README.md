@@ -49,9 +49,9 @@ This tool contains multiple independent Agent Skills, each focused on specific c
 
 > ⚠️ **Minimum Required Model: `claude-sonnet-4.6`**
 >
-> This tool relies on Kiro's subagent system. When a skill is activated, the main agent must read the full SKILL.md content and invoke the correct named subagent (e.g. `cf-cdn-analyzer`). Testing shows that `claude-sonnet-4.5` and earlier models only read the skill's **description** (one-line frontmatter) but do not fully load the SKILL.md body. As a result, they know a subagent should be invoked but cannot identify which one, and fall back to `kiro_default` — causing the task to fail silently.
+> This tool relies on Kiro's skill activation mechanism. When a skill is available, the agent reads its metadata (name and description) at startup, then decides whether to load the full SKILL.md content based on the user's request. Testing shows that `claude-sonnet-4.5` and earlier models see the skill metadata but do not load the full SKILL.md body — they proceed without the specialized workflow instructions, causing tasks to fail or produce incorrect results.
 >
-> **`claude-sonnet-4.6` or later is required for correct subagent routing.**
+> **`claude-sonnet-4.6` or later is required to correctly load and follow skill instructions.**
 
 - **Recommended**: `claude-sonnet-4.6`
   - Use case: < 100 rules

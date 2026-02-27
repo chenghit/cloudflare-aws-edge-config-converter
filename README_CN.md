@@ -49,9 +49,9 @@
 
 > ⚠️ **最低要求模型：`claude-sonnet-4.6`**
 >
-> 本工具依赖 Kiro 的子代理系统。当技能被激活时，主代理必须读取完整的 SKILL.md 内容并调用正确的命名子代理（如 `cf-cdn-analyzer`）。测试表明，`claude-sonnet-4.5` 及更早版本只读取技能的**描述**（frontmatter 中的一行），而不会完整加载 SKILL.md 正文。因此，它们知道应该调用子代理，但无法识别具体是哪个，最终 fallback 到 `kiro_default`——导致任务静默失败。
+> 本工具依赖 Kiro 的 skill 激活机制。当 skill 可用时，agent 在启动时读取其 metadata（name 和 description），然后根据用户请求决定是否加载完整的 SKILL.md 内容。测试表明，`claude-sonnet-4.5` 及更早版本能看到 skill metadata，但不会加载 SKILL.md 正文——它们在没有专门工作流指令的情况下继续执行，导致任务失败或产生错误结果。
 >
-> **`claude-sonnet-4.6` 或更高版本才能正确路由到命名子代理。**
+> **`claude-sonnet-4.6` 或更高版本才能正确加载并遵循 skill 指令。**
 
 - **推荐**：`claude-sonnet-4.6`
   - 使用场景：< 100 条规则
