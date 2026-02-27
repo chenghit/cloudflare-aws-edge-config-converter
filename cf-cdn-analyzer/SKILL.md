@@ -51,10 +51,11 @@ cloudflare-cdn-analysis/
 - Bulk redirects
 - Request/Response header transform rules
 - Managed transforms
-- Custom error pages
+- Custom error rules (custom responses for HTTP error codes like 429, 403, 404, 500)
 
 **Out of Scope:** 
 - Security rules (use cf-waf-converter)
+- Custom Pages (`Custom-Pages.txt`) — Cloudflare-specific challenge/error page templates (waf_block, basic_challenge, 500_errors, etc.) that have no CloudFront equivalent
 - Implementation decisions (handled by Planner skill)
 - Actual CloudFront configuration generation (handled by downstream skills)
 
@@ -111,7 +112,6 @@ Extract the zone name from the path (parent directory of the timestamp directory
 - `**/Request-Header-Transform.txt`
 - `**/Response-Header-Transform.txt`
 - `**/Custom-Error-Rules.txt`
-- `**/Custom-Pages.txt`
 - `**/Managed-Transforms.txt`
 
 **Account-level files:**
