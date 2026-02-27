@@ -68,7 +68,7 @@ After:  | example.com | CNAME | origin.example.com | No | mixed | Yes |
 | Rule Type | Priority | Match Expression | Action | Notes |
 |-----------|----------|------------------|--------|-------|
 | Origin Rule | 1 | `http.request.full_uri wildcard "https://example.com/api/*"` | Override origin: api-backend.example.com | |
-| Cache Rule | 2 | `http.host eq "example.com" and http.request.uri.path wildcard "/api/*"` | TTL: 0s | |
+| Cache Rule | 1 | `http.host eq "example.com" and http.request.uri.path wildcard "/api/*"` | TTL: 0s | |
 
 ### Cache Behavior: /docs/*
 | Rule Type | Priority | Match Expression | Action | Notes |
