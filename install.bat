@@ -15,12 +15,14 @@ echo Copying skills to %SKILLS_DIR%...
 if exist "%SKILLS_DIR%\cf-waf-converter" rmdir /s /q "%SKILLS_DIR%\cf-waf-converter"
 if exist "%SKILLS_DIR%\cf-functions-converter" rmdir /s /q "%SKILLS_DIR%\cf-functions-converter"
 if exist "%SKILLS_DIR%\cf-cdn-analyzer" rmdir /s /q "%SKILLS_DIR%\cf-cdn-analyzer"
+if exist "%SKILLS_DIR%\cf-cdn-analyzer-validator" rmdir /s /q "%SKILLS_DIR%\cf-cdn-analyzer-validator"
 if exist "%SKILLS_DIR%\SKILL.md" del /q "%SKILLS_DIR%\SKILL.md"
 
 :: Copy skills
 xcopy /e /i /q "cf-waf-converter" "%SKILLS_DIR%\cf-waf-converter"
 xcopy /e /i /q "cf-functions-converter" "%SKILLS_DIR%\cf-functions-converter"
 xcopy /e /i /q "cf-cdn-analyzer" "%SKILLS_DIR%\cf-cdn-analyzer"
+xcopy /e /i /q "cf-cdn-analyzer-validator" "%SKILLS_DIR%\cf-cdn-analyzer-validator"
 copy /y "cloudflare-aws-converter\SKILL.md" "%SKILLS_DIR%\SKILL.md"
 
 :: Copy subagent configurations
@@ -28,6 +30,7 @@ echo Copying subagent configurations to %AGENTS_DIR%...
 copy /y "subagents\cf-waf-converter.json" "%AGENTS_DIR%\"
 copy /y "subagents\cf-functions-converter.json" "%AGENTS_DIR%\"
 copy /y "subagents\cf-cdn-analyzer.json" "%AGENTS_DIR%\"
+copy /y "subagents\cf-cdn-analyzer-validator.json" "%AGENTS_DIR%\"
 
 echo.
 echo Installation complete!
@@ -37,10 +40,12 @@ echo   - Orchestrator: %SKILLS_DIR%\SKILL.md
 echo   - WAF Converter: %SKILLS_DIR%\cf-waf-converter\
 echo   - Functions Converter: %SKILLS_DIR%\cf-functions-converter\
 echo   - CDN Analyzer: %SKILLS_DIR%\cf-cdn-analyzer\
+echo   - CDN Analyzer Validator: %SKILLS_DIR%\cf-cdn-analyzer-validator\
 echo.
 echo Installed subagents:
 echo   - cf-waf-converter
 echo   - cf-functions-converter
 echo   - cf-cdn-analyzer
+echo   - cf-cdn-analyzer-validator
 
 endlocal

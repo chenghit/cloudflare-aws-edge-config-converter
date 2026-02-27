@@ -1,0 +1,9 @@
+{
+  "name": "cf-cdn-analyzer-validator",
+  "description": "Validates the output of cf-cdn-analyzer by cross-checking hostname-based-config-summary.md against original Cloudflare configuration files. Fixes errors directly in the summary.",
+  "resources": [
+    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-analyzer-validator/SKILL.md"
+  ],
+  "tools": ["fs_read", "fs_write", "glob", "grep"],
+  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
+}

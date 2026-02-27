@@ -30,6 +30,10 @@ if [ -f "$AGENTS_DIR/cf-cdn-analyzer.json" ]; then
     rm "$AGENTS_DIR/cf-cdn-analyzer.json"
     ((REMOVED_COUNT++))
 fi
+if [ -f "$AGENTS_DIR/cf-cdn-analyzer-validator.json" ]; then
+    rm "$AGENTS_DIR/cf-cdn-analyzer-validator.json"
+    ((REMOVED_COUNT++))
+fi
 
 if [ $REMOVED_COUNT -gt 0 ]; then
     echo "Removing subagent configurations from $AGENTS_DIR..."

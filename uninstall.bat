@@ -17,7 +17,7 @@ if exist "%SKILLS_DIR%" (
 
 :: Remove subagent configurations
 set REMOVED=0
-for %%F in (cf-waf-converter.json cf-functions-converter.json cf-cdn-analyzer.json) do (
+for %%F in (cf-waf-converter.json cf-functions-converter.json cf-cdn-analyzer.json cf-cdn-analyzer-validator.json) do (
     if exist "%AGENTS_DIR%\%%F" (
         del /q "%AGENTS_DIR%\%%F"
         set /a REMOVED+=1
