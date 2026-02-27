@@ -102,7 +102,7 @@ Look for path-related fields in the expression:
 - `http.request.uri.path eq "..."` → exact path
 - `http.request.uri.path wildcard "..."` → wildcard path
 - `http.request.uri.path.extension eq "..."` → `*.<ext>`
-- `starts_with(http.request.uri.path, "...")` → `<prefix>*`
+- `starts_with(http.request.uri.path, "/foo/")` → `/foo/*` (**CONVERTIBLE** — do NOT mark as non-convertible)
 - `http.request.full_uri wildcard "https://hostname/path/*"` → extract `/path/*`
 
 **Step 2: Check convertibility**
@@ -112,6 +112,8 @@ If the path condition uses regex (`matches r"..."`), negation (`not`) → non-co
 If the path condition uses multiple extensions (`extension in {...}`) or OR across multiple paths → requires splitting → split into separate rows, one per path pattern.
 
 If there is no path condition → default behavior (`*`).
+
+**CRITICAL: `starts_with()` is ALWAYS convertible.** `starts_with(http.request.uri.path, "/foo")` → `/foo*`. Never classify `starts_with()` as non-convertible.
 
 **Step 3: Assign to group**
 
