@@ -82,7 +82,7 @@ Expected format: "Analyze CDN configuration in /path/to/cloudflare-config"
 - STOP immediately
 - Return error: "Configuration directory path is required. Please provide the path to CloudflareBackup output directory."
 
-**If summary files already exist in the path:**
+**If summary files already exist in the output directory (`cloudflare-cdn-analysis/hostname-based-config-summary.md`):**
 - STOP immediately
 - Return message: "Found existing summary files (hostname-based-config-summary.md). Please specify whether to use existing summary or regenerate."
 

@@ -132,7 +132,7 @@ Non-convertible if ANY of:
 
 #### Check 4: Rule Priority Order
 
-For each hostname section and each rule type, verify that rules appear in ascending priority order (priority 1 first, then 2, then 3...).
+Within each Cache Behavior section, verify that rules appear in ascending priority order (priority 1 first, then 2, then 3...). Priority ordering is per rule type within a Cache Behavior — e.g., all Cache Rules in a behavior should be in order, all Redirect Rules in order, etc.
 
 **Pass condition:** Rules are in correct priority order within each section.
 
@@ -170,11 +170,13 @@ For each rule that references a specific hostname, verify that hostname exists i
 
 For each issue found:
 
-- **Missing hostname section**: Add the DNS record section with its rules extracted from the original config files.
+- **Missing hostname section**: Add the DNS record section with its rules extracted from the original config files, grouped by Cache Behavior path pattern.
 - **Extra hostname section**: Remove the section (hostname not in proxied DNS records).
-- **Rule count mismatch**: Find the missing/extra rules by comparing summary rows against original config file entries. Add missing rules or remove extra rows.
-- **Misclassified rule**: Move the rule to the correct section (Global / Specific / Orphaned).
-- **Wrong priority order**: Reorder rows within the section.
+- **Rule count mismatch**: Find the missing/extra rules by comparing summary rows against original config file entries. Add missing rules or remove extra rows. Place each rule in the correct Cache Behavior section.
+- **Misclassified rule (wrong hostname section)**: Move the rule to the correct section (Global / Specific / Orphaned).
+- **Misclassified rule (wrong Cache Behavior)**: Move the rule to the correct `### Cache Behavior: {pattern}` subsection within the correct hostname section.
+- **Missing rule split**: If a rule with OR paths or multiple extensions is not split, split it into separate rows under the appropriate Cache Behavior sections.
+- **Wrong priority order**: Reorder rows within the Cache Behavior section.
 - **Missing IP-based origin**: Add the hostname to the Non-Convertible Items section.
 
 After all fixes, re-read the modified summary and verify the fixed checks pass before writing the report.
