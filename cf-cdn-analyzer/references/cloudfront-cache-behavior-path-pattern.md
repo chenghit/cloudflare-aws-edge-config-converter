@@ -114,6 +114,13 @@ If the path condition uses multiple extensions (`extension in {...}`) or OR acro
 
 **CRITICAL: OR path splitting is mandatory.** `path wildcard "/a/*" or path wildcard "/b/*"` MUST produce TWO rows — one under `### Cache Behavior: /a/*` and one under `### Cache Behavior: /b/*`. Never assign only the first path and drop the rest.
 
+**CRITICAL: OR expressions where ALL branches share the same path do NOT require splitting.** First extract the path from each OR branch. If all branches have the same path, it is ONE rule under that path's Cache Behavior with `⚠️ Contains non-path condition`. Example:
+```
+http.request.uri.path eq "/welcome.html" and ip.src.country eq "CN"
+or http.request.uri.path eq "/welcome.html" and ip.src.country eq "DE"
+```
+→ ONE row under `### Cache Behavior: /welcome.html`, note `⚠️ Contains non-path condition`. Do NOT split.
+
 If there is no path condition → default behavior (`*`).
 
 **CRITICAL: `starts_with()` and `ends_with()` are ALWAYS convertible.**

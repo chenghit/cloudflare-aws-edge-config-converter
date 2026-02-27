@@ -129,6 +129,8 @@ Requires splitting (not non-convertible):
 
 **CRITICAL: OR path splitting must be complete.** If a rule expression contains `path wildcard "/a/*" or path wildcard "/b/*"`, the summary MUST have TWO rows for this rule — one under `### Cache Behavior: /a/*` and one under `### Cache Behavior: /b/*`. If only one path is present, that is an error — add the missing row(s).
 
+**CRITICAL: OR expressions where ALL branches share the same path do NOT require splitting.** Extract the path from each OR branch. If all branches have the same path, it must be ONE row under that path's Cache Behavior with `⚠️ Contains non-path condition`. If it is incorrectly placed under `* (Default)` or split into multiple rows, that is an error.
+
 **Step 3: Assign**
 - Convertible path → must be under `### Cache Behavior: {path pattern}`
 - No path condition OR non-convertible → must be under `### Cache Behavior: * (Default)`
