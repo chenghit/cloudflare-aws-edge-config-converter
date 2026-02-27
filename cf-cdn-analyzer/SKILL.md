@@ -68,6 +68,7 @@ cloudflare-cdn-analysis/
 1. `references/cloudflare-default-cache-behavior.md` - Cloudflare implicit caching behaviors
 2. `references/cloudflare-rule-execution-order.md` - Rule execution order (must preserve in output)
 3. `references/output-structure.md` - Output file structure and formatting requirements
+4. `references/cloudfront-cache-behavior-path-pattern.md` - CloudFront path pattern rules and grouping algorithm (CRITICAL for Step 5)
 
 **After reading all 3 references, proceed to Step 1.**
 
@@ -264,6 +265,16 @@ A rule uses wildcard for all subdomains if it contains ANY of these patterns:
 
 **For each proxied hostname, collect relevant configuration using the classification algorithm above.**
 
+**Then, within each hostname (and within Global Rules), group rules by CloudFront Cache Behavior path pattern:**
+
+Follow the Path Pattern Grouping Algorithm in `references/cloudfront-cache-behavior-path-pattern.md`:
+1. Extract the path condition from each rule's expression
+2. Convert to CloudFront path pattern (or assign to default `*` if no path / non-convertible)
+3. Group rules under their path pattern: `### Cache Behavior: /api/*`, `### Cache Behavior: * (Default)`, etc.
+4. Split rules with OR across multiple paths into separate entries
+5. Mark rules with non-path conditions or non-convertible paths with appropriate notes
+6. Note overlapping path patterns (e.g., `/api/v2/*` overlaps with `/api/*`)
+
 **Special cases:**
 
 **Bulk Redirects:**
@@ -286,11 +297,11 @@ Output a Markdown file (`hostname-based-config-summary.md`) following the struct
 
 **Key requirements:**
 - Include Zone Information section at the top with Zone Domain and Apex Domain (both are the same value extracted from directory structure)
-- Group all rules by proxied hostname
-- Preserve rule priority order within each category
+- Group all rules first by proxied hostname, then by CloudFront Cache Behavior path pattern within each hostname (follow `references/cloudfront-cache-behavior-path-pattern.md`)
+- Preserve rule priority order within each Cache Behavior
 - Include proxied hostnames overview table with CNAME flattening status
 - Mark IP-based origins as non-convertible
-- List global rules (no http.host match) separately
+- List global rules (no http.host match) separately, also grouped by path pattern
 
 **For the Proxied Hostnames table:**
 - Include columns: Hostname, Record Type, Value, CNAME Flattening, Content Type, Apply Default Cache Behavior?
@@ -366,4 +377,5 @@ Save as `README_1_analyzer.md`.
 - `references/cloudflare-default-cache-behavior.md` - Cloudflare implicit caching behaviors (CRITICAL - must understand for accurate analysis)
 - `references/output-structure.md` - Output file structure and formatting requirements
 - `references/cloudflare-rule-execution-order.md` - Cloudflare rule execution order (must preserve in output)
+- `references/cloudfront-cache-behavior-path-pattern.md` - CloudFront path pattern rules and grouping algorithm (CRITICAL for Step 5)
 

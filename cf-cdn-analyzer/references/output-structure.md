@@ -64,50 +64,31 @@ After:  | example.com | CNAME | origin.example.com | No | mixed | Yes |
 - Status: ✅ Convertible
 - Total Rules: 5
 
-### Redirect Rules (1 rule)
-| Priority | Match Expression | Target URL | Status Code |
-|----------|------------------|------------|-------------|
-| 1 | `http.host eq "example.com" and http.request.uri.path eq "/old"` | `/new` | 301 |
+### Cache Behavior: /api/*
+| Rule Type | Priority | Match Expression | Action | Notes |
+|-----------|----------|------------------|--------|-------|
+| Origin Rule | 1 | `http.request.full_uri wildcard "https://example.com/api/*"` | Override origin: api-backend.example.com | |
+| Cache Rule | 2 | `http.host eq "example.com" and http.request.uri.path wildcard "/api/*"` | TTL: 0s | |
 
-### URL Rewrite Rules (1 rule)
-| Priority | Match Expression | Rewrite Action |
-|----------|------------------|----------------|
-| 1 | `http.host eq "example.com" and http.request.uri.path matches "^/api/v1/(.*)"` | `/v2/$1` |
+### Cache Behavior: /docs/*
+| Rule Type | Priority | Match Expression | Action | Notes |
+|-----------|----------|------------------|--------|-------|
+| Response Header Transform | 1 | `http.host eq "example.com" and http.request.uri.path wildcard "/docs/*"` | Set `X-Custom-Header: value` | |
 
-### Bulk Redirects (1 rule)
-| Priority | Source URL | Target URL | Status Code | Include Subdomains | Preserve Query String |
-|----------|------------|------------|-------------|-------------------|----------------------|
-| 1 | example.com/old | example.com/new | 301 | No | Yes |
+### Cache Behavior: /old
+| Rule Type | Priority | Match Expression | Action | Notes |
+|-----------|----------|------------------|--------|-------|
+| Redirect Rule | 1 | `http.host eq "example.com" and http.request.uri.path eq "/old"` | `/new` 301 | |
 
-### Request Header Transform Rules (1 rule)
-| Priority | Match Expression | Header Action |
-|----------|------------------|---------------|
-| 1 | `http.host eq "example.com" and http.request.uri.path matches "^/api/.*"` | Set `X-API-Version: 2.0` |
+### Cache Behavior: * (Default)
+Rules with no convertible path condition (no path, non-convertible path, or hostname-only).
 
-### Cache Rules (1 rule)
-| Priority | Match Expression | Action | Settings |
-|----------|------------------|--------|----------|
-| 1 | `http.host eq "example.com" and http.request.uri.path matches "^/api/.*"` | Set cache TTL | TTL: 0s |
-
-### Origin Rules (1 rule)
-| Priority | Match Expression | Action | Settings |
-|----------|------------------|--------|----------|
-| 1 | `http.request.full_uri wildcard "https://example.com/api/*"` | Override origin | Host: api-backend.example.com |
-
-### Custom Error Rules (1 rule)
-| Error Code | Custom Response |
-|------------|-----------------|
-| 404 | Custom 404 page |
-
-### Response Header Transform Rules (1 rule)
-| Priority | Match Expression | Header Action |
-|----------|------------------|---------------|
-| 1 | `http.host eq "example.com" and http.request.uri.path wildcard "/docs/*"` | Set `X-Custom-Header: value` |
-
-### Compression Rules (1 rule)
-| Priority | Match Expression | Compression Type |
-|----------|------------------|------------------|
-| 1 | `http.host eq "example.com"` | Gzip, Brotli |
+| Rule Type | Priority | Match Expression | Action | Notes |
+|-----------|----------|------------------|--------|-------|
+| URL Rewrite Rule | 2 | `http.host eq "example.com" and http.request.uri.path matches "^/api/v1/(.*)"` | `/v2/$1` | ⚠️ Non-convertible path |
+| Request Header Transform | 3 | `http.host eq "example.com" and http.request.uri.path matches "^/api/.*"` | Set `X-API-Version: 2.0` | ⚠️ Non-convertible path |
+| Compression Rule | 4 | `http.host eq "example.com"` | Gzip, Brotli | |
+| Custom Error Rule | - | 404 | Custom 404 page | |
 
 ---
 
@@ -117,15 +98,22 @@ After:  | example.com | CNAME | origin.example.com | No | mixed | Yes |
 ---
 
 ## Global Rules (no http.host match)
-These rules may apply to multiple DNS records. User decision required for assignment.
+These rules may apply to multiple DNS records. Grouped by path pattern, same as hostname sections.
 
 ### Managed Transforms (Zone-level)
 | Transform Type | Enabled |
 |----------------|---------|
 | True-Client-IP Header | Yes |
 
-### Cache Rules (2 rules)
-[Same table structure as above]
+### Cache Behavior: /content/*
+| Rule Type | Priority | Match Expression | Action | Notes |
+|-----------|----------|------------------|--------|-------|
+| Cache Rule | 1 | `http.request.uri.path wildcard "/content/*"` | TTL: 3600s | |
+
+### Cache Behavior: * (Default)
+| Rule Type | Priority | Match Expression | Action | Notes |
+|-----------|----------|------------------|--------|-------|
+| Request Header Transform | 1 | `true` | Set `X-CDN-Vendor: CloudFront` | |
 
 ---
 
@@ -135,11 +123,11 @@ These rules reference hostnames that are not proxied. This may indicate outdated
 
 ### Hostname: old.example.com (Not Proxied)
 
-#### Bulk Redirects (2 rules)
-| Priority | Source URL | Target URL | Status Code |
-|----------|------------|------------|-------------|
-| 1 | old.example.com/about | /about-us | 301 |
-| 2 | old.example.com/contact | /contact-us | 301 |
+#### Cache Behavior: * (Default)
+| Rule Type | Priority | Match Expression | Action | Notes |
+|-----------|----------|------------------|--------|-------|
+| Bulk Redirect | 1 | old.example.com/about → /about-us 301 | | |
+| Bulk Redirect | 2 | old.example.com/contact → /contact-us 301 | | |
 
 **Note**: These rules will not take effect because the hostname is not proxied through Cloudflare. Consider deleting these rules or proxying the hostname.
 
@@ -237,16 +225,11 @@ These rules reference hostnames that are not proxied. This may indicate outdated
 
 ### Hostname: old.example.com (Not Proxied)
 
-#### Bulk Redirects (2 rules)
-| Priority | Source URL | Target URL | Status Code |
-|----------|------------|------------|-------------|
-| 1 | old.example.com/about | /about-us | 301 |
-| 2 | old.example.com/contact | /contact-us | 301 |
-
-#### Cache Rules (1 rule)
-| Priority | Match Expression | Action | Settings |
-|----------|------------------|--------|----------|
-| 1 | `http.host eq "old.example.com"` | Set cache TTL | TTL: 3600s |
+#### Cache Behavior: * (Default)
+| Rule Type | Priority | Match Expression | Action | Notes |
+|-----------|----------|------------------|--------|-------|
+| Bulk Redirect | 1 | old.example.com/about | /about-us 301 | |
+| Cache Rule | 2 | `http.host eq "old.example.com"` | TTL: 3600s | |
 
 **Note**: These rules will not take effect because the hostname is not proxied through Cloudflare.
 ```
@@ -293,56 +276,26 @@ Expression: (http.host in {"example.com" "www.example.com"}) and (http.request.u
 
 ## Table Column Definitions
 
-### Cache Rules
-- **Priority**: Cloudflare rule priority (lower = higher priority)
+All rules within a hostname or Global Rules section are grouped by Cache Behavior (path pattern), using a unified table format:
+
+### Unified Cache Behavior Table
+- **Rule Type**: Type of Cloudflare rule (Cache Rule, Origin Rule, Redirect Rule, URL Rewrite Rule, Request Header Transform, Response Header Transform, Compression Rule, Custom Error Rule, Bulk Redirect)
+- **Priority**: Cloudflare rule priority (lower = higher priority). Preserve original order within each rule type.
 - **Match Expression**: Full Cloudflare expression
-- **Action**: Cache action (e.g., "Set cache TTL", "Bypass cache")
-- **Settings**: Cache settings (e.g., "TTL: 3600s", "Edge TTL: 7200s")
-
-### Origin Rules
-- **Priority**: Cloudflare rule priority
-- **Match Expression**: Full Cloudflare expression
-- **Action**: Origin action (e.g., "Override origin", "Override host header")
-- **Settings**: Origin settings (e.g., "Host: backend.example.com")
-
-### Redirect Rules
-- **Priority**: Cloudflare rule priority
-- **Match Expression**: Full Cloudflare expression
-- **Target URL**: Redirect target
-- **Status Code**: HTTP status code (301, 302, 307, 308)
-
-### URL Rewrite Rules
-- **Priority**: Cloudflare rule priority
-- **Match Expression**: Full Cloudflare expression
-- **Rewrite Action**: Rewrite target (e.g., "/v2/$1")
-
-### Header Transform Rules
-- **Priority**: Cloudflare rule priority
-- **Match Expression**: Full Cloudflare expression
-- **Header Action**: Header operation (e.g., "Set X-Custom: value", "Remove X-Old")
-
-### Compression Rules
-- **Priority**: Cloudflare rule priority
-- **Match Expression**: Full Cloudflare expression
-- **Compression Type**: Compression algorithms (e.g., "Gzip, Brotli")
-
-### Custom Error Rules
-- **Error Code**: HTTP error code (e.g., 404, 500)
-- **Custom Response**: Custom error page or response
-
-### Custom Pages
-- **Error Type**: Error page type (e.g., "500_errors", "1000_errors", "waf_block")
-- **State**: "default" (using Cloudflare default) or "custom" (using custom page)
-- **Custom URL**: URL of custom error page (if state is "custom")
+- **Action**: What the rule does (e.g., "Override origin: backend.example.com", "TTL: 0s", "Redirect to /new 301", "Set X-Header: value", "Gzip, Brotli")
+- **Notes**: Any special conditions, e.g.:
+  - `⚠️ Non-convertible path` — path expression uses regex/negation, cannot be a CloudFront path pattern
+  - `⚠️ Contains non-path condition` — expression has both a path condition and a non-path condition (geo, IP, UA, etc.)
+  - `⚠️ Query string in full_uri` — original expression includes query string condition
+  - `⚠️ Overlapping with [pattern]` — this path pattern overlaps with another, ordering matters
 
 ### Managed Transforms
+Listed separately as zone-level settings (not grouped by path pattern):
 - **Transform Type**: Type of managed transform (e.g., "True-Client-IP Header")
 - **Enabled**: Whether the transform is enabled (Yes/No)
 
-### Bulk Redirects
-- **Priority**: Rule priority
-- **Source URL**: Source URL pattern
-- **Target URL**: Redirect target
-- **Status Code**: HTTP status code (301, 302, 307, 308)
-- **Include Subdomains**: Whether to include subdomains (Yes/No)
-- **Preserve Query String**: Whether to preserve query string (Yes/No)
+### Custom Pages
+Listed separately as zone-level settings (not grouped by path pattern):
+- **Error Type**: Error page type (e.g., "500_errors", "waf_block")
+- **State**: "default" or "custom"
+- **Custom URL**: URL of custom error page (if state is "custom")

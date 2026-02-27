@@ -64,7 +64,7 @@ For each rule type file (Cache-Rules.txt, Origin-Rules.txt, Redirect-Rules.txt, 
 
 **Custom Pages (`Custom-Pages.txt`) are NOT rules — they are zone-level settings. They must appear in their own `## Custom Pages (Zone-level)` section and are NOT counted in the rule total. Do NOT add Custom Pages to the Non-Convertible Items section.**
 
-Compare with the total number of rows across all sections (Specific + Global + Orphaned) in the summary for that rule type.
+Compare with the total number of rows across all Cache Behavior sections (all hostname sections + Global Rules + Orphaned Rules combined) in the summary for that rule type. Rules are now grouped by Cache Behavior path pattern, not by rule type — count all rows of each rule type across all Cache Behavior tables.
 
 **Pass condition:** Total rule count matches for each rule type.
 
@@ -74,31 +74,65 @@ Compare with the total number of rows across all sections (Specific + Global + O
 
 #### Check 3: Rule Classification Spot-Check
 
-For each rule type, sample up to 5 rules (or all rules if fewer than 5). For each sampled rule, apply the classification algorithm:
+For each rule type, sample up to 5 rules (or all rules if fewer than 5). For each sampled rule, apply a two-level check:
 
+**Level 1 — Hostname classification:**
 ```
 1. Does expression contain http.host or hostname in http.request.full_uri?
-   NO → must be Global Rule
+   NO → must be in Global Rules section
    YES → continue
 
 2. Does it use wildcard for all subdomains?
-   (patterns: *.example.com, .*\.example\.com, .*\\.example\\.com)
-   YES → must be Global Rule
+   YES → must be in Global Rules section
    NO → continue
 
 3. Is the specific hostname in proxied DNS records?
-   YES → must be Specific Rule under that hostname
-   NO → must be Orphaned Rule
+   YES → must be under that hostname's DNS Record section
+   NO → must be in Orphaned Rules section
 ```
 
-**Pass condition:** Each sampled rule is in the correct section.
+**Level 2 — Path pattern (Cache Behavior) classification:**
+```
+Within the correct hostname section, check which Cache Behavior the rule is under:
 
-**Fail:** Record the rule expression, its current location in the summary, and where it should be.
+1. Does the expression have a convertible path condition?
+   (eq, wildcard, starts_with, extension eq → convertible)
+**Level 2 — Path pattern (Cache Behavior) classification:**
+
+Within the correct hostname section, determine which Cache Behavior the rule belongs to:
+
+**Step 1: Extract path condition from expression**
+- `http.request.uri.path eq "/foo"` → exact path `/foo`
+- `http.request.uri.path wildcard "/api/*"` → `/api/*`
+- `http.request.uri.path.extension eq "css"` → `*.css`
+- `starts_with(http.request.uri.path, "/static/")` → `/static/*`
+- `http.request.full_uri wildcard "https://hostname/path/*"` → extract path portion `/path/*` only (ignore hostname and query string)
+- No path field in expression → no path condition
+
+**Step 2: Check if path condition is convertible**
+Non-convertible if ANY of:
+- Uses `matches r"..."` (regex)
+- Uses `not` on a path condition
+- Uses `http.request.uri.path.extension in {...}` (multiple extensions)
+- Contains only non-path fields: `ip.src`, `http.user_agent`, `http.cookie`, `http.request.headers`, `http.host` alone, `true`, etc.
+
+**Step 3: Assign**
+- Convertible path → must be under `### Cache Behavior: {path pattern}`
+- No path condition OR non-convertible → must be under `### Cache Behavior: * (Default)`
+- Mixed (convertible path + non-path condition like geo/IP/UA) → must be under `### Cache Behavior: {path pattern}` with `⚠️ Contains non-path condition` note
+
+**Step 4: Special split cases**
+- OR across multiple paths (e.g., `path eq "/a" or path eq "/b"`) → must be split into separate rows, one per path pattern
+- `extension in {"jpg" "png"}` → must be split into `*.jpg` and `*.png` separate rows
+
+**Pass condition:** Each sampled rule is in the correct hostname section AND the correct Cache Behavior subsection.
+
+**Fail:** Record the rule expression, its current location, and where it should be.
 
 **Special cases:**
-- Bulk Redirects: extract hostname from source URL, apply same algorithm
-- Managed Transforms: always Global Rule
-- Custom Pages: always in their own section (not Global or Specific)
+- Bulk Redirects: extract hostname from source URL for Level 1; extract path from source URL for Level 2
+- Managed Transforms: always Global Rule, not grouped by path pattern (separate zone-level table)
+- Custom Pages: always in their own `## Custom Pages (Zone-level)` section
 
 ---
 
