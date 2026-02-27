@@ -75,8 +75,16 @@ These Cloudflare path expressions **cannot** be directly represented as a CloudF
 |----------------------|--------|
 | `http.request.uri.path matches r"^/api/v[0-9]+/"` | Regex not supported |
 | `ends_with(http.request.uri.path, "/index.html")` | Suffix-only match not supported |
-| `http.request.uri.path.extension in {"jpg" "png" "gif"}` | Multiple extensions — split into multiple rules, one per extension |
 | `not http.request.uri.path wildcard "/api/*"` | Negation not supported |
+
+### Requires Splitting (Convertible After Split)
+
+These expressions cannot map to a single path pattern but can be converted after splitting into multiple rules. Each split produces a separate Cache Behavior. **The original file counts as 1 rule, but the summary will have multiple rows.**
+
+| Cloudflare Expression | How to Handle |
+|----------------------|---------------|
+| `http.request.uri.path.extension in {"jpg" "png" "gif"}` | Split into `*.jpg`, `*.png`, `*.gif` — each becomes a separate Cache Behavior |
+| `path eq "/a" or path eq "/b"` | Split into `/a` and `/b` — each becomes a separate Cache Behavior |
 
 ### No Path Condition
 
@@ -165,23 +173,23 @@ All rule types (Cache Rules, Origin Rules, Redirect Rules, URL Rewrite Rules, He
 ## DNS Record: example.com
 
 ### Cache Behavior: /api/*
-| Rule Type | Priority | Expression | Action | Notes |
-|-----------|----------|------------|--------|-------|
+| Rule Type | Priority | Match Expression | Action | Notes |
+|-----------|----------|------------------|--------|-------|
 | Origin Rule | 1 | `...` | Override origin: api-backend.example.com | |
 | Cache Rule | 2 | `...` | TTL: 0s | |
 | Request Header Transform | 3 | `... and ip.src.country eq "CN"` | Set X-Region: CN | ⚠️ Contains non-path condition |
 
 ### Cache Behavior: /static/*
-| Rule Type | Priority | Expression | Action | Notes |
-|-----------|----------|------------|--------|-------|
+| Rule Type | Priority | Match Expression | Action | Notes |
+|-----------|----------|------------------|--------|-------|
 | Cache Rule | 1 | `...` | TTL: 86400s | |
 | Compression Rule | 2 | `...` | Brotli + Gzip | |
 
 ### Cache Behavior: * (Default)
 Rules with no convertible path condition.
 
-| Rule Type | Priority | Expression | Action | Notes |
-|-----------|----------|------------|--------|-------|
+| Rule Type | Priority | Match Expression | Action | Notes |
+|-----------|----------|------------------|--------|-------|
 | Request Header Transform | 1 | `true` | Set X-CDN-Vendor: CloudFront | |
 | Redirect Rule | 2 | `ip.src.country eq "CN"` | Redirect to /cn/ | |
 | Cache Rule | 3 | `http.request.uri.path matches r"^/v[0-9]+"` | TTL: 300s | ⚠️ Non-convertible path |
