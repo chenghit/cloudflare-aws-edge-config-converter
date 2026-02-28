@@ -22,14 +22,36 @@ Orchestrate conversion of Cloudflare configurations to AWS by delegating to spec
 
 ## Workflow
 
-### Step 1: Identify tasks from user request
+### Step 1: Identify intent and scope
 
-Determine which subagents are needed based on what the user wants to convert:
-- Security/WAF rules → `cf-waf-analyzer` → `cf-waf-analyzer-validator` → `cf-waf-terraform-generator`
-- Transformation/redirect/header rules → `cf-functions-converter`
-- CDN/cache/origin config or full migration → `cf-cdn-analyzer` → `cf-cdn-analyzer-validator`
+Determine what the user wants from their message. There are two dimensions:
 
-If the user says "convert everything" or "full migration", invoke all conversion paths.
+**Dimension 1 — Scope (what to process):**
+- **WAF only**: user mentions WAF, security rules, firewall, rate limiting, IP rules
+- **CDN only**: user mentions CDN, cache, origin rules
+- **Functions only**: user mentions transformation rules, redirects, URL rewrites, header transforms
+- **Everything**: user says "convert everything", "full migration", "all configs", or mentions Cloudflare config without specifying a type
+
+**Dimension 2 — Depth (how far to go):**
+- **Analyze**: user says "analyze", "分析" → run analyzer + validator only, stop before generator/converter
+- **Convert**: user says "convert", "migrate", "转换", "迁移" → run full pipeline including generator/converter
+- **Default**: if user doesn't specify, assume **convert** (the most common intent)
+
+**Intent matrix:**
+
+| Scope | Depth: Analyze | Depth: Convert |
+|-------|---------------|----------------|
+| WAF only | waf-analyzer → waf-validator | waf-analyzer → waf-validator → waf-terraform-generator |
+| CDN only | cdn-analyzer → cdn-validator | cdn-analyzer → cdn-validator (no generator yet) |
+| Functions only | N/A (no separate analyzer) | cf-functions-converter |
+| Everything | WAF analyze → CDN analyze | WAF convert → CDN convert → Functions convert |
+
+**Execution order for "Everything":**
+1. WAF pipeline first (analyzer → validator → generator)
+2. CDN pipeline second (analyzer → validator)
+3. Functions converter last
+
+This order matters because WAF and CDN analysis are independent, but running WAF first avoids context confusion.
 
 ### Step 2: Extract config path
 
@@ -37,9 +59,7 @@ Extract the Cloudflare config directory path from the user's message. This is th
 
 ### Step 3: Invoke subagents
 
-#### For WAF/security rules requests:
-
-Run the analyzer → validator → generator pipeline:
+#### WAF pipeline (analyzer → validator → generator):
 
 **Stage 1: Analyze**
 1. Invoke `cf-waf-analyzer` with: `"Analyze Cloudflare security rules in {config_path}. Generate output files in {user_language}."`
@@ -53,16 +73,14 @@ Run the analyzer → validator → generator pipeline:
 1. Set `validation_round = 1`
 2. Invoke `cf-waf-analyzer-validator` with: `"Validate WAF analysis in {config_path}. This is validation round {validation_round}. Generate output files in {user_language}."`
 3. Check the `---RESULT---` block in the validator's response:
-   - `STATUS: PASS` → proceed to Stage 3
+   - `STATUS: PASS` → if depth is "analyze", proceed to Step 4. If depth is "convert", proceed to Stage 3.
    - `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise invoke validator again with: `"Validate WAF analysis in {config_path}. This is validation round {validation_round}. The previous round had STATUS: FIXED. Re-run all validation checks against the current cloudflare-security-rules-summary.md to confirm all issues are resolved. Generate output files in {user_language}."`
    - `STATUS: CANNOT_FIX` → stop and tell the user which issues require manual intervention (from the ISSUES section)
 
-**Stage 3: Generate Terraform**
+**Stage 3: Generate Terraform** (only if depth is "convert")
 1. Invoke `cf-waf-terraform-generator` with: `"Generate AWS WAF Terraform configuration from the validated summary. Generate output files in {user_language}."`
 
-#### For CDN analysis requests:
-
-Run the analyzer → validator loop:
+#### CDN pipeline (analyzer → validator):
 
 1. Invoke `cf-cdn-analyzer` with: `"Analyze CDN configuration in {config_path}. Generate output files in {user_language}."`
 2. Check the analyzer's response:
@@ -71,17 +89,19 @@ Run the analyzer → validator loop:
 3. Set `validation_round = 1`
 4. Invoke `cf-cdn-analyzer-validator` with: `"Validate CDN analysis in {config_path}. This is validation round {validation_round}. Generate output files in {user_language}."`
 5. Check the `---RESULT---` block in the validator's response:
-   - `STATUS: PASS` → proceed to Step 4
+   - `STATUS: PASS` → proceed to Step 4 (or next pipeline if "Everything")
    - `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise invoke validator again with: `"Validate CDN analysis in {config_path}. This is validation round {validation_round}. The previous round had STATUS: FIXED. Re-run all validation checks against the current hostname-based-config-summary.md to confirm all issues are resolved. Generate output files in {user_language}."`
    - `STATUS: CANNOT_FIX` → stop and tell the user which issues require manual intervention (from the ISSUES section)
 
-#### For Functions/transformation requests:
+#### Functions pipeline:
 
 Invoke `cf-functions-converter` with: `"Convert Cloudflare transformation rules in {config_path} to CloudFront Functions. Generate output files in {user_language}."`
 
 ### Step 4: Report results
 
 After all subagents complete, summarize what was done and where output files were generated.
+
+For "Everything" scope, report results for each pipeline separately.
 
 ## Important Rules
 
