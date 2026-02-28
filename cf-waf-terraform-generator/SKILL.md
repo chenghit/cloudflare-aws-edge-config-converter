@@ -27,20 +27,24 @@ Reference files in `references/` directory. Summary file in `cloudflare-to-aws-w
 
 **All output files will be written to**: `cloudflare-to-aws-waf/` in current working directory.
 
-**File Structure:**
+**⚠️ CRITICAL: Output path is `cloudflare-to-aws-waf/`, NOT any other directory. Do NOT create `aws-waf-terraform/` or any other custom directory name.**
+
+**File Structure (MUST follow exactly):**
 ```
 cloudflare-to-aws-waf/
 ├── cloudflare-security-rules-summary.md    # INPUT (already exists, do not modify)
-├── versions.tf
-├── ip_sets.tf
-├── main.tf
+├── versions.tf                              # Root: provider version
+├── ip_sets.tf                               # Root: shared IP sets
+├── main.tf                                  # Root: locals + two module calls
 ├── modules/
 │   └── waf/
-│       ├── main.tf
-│       ├── variables.tf
-│       └── outputs.tf
-└── README_aws-waf-terraform-deployment.md
+│       ├── main.tf                          # Module: Web ACL resource
+│       ├── variables.tf                     # Module: input variables
+│       └── outputs.tf                       # Module: outputs
+└── README_aws-waf-terraform-deployment.md   # Deployment guide
 ```
+
+**⚠️ CRITICAL: You MUST create the `modules/waf/` subdirectory and place module files there. The root `main.tf` calls the module twice (website + api-and-file). Do NOT put all files flat in one directory.**
 
 ## How to Read the Summary File
 
