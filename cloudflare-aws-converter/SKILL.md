@@ -93,7 +93,7 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
 1. Invoke `cf-cdn-analyzer` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-analyzer/SKILL.md and follow its workflow. Analyze CDN configuration in {config_path}. Generate output files in {user_language}."`
 2. Check the analyzer's response:
    - If analyzer reports existing summary files found → ask the user (same as WAF flow above)
-   - If analyzer completed successfully → proceed to validator loop
+   - If analyzer completed successfully (`STATUS: COMPLETE` in `---RESULT---` block) → proceed to validator loop
 3. Set `validation_round = 1`
 4. Invoke `cf-cdn-analyzer-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-analyzer-validator/SKILL.md and follow its workflow. Validate CDN analysis in {config_path}. This is validation round {validation_round}. Generate output files in {user_language}."`
 5. Check the `---RESULT---` block in the validator's response:

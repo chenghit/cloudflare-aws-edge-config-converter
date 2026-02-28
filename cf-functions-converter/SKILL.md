@@ -557,3 +557,15 @@ Read these references as needed during conversion:
 - `references/continent-countries.md` - Country-to-continent mapping
 - `references/conversion-examples.md` - Detailed URL conversion code examples
 - `references/cloudflare-rule-execution-order.md` - Cloudflare rule execution order (must follow this order in generated code)
+
+### Return Result
+
+After all output files are generated, end your response with this exact block:
+
+```
+---RESULT---
+STATUS: COMPLETE
+OUTPUT_FILES:
+  - {list all generated files}
+---END---
+```

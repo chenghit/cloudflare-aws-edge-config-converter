@@ -375,6 +375,19 @@ Save as `README_1_analyzer.md`.
 1. **hostname-based-config-summary.md** - Hostname-based configuration summary (pure data extraction, no implementation decisions)
 2. **README_1_analyzer.md** - Next steps guide for user
 
+### Return Result
+
+After all output files are generated, end your response with this exact block:
+
+```
+---RESULT---
+STATUS: COMPLETE
+OUTPUT_FILES:
+  - cloudflare-cdn-analysis/hostname-based-config-summary.md
+  - cloudflare-cdn-analysis/README_1_analyzer.md
+---END---
+```
+
 ## Reference
 
 - `references/cloudflare-default-cache-behavior.md` - Cloudflare implicit caching behaviors (CRITICAL - must understand for accurate analysis)

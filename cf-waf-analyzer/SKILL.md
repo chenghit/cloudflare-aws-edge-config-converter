@@ -184,3 +184,15 @@ For each non-convertible or partially convertible rule found, explain:
 - What manual configuration is needed
 
 Save the summary as `cloudflare-security-rules-summary.md` to avoid conflicts with other Cloudflare conversion skills.
+
+### Return Result
+
+After the summary file is generated, end your response with this exact block:
+
+```
+---RESULT---
+STATUS: COMPLETE
+OUTPUT_FILES:
+  - cloudflare-to-aws-waf/cloudflare-security-rules-summary.md
+---END---
+```
