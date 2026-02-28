@@ -32,12 +32,10 @@ cloudflare-to-aws-waf/
 **Before starting any validation, you MUST read ALL reference documents:**
 
 1. `references/non-convertible-rules.md` - Which rules cannot be converted and why
-2. `references/action-conversions.md` - Rate limiting conversion algorithm (CRITICAL for rate-based rules)
-3. `references/field-conversions.md` - IP/ASN/field mapping rules
-4. `references/nesting-and-splitting.md` - Rule splitting strategy
-5. `references/common-mistakes.md` - Common errors to avoid (read this LAST)
+2. `references/action-conversions.md` - Rate limiting conversion algorithm and skip action logic
+3. `references/field-conversions.md` - IP/ASN/field mapping to AWS WAF statement types
 
-**After reading all 5 references, proceed to Step 1.**
+**After reading all 3 references, proceed to Step 1.**
 
 ### 1. Read Inputs
 
@@ -202,7 +200,10 @@ For each WAF Custom Rule and IP Access Rule in the summary, verify the splitting
   3. IP set names follow the pattern `<rule-name>-branch-<N>-<context>-ipv4/ipv6`
   4. All IP addresses from the original expression are present (none missing, none extra)
 
-**Part E — AWS WAF statement type:**
+**Part E — Split skip rules must share RuleLabels:**
+- If a skip rule is split (OR or IPv4/IPv6), verify the summary states that ALL split variants add the SAME RuleLabels. If any variant is missing a label, that is an error.
+
+**Part F — AWS WAF statement type:**
 - For each rule/branch, verify the planned AWS WAF statement type is correct:
   - `ip.src in $list` or inline IPs → `ip_set_reference_statement`
   - `ip.src.asnum in $list` or inline ASNs → `asn_match_statement`
