@@ -186,139 +186,49 @@ git pull
 - 包含真实的 Cloudflare 配置结构
 - 可直接用于测试转换功能
 
-### 技能 1：将安全规则转换为 AWS WAF
-
-**推荐用法**（主代理自动调用子代理）：
+### 将安全规则转换为 AWS WAF
 
 ```
-User: Convert Cloudflare security rules in /path/to/cloudflare-config to AWS WAF
-
-Kiro: [自动调用 cf-waf-analyzer 子代理]
-      [读取配置文件，生成安全规则摘要]
-      [调用 cf-waf-analyzer-validator 子代理]
-      [验证摘要，修复发现的错误]
-      [调用 cf-waf-terraform-generator 子代理]
-      [从已验证的摘要生成 Terraform 文件]
-      ✅ 转换完成！生成的文件：
-      - cloudflare-security-rules-summary.md
-      - versions.tf
-      - ip_sets.tf
-      - main.tf
-      - modules/waf/main.tf, variables.tf, outputs.tf
-      - README_aws-waf-terraform-deployment.md
+User: 将 /path/to/cloudflare-config 中的 Cloudflare 安全规则转换为 AWS WAF
 ```
 
-**备选用法**（手动切换子代理）：
-
-```
-User: /agent swap cf-waf-analyzer
-
-User: Analyze security rules in /path/to/cloudflare-config
-
-Kiro: [生成安全规则摘要]
-
-User: /agent swap cf-waf-analyzer-validator
-
-User: Validate WAF analysis in /path/to/cloudflare-config. This is validation round 1.
-
-Kiro: [验证并修复摘要]
-
-User: /agent swap cf-waf-terraform-generator
-
-User: Generate AWS WAF Terraform from the validated summary.
-
-Kiro: [生成 Terraform 配置文件]
-```
-
-**输出文件**：
-
-- `cloudflare-security-rules-summary.md` - 安全规则分析和转换计划
-- `versions.tf` - Terraform 和 AWS Provider 版本约束
-- `ip_sets.tf` - 共享 IP 集资源
-- `main.tf` - 根模块，包含两个 Web ACL 配置（website 和 api-and-file）
-- `modules/waf/` - Web ACL 模块（main.tf, variables.tf, outputs.tf）
-- `README_aws-waf-terraform-deployment.md` - 部署指南
+Kiro 自动运行 3 阶段 WAF 流水线（分析 → 验证 → 生成 Terraform）。输出文件写入 `cloudflare-to-aws-waf/`。
 
 **完整示例**：[examples/conversation-history/cloudflare-to-aws-waf.txt](examples/conversation-history/cloudflare-to-aws-waf.txt)
 
-### 技能 2：将转换规则转换为 CloudFront Functions
-
-**推荐用法**（主代理自动调用子代理）：
+### 将转换规则转换为 CloudFront Functions
 
 ```
-User: Convert Cloudflare transformation rules in /path/to/cloudflare-config to CloudFront Functions
-
-Kiro: [自动调用 cf-functions-converter 子代理]
-      [读取配置文件，生成 JavaScript 代码]
-      ✅ 转换完成！生成的文件：
-      - cloudflare-transformation-rules-summary.md
-      - viewer-request-function.js
-      - viewer-request-function.min.js（如果需要）
-      - key-value-store.json（如果需要）
-      - README_function_and_kvs_deployment.md
+User: 将 /path/to/cloudflare-config 中的 Cloudflare 转换规则转换为 CloudFront Functions
 ```
 
-**备选用法**（手动切换子代理）：
-
-```
-User: /agent swap cf-functions-converter
-
-User: Convert transformation rules in /path/to/cloudflare-config
-
-Kiro: [生成 JavaScript 代码和部署指南]
-```
-
-**输出文件**：
-
-- `cloudflare-transformation-rules-summary.md` - 规则摘要
-- `viewer-request-function.js` - CloudFront Function 代码
-- `viewer-request-function.min.js` - 压缩版本（如需要）
-- `key-value-store.json` - KVS 数据（如需要）
-- `README_function_and_kvs_deployment.md` - 部署指南
+输出文件写入当前目录。
 
 **完整示例**：[examples/conversation-history/cloudflare-to-cloudfront-functions.txt](examples/conversation-history/cloudflare-to-cloudfront-functions.txt)
 
-### 技能 3：分析 CDN 配置
-
-**推荐用法**（主代理自动调用子代理）：
+### 分析 CDN 配置
 
 ```
-User: Analyze Cloudflare CDN configuration in /path/to/cloudflare-config
-
-Kiro: [自动调用 cf-cdn-analyzer 子代理]
-      [读取配置文件，检测 SaaS，按主机名分组规则]
-      ✅ 分析完成！生成的文件：
-      - hostname-based-config-summary.md
-      - README_1_analyzer.md
+User: 分析 /path/to/cloudflare-config 中的 Cloudflare CDN 配置
 ```
 
-**备选用法**（手动切换子代理）：
-
-```
-User: /agent swap cf-cdn-analyzer
-
-User: Analyze CDN configuration in /path/to/cloudflare-config
-
-Kiro: [生成配置摘要和下一步指南]
-```
-
-**输出文件**：
-
-- `hostname-based-config-summary.md` - 按主机名分组的配置和用户决策模板
-- `README_1_analyzer.md` - 下一步指南
-
-**此技能的功能**：
-
-- 检测 SaaS 配置（如发现则终止）
-- 识别代理 DNS 记录（每个成为一个 CloudFront Distribution）
-- 检测基于 IP 的源站（标记为不可转换）
-- 按照 Cloudflare 执行顺序按主机名分组所有规则
-- 识别隐式 Cloudflare 默认缓存行为
-- 生成默认缓存行为的用户决策模板
+Kiro 自动运行 2 阶段 CDN 流水线（分析 → 验证）。输出文件写入 `cloudflare-cdn-analysis/`。
 
 **下一步**：编辑摘要文件并运行规划器技能（cf-cdn-planner）以确定 CloudFront 实现方法。
 
-**注意**：这是多阶段 CDN 迁移工作流程（技能 3-11）的第一步。完整工作流程请参见 [架构设计](./docs/architecture/skill-3-11-design-EN.md)。
+**注意**：这是多阶段 CDN 迁移工作流程（技能 3-11）的第一步。完整工作流程请参见 [架构设计](./docs/architecture/skill-3-11-design-CN.md)。
+
+### 转换所有配置
+
+```
+User: 将 /path/to/cloudflare-config 中的所有 Cloudflare 配置转换为 AWS
+```
+
+Kiro 按顺序运行所有流水线：WAF → CDN → Functions。
+
+### 手动子代理控制
+
+高级用户可以使用 `/agent swap <子代理名称>` 手动运行各个阶段。可用子代理：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-functions-converter`、`cf-cdn-analyzer`、`cf-cdn-analyzer-validator`。
 
 ## 最佳实践
 

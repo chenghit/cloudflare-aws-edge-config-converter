@@ -187,139 +187,49 @@ If you want to test the tool without backing up your own configuration, you can 
 - Contains real Cloudflare configuration structure
 - Can be used directly for testing conversion functionality
 
-### Skill 1: Convert Security Rules to AWS WAF
-
-**Recommended Usage** (Main agent automatically invokes subagent):
+### Convert Security Rules to AWS WAF
 
 ```
 User: Convert Cloudflare security rules in /path/to/cloudflare-config to AWS WAF
-
-Kiro: [Automatically invokes cf-waf-analyzer subagent]
-      [Reads configuration files, generates security rules summary]
-      [Invokes cf-waf-analyzer-validator subagent]
-      [Validates summary, fixes errors if found]
-      [Invokes cf-waf-terraform-generator subagent]
-      [Generates Terraform files from validated summary]
-      ✅ Conversion complete! Generated files:
-      - cloudflare-security-rules-summary.md
-      - versions.tf
-      - ip_sets.tf
-      - main.tf
-      - modules/waf/main.tf, variables.tf, outputs.tf
-      - README_aws-waf-terraform-deployment.md
 ```
 
-**Alternative Usage** (Manual subagent switch):
-
-```
-User: /agent swap cf-waf-analyzer
-
-User: Analyze security rules in /path/to/cloudflare-config
-
-Kiro: [Generates security rules summary]
-
-User: /agent swap cf-waf-analyzer-validator
-
-User: Validate WAF analysis in /path/to/cloudflare-config. This is validation round 1.
-
-Kiro: [Validates and fixes summary]
-
-User: /agent swap cf-waf-terraform-generator
-
-User: Generate AWS WAF Terraform from the validated summary.
-
-Kiro: [Generates Terraform configuration files]
-```
-
-**Output Files**:
-
-- `cloudflare-security-rules-summary.md` - Security rules analysis and conversion plan
-- `versions.tf` - Terraform and AWS Provider version constraints
-- `ip_sets.tf` - Shared IP set resources
-- `main.tf` - Root module with two Web ACL configurations (website and api-and-file)
-- `modules/waf/` - Web ACL module (main.tf, variables.tf, outputs.tf)
-- `README_aws-waf-terraform-deployment.md` - Deployment guide
+Kiro automatically runs the 3-stage WAF pipeline (analyze → validate → generate Terraform). Output files are written to `cloudflare-to-aws-waf/`.
 
 **Complete Example**: [examples/conversation-history/cloudflare-to-aws-waf.txt](examples/conversation-history/cloudflare-to-aws-waf.txt)
 
-### Skill 2: Convert Transformation Rules to CloudFront Functions
-
-**Recommended Usage** (Main agent automatically invokes subagent):
+### Convert Transformation Rules to CloudFront Functions
 
 ```
 User: Convert Cloudflare transformation rules in /path/to/cloudflare-config to CloudFront Functions
-
-Kiro: [Automatically invokes cf-functions-converter subagent]
-      [Reads configuration files, generates JavaScript code]
-      ✅ Conversion complete! Generated files:
-      - cloudflare-transformation-rules-summary.md
-      - viewer-request-function.js
-      - viewer-request-function.min.js (if needed)
-      - key-value-store.json (if needed)
-      - README_function_and_kvs_deployment.md
 ```
 
-**Alternative Usage** (Manual subagent switch):
-
-```
-User: /agent swap cf-functions-converter
-
-User: Convert transformation rules in /path/to/cloudflare-config
-
-Kiro: [Generates JavaScript code and deployment guide]
-```
-
-**Output Files**:
-
-- `cloudflare-transformation-rules-summary.md` - Rule summary
-- `viewer-request-function.js` - CloudFront Function code
-- `viewer-request-function.min.js` - Minified version (if needed)
-- `key-value-store.json` - KVS data (if needed)
-- `README_function_and_kvs_deployment.md` - Deployment guide
+Output files are written to the current directory.
 
 **Complete Example**: [examples/conversation-history/cloudflare-to-cloudfront-functions.txt](examples/conversation-history/cloudflare-to-cloudfront-functions.txt)
 
-### Skill 3: Analyze CDN Configuration
-
-**Recommended Usage** (Main agent automatically invokes subagent):
+### Analyze CDN Configuration
 
 ```
 User: Analyze Cloudflare CDN configuration in /path/to/cloudflare-config
-
-Kiro: [Automatically invokes cf-cdn-analyzer subagent]
-      [Reads configuration files, detects SaaS, groups rules by hostname]
-      ✅ Analysis complete! Generated files:
-      - hostname-based-config-summary.md
-      - README_1_analyzer.md
 ```
 
-**Alternative Usage** (Manual subagent switch):
-
-```
-User: /agent swap cf-cdn-analyzer
-
-User: Analyze CDN configuration in /path/to/cloudflare-config
-
-Kiro: [Generates configuration summary and next steps guide]
-```
-
-**Output Files**:
-
-- `hostname-based-config-summary.md` - Configuration grouped by hostname with user decision template
-- `README_1_analyzer.md` - Next steps guide
-
-**What This Skill Does**:
-
-- Detects SaaS configuration (terminates if found)
-- Identifies proxied DNS records (each becomes a CloudFront Distribution)
-- Detects IP-based origins (marks as non-convertible)
-- Groups all rules by hostname following Cloudflare execution order
-- Identifies implicit Cloudflare default cache behavior
-- Generates user decision template for default cache behavior
+Kiro automatically runs the 2-stage CDN pipeline (analyze → validate). Output files are written to `cloudflare-cdn-analysis/`.
 
 **Next Steps**: Edit the summary file and run Planner skill (cf-cdn-planner) to determine CloudFront implementation methods.
 
 **Note**: This is the first step in a multi-stage CDN migration workflow (Skills 3-11). See [Architecture Design](./docs/architecture/skill-3-11-design-EN.md) for complete workflow.
+
+### Convert Everything
+
+```
+User: Convert all Cloudflare configuration in /path/to/cloudflare-config to AWS
+```
+
+Kiro runs all pipelines in sequence: WAF → CDN → Functions.
+
+### Manual Subagent Control
+
+For advanced users who want to run individual stages manually, use `/agent swap <subagent-name>`. Available subagents: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-terraform-generator`, `cf-functions-converter`, `cf-cdn-analyzer`, `cf-cdn-analyzer-validator`.
 
 ## Best Practices
 
