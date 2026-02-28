@@ -163,25 +163,93 @@ Verify the summary accurately describes which downstream rules are affected:
 
 ---
 
-#### Check 6: Splitting Annotations
+#### Check 6: Splitting Annotations and Conversion Plan
 
-For each WAF Custom Rule and IP Access Rule in the original configuration, check if it requires splitting and verify the summary correctly annotates it:
+For each WAF Custom Rule and IP Access Rule in the summary, verify the splitting strategy AND conversion plan:
 
-**Phase 1 — Top-level OR splitting:**
+**Part A — Top-level OR splitting (Phase 1):**
 - If the rule expression has top-level OR branches (e.g., `(A) or (B)`), the summary must note that this rule will be split into separate AWS WAF rules (one per OR branch)
+- Verify the branch count matches the actual number of top-level OR branches in the expression
 
-**Phase 2 — IPv4/IPv6 splitting:**
-- If the rule references an IP list that contains both IPv4 and IPv6 addresses, or uses inline IPs with both versions, the summary must note that each branch will be further split into IPv4 and IPv6 variants
+**Part B — IPv4/IPv6 splitting (Phase 2):**
+- For each branch from Phase 1, check if it references an IP list or inline IPs with both IPv4 and IPv6 addresses
 - Check the actual IP list contents (from `List-Items-ip-<name>.txt`) to determine if mixed
+- If mixed, the summary must note IPv4/IPv6 split for that branch
+- Branches that only use ASN, geo, user-agent, or other non-IP fields must NOT be split by IPv4/IPv6
 
-**Cascading splits:**
-- If a rule has both top-level OR AND mixed IPv4/IPv6, the summary must reflect the full cascading split count (e.g., 2 OR branches × 2 IP versions = 4 rules)
+**Part C — Cascading split count:**
+- Verify the final rule count = sum of (branches that need IPv4/IPv6 split × 2) + (branches that don't need split × 1)
+- Example: 3 OR branches, 2 with mixed IP, 1 with ASN only → 2×2 + 1 = 5 rules
 
-**Rate-limiting rules are excluded** — they are NEVER split (splitting causes independent rate tracking).
+**Part D — Inline IP Set definitions:**
+- For each branch that uses inline IPs (not named IP lists), verify:
+  1. Separate IP sets are defined for each branch (NEVER combined across branches)
+  2. IPv4 and IPv6 addresses are correctly separated
+  3. IP set names follow the pattern `<rule-name>-branch-<N>-<context>-ipv4/ipv6`
+  4. All IP addresses from the original expression are present (none missing, none extra)
 
-**Pass condition:** All rules that require splitting are correctly annotated with the split strategy and expected rule count.
+**Part E — AWS WAF statement type:**
+- For each rule/branch, verify the planned AWS WAF statement type is correct:
+  - `ip.src in $list` or inline IPs → `ip_set_reference_statement`
+  - `ip.src.asnum in $list` or inline ASNs → `asn_match_statement`
+  - `ip.src.country eq "XX"` → `geo_match_statement`
+  - `http.user_agent` → `byte_match_statement` on `single_header { name = "user-agent" }`
+  - `http.request.uri.path` → `byte_match_statement` on `uri_path`
+  - `not` conditions → `not_statement` wrapping the inner statement
 
-**Fail:** Record which rules are missing split annotations or have incorrect split counts.
+**Rate-limiting rules are excluded from Parts A-D** — they are NEVER split (splitting causes independent rate tracking).
+
+**Pass condition:** All splitting annotations, IP set definitions, and statement types are correct.
+
+**Fail:** Record which rules have errors and what specifically is wrong.
+
+---
+
+#### Check 7: Rate-Limit Calculation Verification
+
+For each rate-limiting rule in the summary, verify:
+
+1. **Evaluation window selection**: Re-calculate using the algorithm from `references/action-conversions.md`:
+   - For each window in [60, 120, 300, 600]s: `limit = requests_per_period × (window / period)`
+   - Use the first window where limit ≥ 10
+   - If all windows produce limit < 10: must use fallback `Limit=10, EvaluationWindowSec=600`
+2. **Verify the summary shows the correct Limit and EvaluationWindowSec values**
+3. **If fallback was applied**: Verify the summary includes the fallback note
+
+**Pass condition:** All rate-limit calculations are correct.
+
+**Fail:** Record which rules have incorrect calculations and what the correct values should be.
+
+---
+
+#### Check 8: Scope-Down Statement Content (Partial Rules)
+
+For each rule marked ⚠️ Partial in the summary, verify:
+
+1. **Convertible conditions only**: The planned scope-down statement (or main statement for non-rate-based rules) includes ONLY the convertible conditions, not the non-convertible ones
+2. **Non-convertible conditions excluded**: The non-convertible conditions (bot fields, fraud fields, attack score, etc.) are NOT included in the planned AWS WAF statement
+3. **Non-convertible conditions documented**: The non-convertible conditions are listed in Section 5 with manual intervention guidance
+4. **OR logic preserved**: If the original rule has `(convertible_A) or (convertible_B) or (non_convertible_C)`, the planned statement should include `convertible_A OR convertible_B` only
+
+**Pass condition:** All partial rules correctly separate convertible and non-convertible conditions.
+
+**Fail:** Record which rules have incorrect scope-down content.
+
+---
+
+#### Check 9: Skip Rule Scope-Down Impact on Rule Types
+
+Verify the summary correctly describes which rule types are affected by each skip rule:
+
+1. **IP Access Rules**: Must NEVER be affected by any skip rule (they execute before skip rules in Cloudflare). If the summary implies IP Access Rules have scope-down statements, that is an error.
+2. **Rate-limiting rules**: Must ONLY be affected by `skip:http_ratelimit` label. Must NEVER be affected by `skip:all_remaining_custom_rules` (Cloudflare architectural difference — rate-limiting is a separate phase).
+3. **Custom rules (non-skip, non-rate-based)**: Must ONLY be affected by `skip:all_remaining_custom_rules` label.
+4. **Managed rules**: Must ONLY be affected by `skip:http_request_firewall_managed` label.
+5. **Skip rules themselves**: Must NEVER have scope-down statements or be affected by other skip rules.
+
+**Pass condition:** The summary's skip rule descriptions are consistent with these scope-down rules.
+
+**Fail:** Record which rules have incorrect scope-down impact descriptions.
 
 ---
 
@@ -200,7 +268,11 @@ For each issue found:
 - **Wrong convertibility status**: Update the status and explanation. Pay special attention to rules with OR logic that should be ⚠️ Partial instead of ❌ No.
 - **Wrong rule order**: Reorder entries within the section.
 - **Incomplete or incorrect skip rule documentation**: Complete the action_parameters, phases, RuleLabels, and scope-down impact descriptions from the original config. Ensure no extra labels are listed and impact descriptions are accurate.
-- **Missing or incorrect splitting annotations**: Add or correct the split strategy annotation (OR splitting, IPv4/IPv6 splitting, cascading split count).
+- **Missing or incorrect splitting annotations**: Add or correct the split strategy, branch count, cascading split count, and inline IP set definitions.
+- **Wrong AWS WAF statement type**: Correct the planned statement type for the rule/branch.
+- **Incorrect rate-limit calculation**: Correct the Limit and EvaluationWindowSec values. Add fallback note if needed.
+- **Incorrect scope-down content for partial rules**: Remove non-convertible conditions from the planned statement. Ensure non-convertible conditions are documented in Section 5.
+- **Incorrect skip rule scope-down impact**: Correct which rule types are affected. Ensure IP Access Rules have no scope-down, rate-limit rules only check `skip:http_ratelimit`, etc.
 
 After all fixes, re-read the modified summary and verify the fixed checks pass before writing the report.
 
