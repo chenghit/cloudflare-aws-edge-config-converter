@@ -214,7 +214,7 @@ For each issue found:
 
 - **Missing hostname section**: Add the DNS record section with its rules extracted from the original config files, grouped by Cache Behavior path pattern.
 - **Extra hostname section**: Remove the section (hostname not in proxied DNS records).
-- **Rule count mismatch**: Find the missing/extra rules by comparing summary rows against original config file entries. Add missing rules or remove extra rows. Place each rule in the correct Cache Behavior section.
+- **Missing or extra rules**: Add missing rules or remove extra rows. Place each rule in the correct Cache Behavior section based on hostname and path pattern classification.
 - **Misclassified rule (wrong hostname section)**: Move the rule to the correct section (Global / Specific / Orphaned).
 - **Misclassified rule (wrong Cache Behavior)**: Move the rule to the correct `### Cache Behavior: {pattern}` subsection within the correct hostname section.
 - **Missing rule split**: If a rule with OR paths or multiple extensions is not split, split it into separate rows under the appropriate Cache Behavior sections.
