@@ -11,7 +11,6 @@
 
 ## Summary
 - Total Proxied DNS Records: X
-- Total Rules: Y  ← count of all rule rows across all Cache Behavior tables (hostname + global + orphaned), including Custom Error Rules. Does NOT include Custom Pages or Managed Transforms (they are zone-level settings, not rules).
 - IP-based Origins (Non-convertible): Z
 
 ⚠️ **Important: Implicit Cloudflare Default Cache Behavior**

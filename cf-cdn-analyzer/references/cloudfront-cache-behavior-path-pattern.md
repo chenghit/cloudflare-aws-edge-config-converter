@@ -76,16 +76,11 @@ These expressions cannot map to a single path pattern but can be converted after
 |----------------------|---------------|
 | `http.request.uri.path.extension in {"jpg" "png" "gif"}` (≤ 5 extensions) | Split into `*.jpg`, `*.png`, `*.gif` — each becomes a separate Cache Behavior |
 | `path eq "/a" or path eq "/b"` | Split into `/a` and `/b` — each becomes a separate Cache Behavior |
-| `http.request.uri.path matches r"^/foo/(.*)"` with multiple branches separated by `\|` | Simple regex OR with `^/prefix/(.*)` branches — split into `/foo/*`, `/bar/*` — each becomes a separate Cache Behavior |
+| `http.request.uri.path matches r"^/foo/(.*)"` with multiple branches separated by `\|` | Cannot be auto-converted — place under `* (Default)` with note `⚠️ Manual split required: contains N simple prefix branches` |
 
 **Note:** `extension in {...}` with **> 5 extensions** does NOT require splitting — place directly under `* (Default)` with note `⚠️ Too many extensions to split into Cache Behaviors — recommend Lambda@Edge`. The original rule counts as 1 row in the summary (not split).
 
-**Simple regex OR pattern:** A `matches r"..."` expression requires splitting (NOT non-convertible) if ALL of the following are true:
-1. The regex consists of multiple branches separated by `|`
-2. Every branch matches the pattern `^/prefix(.*)` or `^/prefix/(.*)`
-3. No branch contains character classes `[...]`, quantifiers `+`, `{n,m}`, lookaheads, or other complex regex syntax
-
-**Check this BEFORE deciding non-convertible.** If the above conditions are met, split into one row per branch. Only if any branch fails these conditions → non-convertible → default behavior (`*`).
+**Simple regex OR pattern:** A `matches r"..."` expression with multiple `^/prefix(.*)` branches **cannot be reliably auto-converted** — mark it as `⚠️ Manual split required: contains N simple prefix branches` in the Notes column, and place it under `* (Default)`. The user can manually split it into separate Cache Behaviors after reviewing the summary.
 
 ### Non-Convertible Path Conditions
 
@@ -118,9 +113,9 @@ Look for path-related fields in the expression:
 
 **Step 2: Check convertibility**
 
-If the path condition uses regex (`matches r"..."`), **first** check if it is a simple OR pattern (check this BEFORE deciding non-convertible):
-- **Simple regex OR** (all branches match `^/prefix(.*)` or `^/prefix/(.*)`, no character classes/quantifiers/lookaheads): → requires splitting → split into one row per branch
-- **Complex regex** (contains `[...]`, `+`, `{n,m}`, lookaheads, or any branch that is not `^/prefix(.*)`): → non-convertible → default behavior (`*`)
+If the path condition uses regex (`matches r"..."`):
+- **Complex regex** (contains `[...]`, `+`, `{n,m}`, lookaheads, etc.): → non-convertible → default behavior (`*`)
+- **Simple prefix OR** (all branches look like `^/prefix(.*)` separated by `|`): → cannot be auto-converted → place under default behavior (`*`) with note `⚠️ Manual split required: contains N simple prefix branches`
 
 If the path condition uses multiple extensions (`extension in {...}`):
 - **≤ 5 extensions** → split into separate rows, one per extension
