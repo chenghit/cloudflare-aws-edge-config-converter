@@ -101,12 +101,11 @@ For each rule type, sample up to 5 rules (or all rules if fewer than 5). For eac
 
 **Non-convertible fields** (require manual intervention): Client Certificate Verified, MIME Type, European Union, bot fields (`cf.verified_bot_category`, `cf.bot_management.*`), fraud fields (`cf.waf.credential_check.*`), attack score fields (`cf.waf.score*`)
 
-**Conversion strategy:**
-- Only non-convertible fields → must be marked ❌ No
-- Convertible OR non-convertible → must be marked ⚠️ Partial
-- Convertible AND non-convertible → must be marked ❌ No (AND requires both conditions)
-
-**CRITICAL for rate-based rules:** ALL rate-based rules are ALWAYS convertible (at minimum ⚠️ Partial if they have non-convertible conditions, ✓ Yes otherwise). If any rate-based rule is marked ❌ No due to low calculated limit, that is an error — see `references/common-mistakes.md` Mistake 0.
+**Conversion strategy — apply in this exact order (specific before general):**
+1. **Rate-based rules are ALWAYS convertible** — at minimum ⚠️ Partial. If any rate-based rule is marked ❌ No due to low calculated limit, that is an error. See `references/common-mistakes.md` Mistake 0.
+2. **Convertible OR non-convertible** → must be marked ⚠️ Partial (convert the convertible parts, document the rest). This is the most commonly missed case — if a rule has ANY convertible condition joined by OR, it is Partial, NOT ❌ No.
+3. **Convertible AND non-convertible** → must be marked ❌ No (AND requires both conditions to match)
+4. **Only non-convertible fields** → must be marked ❌ No
 
 **Pass condition:** Each sampled rule has the correct convertibility status.
 
@@ -129,18 +128,60 @@ Also verify section order: IP Access Rules → WAF Custom Rules → Rate Limitin
 
 ---
 
-#### Check 5: Skip Rule Action Parameters
+#### Check 5: Skip Rule Action Parameters and Scope-Down Implications
 
 For each skip action rule in the summary, verify:
+
+**Part A — Action Parameters Accuracy:**
 1. The `action_parameters` JSON is complete and matches the original configuration verbatim
 2. The `phases` array values are correctly listed
-3. The "Phases Being Skipped" description is accurate (only lists phases actually in the array)
-4. If `"ruleset": "current"` is present, it is noted
-5. The RuleLabels description is consistent with the phases
+3. If `"ruleset": "current"` is present, it is noted
 
-**Pass condition:** All skip rules have complete and accurate action_parameters documentation.
+**Part B — RuleLabels Correctness (CRITICAL — most error-prone area):**
 
-**Fail:** Record which skip rules have incomplete or incorrect documentation.
+For each skip rule, verify the RuleLabels description follows these exact rules:
+- `phases` contains `"http_ratelimit"` → must list `skip:http_ratelimit` label
+- `phases` contains `"http_request_firewall_managed"` → must list `skip:http_request_firewall_managed` label
+- `"ruleset": "current"` exists → must list `skip:all_remaining_custom_rules` label
+- **No extra labels**: If a phase is NOT in the `phases` array, the corresponding label must NOT be listed
+
+**Part C — Scope-Down Impact Description (prevents downstream generator errors):**
+
+Verify the summary accurately describes which downstream rules are affected:
+1. If skip rule has `skip:all_remaining_custom_rules` but NOT `skip:http_ratelimit`:
+   - Summary must explicitly state "Does NOT skip rate-limiting rules" (or equivalent)
+   - If summary says or implies rate-limiting rules will be skipped, that is an error
+2. If skip rule has `skip:http_ratelimit` but NOT `skip:all_remaining_custom_rules`:
+   - Summary must explicitly state "Does NOT skip remaining custom rules" (or equivalent)
+3. If skip rule has `skip:http_request_firewall_managed`:
+   - Summary must explicitly state this only affects managed rules
+4. Skip rules themselves are NEVER affected by other skip rules — if summary implies otherwise, that is an error
+
+**Pass condition:** All skip rules have complete action_parameters, correct RuleLabels, and accurate scope-down impact descriptions.
+
+**Fail:** Record which skip rules have errors and what specifically is wrong.
+
+---
+
+#### Check 6: Splitting Annotations
+
+For each WAF Custom Rule and IP Access Rule in the original configuration, check if it requires splitting and verify the summary correctly annotates it:
+
+**Phase 1 — Top-level OR splitting:**
+- If the rule expression has top-level OR branches (e.g., `(A) or (B)`), the summary must note that this rule will be split into separate AWS WAF rules (one per OR branch)
+
+**Phase 2 — IPv4/IPv6 splitting:**
+- If the rule references an IP list that contains both IPv4 and IPv6 addresses, or uses inline IPs with both versions, the summary must note that each branch will be further split into IPv4 and IPv6 variants
+- Check the actual IP list contents (from `List-Items-ip-<name>.txt`) to determine if mixed
+
+**Cascading splits:**
+- If a rule has both top-level OR AND mixed IPv4/IPv6, the summary must reflect the full cascading split count (e.g., 2 OR branches × 2 IP versions = 4 rules)
+
+**Rate-limiting rules are excluded** — they are NEVER split (splitting causes independent rate tracking).
+
+**Pass condition:** All rules that require splitting are correctly annotated with the split strategy and expected rule count.
+
+**Fail:** Record which rules are missing split annotations or have incorrect split counts.
 
 ---
 
@@ -156,9 +197,10 @@ For each issue found:
 
 - **Missing or extra rules**: Add missing rules or remove extra entries. Place each rule in the correct section.
 - **Missing IP list or items**: Add the list and its items to the IP Lists section.
-- **Wrong convertibility status**: Update the status and explanation.
+- **Wrong convertibility status**: Update the status and explanation. Pay special attention to rules with OR logic that should be ⚠️ Partial instead of ❌ No.
 - **Wrong rule order**: Reorder entries within the section.
-- **Incomplete skip rule documentation**: Complete the action_parameters, phases, and RuleLabels documentation from the original config.
+- **Incomplete or incorrect skip rule documentation**: Complete the action_parameters, phases, RuleLabels, and scope-down impact descriptions from the original config. Ensure no extra labels are listed and impact descriptions are accurate.
+- **Missing or incorrect splitting annotations**: Add or correct the split strategy annotation (OR splitting, IPv4/IPv6 splitting, cascading split count).
 
 After all fixes, re-read the modified summary and verify the fixed checks pass before writing the report.
 
