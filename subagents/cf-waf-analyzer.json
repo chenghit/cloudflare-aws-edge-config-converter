@@ -1,0 +1,9 @@
+{
+  "name": "cf-waf-analyzer",
+  "description": "Analyzes Cloudflare WAF rules, rate limiting, and IP access rules to generate a structured security rules summary",
+  "resources": [
+    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md"
+  ],
+  "tools": ["fs_read", "fs_write", "glob", "grep"],
+  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
+}
