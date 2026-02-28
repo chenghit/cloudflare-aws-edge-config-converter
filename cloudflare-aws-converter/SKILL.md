@@ -59,43 +59,49 @@ Extract the Cloudflare config directory path from the user's message. This is th
 
 ### Step 3: Invoke subagents
 
+**CRITICAL: Every subagent query MUST start with a skill-loading instruction.** Subagents may not automatically load their skill file when invoked via `use_subagent`. Prefix every query with:
+
+`"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/{subagent-name}/SKILL.md and follow its workflow. "`
+
+Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analyzer`, `cf-cdn-analyzer-validator`).
+
 #### WAF pipeline (analyzer → validator → generator):
 
 **Stage 1: Analyze**
-1. Invoke `cf-waf-analyzer` with: `"Analyze Cloudflare security rules in {config_path}. Generate output files in {user_language}."`
+1. Invoke `cf-waf-analyzer` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. Analyze Cloudflare security rules in {config_path}. Generate output files in {user_language}."`
 2. Check the analyzer's response:
    - If analyzer reports existing summary files found → ask the user: "Found existing analysis files. Do you want to overwrite them and re-run the analysis, or use the existing files and proceed to validation?"
-     - User says overwrite → invoke analyzer again with: `"Analyze Cloudflare security rules in {config_path}. Overwrite existing summary files. Generate output files in {user_language}."`
+     - User says overwrite → invoke analyzer again with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. Analyze Cloudflare security rules in {config_path}. Overwrite existing summary files. Generate output files in {user_language}."`
      - User says use existing → skip to Stage 2
    - If analyzer completed successfully → proceed to Stage 2
 
 **Stage 2: Validate**
 1. Set `validation_round = 1`
-2. Invoke `cf-waf-analyzer-validator` with: `"Validate WAF analysis in {config_path}. This is validation round {validation_round}. Generate output files in {user_language}."`
+2. Invoke `cf-waf-analyzer-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. Validate WAF analysis in {config_path}. This is validation round {validation_round}. Generate output files in {user_language}."`
 3. Check the `---RESULT---` block in the validator's response:
    - `STATUS: PASS` → if depth is "analyze", proceed to Step 4. If depth is "convert", proceed to Stage 3.
-   - `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise invoke validator again with: `"Validate WAF analysis in {config_path}. This is validation round {validation_round}. The previous round had STATUS: FIXED. Re-run all validation checks against the current cloudflare-security-rules-summary.md to confirm all issues are resolved. Generate output files in {user_language}."`
+   - `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise invoke validator again with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. Validate WAF analysis in {config_path}. This is validation round {validation_round}. The previous round had STATUS: FIXED. Re-run all validation checks against the current cloudflare-security-rules-summary.md to confirm all issues are resolved. Generate output files in {user_language}."`
    - `STATUS: CANNOT_FIX` → stop and tell the user which issues require manual intervention (from the ISSUES section)
 
 **Stage 3: Generate Terraform** (only if depth is "convert")
-1. Invoke `cf-waf-terraform-generator` with: `"Generate AWS WAF Terraform configuration from the validated summary. Generate output files in {user_language}."`
+1. Invoke `cf-waf-terraform-generator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/SKILL.md and follow its workflow. Generate AWS WAF Terraform configuration from the validated summary. Generate output files in {user_language}."`
 
 #### CDN pipeline (analyzer → validator):
 
-1. Invoke `cf-cdn-analyzer` with: `"Analyze CDN configuration in {config_path}. Generate output files in {user_language}."`
+1. Invoke `cf-cdn-analyzer` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-analyzer/SKILL.md and follow its workflow. Analyze CDN configuration in {config_path}. Generate output files in {user_language}."`
 2. Check the analyzer's response:
    - If analyzer reports existing summary files found → ask the user (same as WAF flow above)
    - If analyzer completed successfully → proceed to validator loop
 3. Set `validation_round = 1`
-4. Invoke `cf-cdn-analyzer-validator` with: `"Validate CDN analysis in {config_path}. This is validation round {validation_round}. Generate output files in {user_language}."`
+4. Invoke `cf-cdn-analyzer-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-analyzer-validator/SKILL.md and follow its workflow. Validate CDN analysis in {config_path}. This is validation round {validation_round}. Generate output files in {user_language}."`
 5. Check the `---RESULT---` block in the validator's response:
    - `STATUS: PASS` → proceed to Step 4 (or next pipeline if "Everything")
-   - `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise invoke validator again with: `"Validate CDN analysis in {config_path}. This is validation round {validation_round}. The previous round had STATUS: FIXED. Re-run all validation checks against the current hostname-based-config-summary.md to confirm all issues are resolved. Generate output files in {user_language}."`
+   - `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise invoke validator again with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-analyzer-validator/SKILL.md and follow its workflow. Validate CDN analysis in {config_path}. This is validation round {validation_round}. The previous round had STATUS: FIXED. Re-run all validation checks against the current hostname-based-config-summary.md to confirm all issues are resolved. Generate output files in {user_language}."`
    - `STATUS: CANNOT_FIX` → stop and tell the user which issues require manual intervention (from the ISSUES section)
 
 #### Functions pipeline:
 
-Invoke `cf-functions-converter` with: `"Convert Cloudflare transformation rules in {config_path} to CloudFront Functions. Generate output files in {user_language}."`
+Invoke `cf-functions-converter` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-functions-converter/SKILL.md and follow its workflow. Convert Cloudflare transformation rules in {config_path} to CloudFront Functions. Generate output files in {user_language}."`
 
 ### Step 4: Report results
 
