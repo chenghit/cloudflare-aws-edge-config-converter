@@ -100,7 +100,7 @@ For each rule type, sample up to 5 rules (or all rules if fewer than 5). For eac
 **Non-convertible fields** (require manual intervention): Client Certificate Verified, MIME Type, European Union, bot fields (`cf.verified_bot_category`, `cf.bot_management.*`), fraud fields (`cf.waf.credential_check.*`), attack score fields (`cf.waf.score*`)
 
 **Conversion strategy — apply in this exact order (specific before general):**
-1. **Rate-based rules are ALWAYS convertible** — at minimum ⚠️ Partial. If any rate-based rule is marked ❌ No due to low calculated limit, that is an error. See `references/common-mistakes.md` Mistake 0.
+1. **Rate-based rules are ALWAYS convertible** — at minimum ⚠️ Partial. If any rate-based rule is marked ❌ No due to low calculated limit, that is an error. The mandatory fallback (Limit=10, EvaluationWindowSec=600) makes ALL rate-based rules convertible.
 2. **Convertible OR non-convertible** → must be marked ⚠️ Partial (convert the convertible parts, document the rest). This is the most commonly missed case — if a rule has ANY convertible condition joined by OR, it is Partial, NOT ❌ No.
 3. **Convertible AND non-convertible** → must be marked ❌ No (AND requires both conditions to match)
 4. **Only non-convertible fields** → must be marked ❌ No
