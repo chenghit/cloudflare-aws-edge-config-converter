@@ -85,6 +85,8 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
 
 **Stage 3: Generate Terraform** (only if depth is "convert")
 1. Invoke `cf-waf-terraform-generator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/SKILL.md and follow its workflow. Generate AWS WAF Terraform configuration from the validated summary. Generate output files in {user_language}."`
+2. Check the `---RESULT---` block in the generator's response:
+   - `STATUS: COMPLETE` → proceed to Step 4
 
 #### CDN pipeline (analyzer → validator):
 

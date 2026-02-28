@@ -238,6 +238,24 @@ Create `README_aws-waf-terraform-deployment.md` with:
 - IP sets quota note
 - Non-converted rules from summary Section 5 (rule name, Cloudflare feature, AWS equivalent, why manual)
 
+### 6. Return Result
+
+After all files are generated, end your response with this exact block:
+
+```
+---RESULT---
+STATUS: COMPLETE
+OUTPUT_FILES:
+  - cloudflare-to-aws-waf/versions.tf
+  - cloudflare-to-aws-waf/ip_sets.tf
+  - cloudflare-to-aws-waf/main.tf
+  - cloudflare-to-aws-waf/modules/waf/main.tf
+  - cloudflare-to-aws-waf/modules/waf/variables.tf
+  - cloudflare-to-aws-waf/modules/waf/outputs.tf
+  - cloudflare-to-aws-waf/README_aws-waf-terraform-deployment.md
+---END---
+```
+
 ## Reference
 
 - `references/terraform-architecture.md` - Module architecture and IP set sharing
