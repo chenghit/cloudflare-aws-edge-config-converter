@@ -113,18 +113,32 @@ For each rule type, sample up to 5 rules (or all rules if fewer than 5). For eac
 
 ---
 
-#### Check 4: Rule Order
+#### Check 4: Rule Order and Skip Rule Positioning
 
-Verify that rules within each section maintain the exact order from the original configuration files:
-- IP Access Rules section: same order as IP-Access-Rules.txt
-- WAF Custom Rules section: same array order as WAF-Custom-Rules.txt
-- Rate Limiting Rules section: same array order as Rate-limits.txt
+**Part A — Section order:**
+Verify the summary sections appear in Cloudflare execution order:
+1. IP Access Rules (execute first)
+2. WAF Custom Rules (execute second)
+3. Rate Limiting Rules (execute last)
 
-Also verify section order: IP Access Rules → WAF Custom Rules → Rate Limiting Rules.
+**Part B — Intra-section order:**
+Within each section, verify rules maintain the exact array order from the original configuration files.
 
-**Pass condition:** Rules are in correct order within each section, and sections are in correct order.
+**Part C — Skip rule positioning and downstream impact (CRITICAL):**
+Skip rules only affect rules that execute **after** them. Verify:
 
-**Fail:** Record which section has incorrect ordering.
+1. For each skip rule in the WAF Custom Rules section, identify its position (e.g., Rule 2 of 5)
+2. Verify the summary correctly identifies which subsequent rules are affected:
+   - `skip:all_remaining_custom_rules` → affects WAF Custom Rules **after** this skip rule only (not before, not IP Access Rules, not rate-limit rules)
+   - `skip:http_ratelimit` → affects ALL rate-limiting rules (they always execute after all custom rules)
+   - `skip:http_request_firewall_managed` → affects ALL managed rules (they always execute after all custom rules)
+3. If there are multiple skip rules, verify the summary accounts for the cumulative effect:
+   - A custom rule positioned after TWO skip rules with `skip:all_remaining_custom_rules` needs scope-down for BOTH labels
+   - But in practice, since both labels have the same key (`skip:all_remaining_custom_rules`), one scope-down check suffices — verify the summary does not incorrectly suggest multiple scope-down checks for the same label
+
+**Pass condition:** Sections are in correct order, rules within sections are in correct order, and skip rule positioning correctly determines downstream impact.
+
+**Fail:** Record ordering errors and any incorrect skip rule impact descriptions.
 
 ---
 
