@@ -7,7 +7,7 @@ description: Orchestrates Cloudflare-to-AWS conversion and analysis by delegatin
 
 Orchestrate conversion of Cloudflare configurations to AWS by delegating to specialized subagents. Do NOT read config files yourself — pass the config directory path directly to each subagent.
 
-**Language Adaptation**: Respond in the same language as the user's message. When invoking subagents, write the query in the same language as the user's message.
+**Language Adaptation**: Respond to the user in the same language as their message. However, **always write subagent queries in English** — subagents rely on English keywords to correctly parse paths and instructions. Pass the output language as an explicit instruction within the query (e.g., `"Generate output files in Chinese"`).
 
 ## Available Subagents
 
