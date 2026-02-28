@@ -249,7 +249,6 @@ Step 1: Does the rule expression contain hostname reference?
 | `http.request.full_uri wildcard r"https://*.example.com/path/*"` | Global Rule | Wildcard for all subdomains |
 | `http.host eq "cdn.example.com"` | Specific Rule (if cdn.example.com is proxied) | Exact hostname match |
 | `http.host eq "old.example.com"` | Orphaned Rule (if old.example.com is NOT proxied) | Hostname not in DNS records |
-| `cdn.example.com/path` (Bulk Redirect) | Specific Rule (if cdn.example.com is proxied) | Exact hostname match |
 
 **CRITICAL: Wildcard Detection Patterns**
 
@@ -278,9 +277,10 @@ Follow the Path Pattern Grouping Algorithm in `references/cloudfront-cache-behav
 **Special cases:**
 
 **Bulk Redirects:**
-- Extract hostname from source URL (format: `hostname/path`)
-- If `include_subdomains: true` AND source is apex domain → Global Rule
+- Do NOT classify by hostname or path pattern
+- Always place ALL bulk redirect entries in their own `## Bulk Redirects (Zone-level)` section, regardless of hostname or `include_subdomains`
 - Include referenced list items from `List-Items-redirect-*.txt`
+- Bulk Redirects require CloudFront Function + KVS implementation — this will be determined by the Planner skill
 
 **Managed Transforms:**
 - Always Global Rule (zone-level configuration)

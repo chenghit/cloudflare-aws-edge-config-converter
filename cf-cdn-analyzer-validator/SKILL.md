@@ -154,7 +154,7 @@ Requires splitting (not non-convertible):
 **Fail:** Record the rule expression, its current location, and where it should be.
 
 **Special cases:**
-- Bulk Redirects: extract hostname from source URL for Level 1; extract path from source URL for Level 2
+- Bulk Redirects: must be in their own `## Bulk Redirects (Zone-level)` section — do NOT check hostname or path classification for bulk redirects
 - Managed Transforms: always Global Rule, not grouped by path pattern (separate zone-level table)
 - Custom Pages: always in their own `## Custom Pages (Zone-level)` section
 

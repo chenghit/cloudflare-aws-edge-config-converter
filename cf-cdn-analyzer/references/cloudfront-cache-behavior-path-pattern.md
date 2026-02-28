@@ -177,9 +177,9 @@ Example:
 
 Mark overlapping patterns with: "⚠️ Overlapping with [other pattern] — ordering matters"
 
-### Bulk Redirects with `include_subdomains: true`
+### Bulk Redirects
 
-If a Bulk Redirect has `include_subdomains: true` and the source is an apex domain (e.g., `example.com/path`), it applies to all subdomains → treat as a **Global Rule** and group by path pattern within the Global Rules section.
+Bulk Redirects are always placed in their own `## Bulk Redirects (Zone-level)` section. Do NOT classify by hostname or path pattern. List each entry with its source URL, target URL, status code, `include_subdomains` flag, and query string preservation. The Planner skill will determine implementation (CloudFront Function + KVS).
 
 ### Multiple Extensions (`extension in {...}`)
 
