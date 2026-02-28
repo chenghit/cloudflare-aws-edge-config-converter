@@ -158,6 +158,13 @@ Output a Markdown file with five sections:
 2. **IP Access Rules** - Zone-level IP access rules (execute before WAF custom rules in Cloudflare)
 3. **WAF Custom Rules** - Preserve array order from `WAF-Custom-Rules.txt`
 4. **Rate limiting rules** - Preserve array order from `Rate-limits.txt`
+   - **CRITICAL: For each rate-limiting rule, you MUST calculate the AWS WAF Limit and EvaluationWindowSec using this exact algorithm:**
+     1. For EACH window in [60, 120, 300, 600] seconds, calculate: `limit = requests_per_period × (window / period)`
+     2. Use the FIRST window where limit ≥ 10
+     3. If ALL four windows produce limit < 10: use mandatory fallback `Limit=10, EvaluationWindowSec=600`
+     4. **Show the calculation for ALL four windows in the summary** so the validator can verify
+   - Example: 1 req/10s → 60s: 6 < 10 ❌, 120s: 12 ≥ 10 ✓ → `Limit=12, EvaluationWindowSec=120`
+   - **AWS WAF minimum Limit is 10. NEVER output a Limit below 10.**
 5. **Notes on Rules Requiring Manual Intervention** - For rules that cannot be automatically converted or are partially convertible, use the information from non-convertible-rules.md to provide detailed explanations. Clearly state: **"These rules require manual intervention because AWS WAF implements these features differently from Cloudflare, requiring manual configuration of managed rule groups. This is NOT because AWS WAF lacks these capabilities."**
 
 **CRITICAL**: IP Access Rules must be in a separate section before WAF Custom Rules because they execute earlier in Cloudflare's request processing pipeline and should NOT be affected by skip rules from WAF Custom Rules.

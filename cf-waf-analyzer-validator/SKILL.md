@@ -222,16 +222,20 @@ For each WAF Custom Rule and IP Access Rule in the summary, verify the splitting
 
 #### Check 7: Rate-Limit Calculation Verification
 
-For each rate-limiting rule in the summary, verify:
+For each rate-limiting rule in the summary, **you MUST re-calculate from scratch** using the original `period` and `requests_per_period` values:
 
-1. **Evaluation window selection**: Re-calculate using the algorithm from `references/action-conversions.md`:
-   - For each window in [60, 120, 300, 600]s: `limit = requests_per_period × (window / period)`
-   - Use the first window where limit ≥ 10
-   - If all windows produce limit < 10: must use fallback `Limit=10, EvaluationWindowSec=600`
-2. **Verify the summary shows the correct Limit and EvaluationWindowSec values**
-3. **If fallback was applied**: Verify the summary includes the fallback note
+1. **Extract** `requests_per_period` and `period` from the original Rate-limits.txt config
+2. **Calculate for ALL four windows** — do not stop early:
+   - 60s: `limit = requests_per_period × (60 / period)` → is limit ≥ 10?
+   - 120s: `limit = requests_per_period × (120 / period)` → is limit ≥ 10?
+   - 300s: `limit = requests_per_period × (300 / period)` → is limit ≥ 10?
+   - 600s: `limit = requests_per_period × (600 / period)` → is limit ≥ 10?
+3. **Select**: Use the FIRST window where limit ≥ 10. If NONE produce limit ≥ 10, must use fallback `Limit=10, EvaluationWindowSec=600`
+4. **Compare** your calculated values against the summary's values. If they differ, that is an error.
 
-**Pass condition:** All rate-limit calculations are correct.
+**Example**: 1 req/10s → 60s: 1×6=6 < 10 ❌, 120s: 1×12=12 ≥ 10 ✓ → correct answer is `Limit=12, EvaluationWindowSec=120`. If summary says `Limit=6, EvaluationWindowSec=60`, that is WRONG (6 < 10 violates AWS WAF minimum).
+
+**Pass condition:** All rate-limit Limit and EvaluationWindowSec values match your re-calculation, and no Limit is below 10.
 
 **Fail:** Record which rules have incorrect calculations and what the correct values should be.
 
