@@ -68,7 +68,9 @@ Compare with the number of DNS record sections in the summary.
 
 For each rule type file (Cache-Rules.txt, Origin-Rules.txt, Redirect-Rules.txt, URL-Rewrite-Rules.txt, Request-Header-Transform.txt, Response-Header-Transform.txt, Compression-Rules.txt, Custom-Error-Rules.txt), go through every rule in the original file and verify it appears in the summary.
 
-**Custom Pages (`Custom-Pages.txt`) are NOT rules — they are zone-level settings. They must appear in their own `## Custom Pages (Zone-level)` section and are NOT counted in the rule total. Do NOT add Custom Pages to the Non-Convertible Items section.**
+**Excluded from this check:**
+- `Bulk-Redirect-Rules.txt` and `List-Items-redirect-*.txt` — verified separately in Check 7 (Bulk Redirects section)
+- `Custom-Pages.txt` — zone-level settings, not rules, verified in their own section
 
 For each rule in the original file:
 1. Find the corresponding row(s) in the summary by matching the rule's expression against summary rows
@@ -187,6 +189,16 @@ For each rule that references a specific hostname, verify that hostname exists i
 **Pass condition:** No specific-hostname rules are incorrectly placed under a DNS record section when that hostname is not proxied.
 
 **Fail:** Record the misplaced rules.
+
+---
+
+#### Check 7: Bulk Redirects Coverage
+
+For each entry in `Bulk-Redirect-Rules.txt` and referenced `List-Items-redirect-*.txt`, verify it appears in the `## Bulk Redirects (Zone-level)` section of the summary with correct source URL, target URL, status code, `include_subdomains` flag, and query string preservation.
+
+**Pass condition:** Every bulk redirect entry is present in the Bulk Redirects section; no extra entries exist.
+
+**Fail:** Record missing or extra bulk redirect entries.
 
 ---
 
