@@ -68,15 +68,6 @@ Source: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Downl
 | `ends_with(http.request.uri.path, "index.html")` | `*index.html` |
 | `http.request.full_uri wildcard "https://hostname/path/*"` | `/path/*` (extract path portion only) |
 
-### Non-Convertible Path Conditions
-
-These Cloudflare path expressions **cannot** be directly represented as a CloudFront path pattern. Rules using these are grouped under the **default behavior (`*`)**.
-
-| Cloudflare Expression | Reason |
-|----------------------|--------|
-| `http.request.uri.path matches r"^/api/v[0-9]+/"` | Regex not supported |
-| `not http.request.uri.path wildcard "/api/*"` | Negation not supported |
-
 ### Requires Splitting (Convertible After Split)
 
 These expressions cannot map to a single path pattern but can be converted after splitting into multiple rules. Each split produces a separate Cache Behavior. **The original file counts as 1 rule, but the summary will have multiple rows.**
@@ -89,12 +80,21 @@ These expressions cannot map to a single path pattern but can be converted after
 
 **Note:** `extension in {...}` with **> 5 extensions** does NOT require splitting — place directly under `* (Default)` with note `⚠️ Too many extensions to split into Cache Behaviors — recommend Lambda@Edge`. The original rule counts as 1 row in the summary (not split).
 
-**Simple regex OR pattern (convertible):** A `matches r"..."` expression is convertible if ALL of the following are true:
+**Simple regex OR pattern:** A `matches r"..."` expression requires splitting (NOT non-convertible) if ALL of the following are true:
 1. The regex consists of multiple branches separated by `|`
 2. Every branch matches the pattern `^/prefix(.*)` or `^/prefix/(.*)`
 3. No branch contains character classes `[...]`, quantifiers `+`, `{n,m}`, lookaheads, or other complex regex syntax
 
-If any branch fails these conditions, the entire expression is non-convertible → default behavior (`*`).
+**Check this BEFORE deciding non-convertible.** If the above conditions are met, split into one row per branch. Only if any branch fails these conditions → non-convertible → default behavior (`*`).
+
+### Non-Convertible Path Conditions
+
+These Cloudflare path expressions **cannot** be directly represented as a CloudFront path pattern. Rules using these are grouped under the **default behavior (`*`)**.
+
+| Cloudflare Expression | Reason |
+|----------------------|--------|
+| `http.request.uri.path matches r"^/api/v[0-9]+/"` | Complex regex (character class `[0-9]`) — not a simple OR pattern |
+| `not http.request.uri.path wildcard "/api/*"` | Negation not supported |
 
 ### No Path Condition
 
@@ -118,9 +118,9 @@ Look for path-related fields in the expression:
 
 **Step 2: Check convertibility**
 
-If the path condition uses regex (`matches r"..."`), check if it is a simple OR pattern:
-- **Simple regex OR** (all branches match `^/prefix(.*)` or `^/prefix/(.*)`): → requires splitting → split into one row per branch
-- **Complex regex** (contains character classes, quantifiers, lookaheads, etc.): → non-convertible → default behavior (`*`)
+If the path condition uses regex (`matches r"..."`), **first** check if it is a simple OR pattern (check this BEFORE deciding non-convertible):
+- **Simple regex OR** (all branches match `^/prefix(.*)` or `^/prefix/(.*)`, no character classes/quantifiers/lookaheads): → requires splitting → split into one row per branch
+- **Complex regex** (contains `[...]`, `+`, `{n,m}`, lookaheads, or any branch that is not `^/prefix(.*)`): → non-convertible → default behavior (`*`)
 
 If the path condition uses multiple extensions (`extension in {...}`):
 - **≤ 5 extensions** → split into separate rows, one per extension

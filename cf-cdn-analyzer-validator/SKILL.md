@@ -113,8 +113,13 @@ Within the correct hostname section, determine which Cache Behavior the rule bel
 - No path field in expression → no path condition
 
 **Step 2: Check if path condition is convertible**
+
+**FIRST: If expression uses `matches r"..."`, check for simple regex OR BEFORE deciding non-convertible:**
+- **Simple regex OR** (all branches match `^/prefix(.*)` or `^/prefix/(.*)`, no `[...]`/`+`/`{n,m}`/lookaheads): → requires splitting → one row per branch under `### Cache Behavior: /prefix/*`
+- **Complex regex** (any branch contains `[...]`, `+`, `{n,m}`, lookaheads, or is not `^/prefix(.*)`): → non-convertible → `* (Default)`
+
 Non-convertible if ANY of:
-- Uses `matches r"..."` with complex regex (character classes `[...]`, quantifiers `+`/`{n,m}`, lookaheads, or anchors other than `^` at start of each branch)
+- Uses `matches r"..."` with complex regex (as defined above)
 - Uses `not` on a path condition
 - Contains only non-path fields: `ip.src`, `http.user_agent`, `http.cookie`, `http.request.headers`, `http.host` alone, `true`, etc.
 
