@@ -39,7 +39,7 @@ Extract the Cloudflare config directory path from the user's message. This is th
 
 Run the analyzer → validator loop:
 
-1. Invoke `cf-cdn-analyzer` with: `"Analyze CDN configuration in {config_path}"`
+1. Invoke `cf-cdn-analyzer` with: `"Analyze CDN configuration in {config_path}. Generate output files in {user_language}."` where `{user_language}` is the language of the user's message (e.g., "Chinese", "English").
 2. Set `validation_round = 1`
 3. Invoke `cf-cdn-analyzer-validator` with: `"Validate CDN analysis in {config_path}. This is validation round {validation_round}."`
 4. Check the `---RESULT---` block in the validator's response:

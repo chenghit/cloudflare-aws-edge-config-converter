@@ -16,7 +16,7 @@ Analyze Cloudflare CDN configuration and group by proxied hostname for CloudFron
 - Skip reading reference documents
 - Deviate from the Workflow
 
-**Language Adaptation**: Generate output files in the same language as the user's conversation. If user speaks Chinese, generate Chinese markdown files. If user speaks English, generate English markdown files.
+**Language Adaptation**: Generate output files in the language specified in the query (e.g., "Generate output files in Chinese"). If no language is specified, default to English.
 
 ## Path Resolution
 
@@ -76,9 +76,11 @@ cloudflare-cdn-analysis/
 
 **CRITICAL: Configuration path must be provided by main agent in the initial query.**
 
-Expected format: "Analyze CDN configuration in /path/to/cloudflare-config"
+Expected format: `"Analyze CDN configuration in /path/to/cloudflare-config"`
 
-**If path not provided:**
+Extract the config path from the query — look for any absolute path (starting with `/` or `~`) in the query. The path format may vary; extract the directory path regardless of surrounding text.
+
+**If no path found in query:**
 - STOP immediately
 - Return error: "Configuration directory path is required. Please provide the path to CloudflareBackup output directory."
 
