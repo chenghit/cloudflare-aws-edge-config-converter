@@ -64,19 +64,22 @@ Compare with the number of DNS record sections in the summary.
 
 ---
 
-#### Check 2: Rule Count Per Hostname
+#### Check 2: Rule Coverage (No Missing or Extra Rules)
 
-For each rule type file (Cache-Rules.txt, Origin-Rules.txt, Redirect-Rules.txt, URL-Rewrite-Rules.txt, Request-Header-Transform.txt, Response-Header-Transform.txt, Compression-Rules.txt, Custom-Error-Rules.txt), count the total number of rules.
+For each rule type file (Cache-Rules.txt, Origin-Rules.txt, Redirect-Rules.txt, URL-Rewrite-Rules.txt, Request-Header-Transform.txt, Response-Header-Transform.txt, Compression-Rules.txt, Custom-Error-Rules.txt), go through every rule in the original file and verify it appears in the summary.
 
 **Custom Pages (`Custom-Pages.txt`) are NOT rules — they are zone-level settings. They must appear in their own `## Custom Pages (Zone-level)` section and are NOT counted in the rule total. Do NOT add Custom Pages to the Non-Convertible Items section.**
 
-Compare with the total number of rows across all Cache Behavior sections (all hostname sections + Global Rules + Orphaned Rules combined) in the summary for that rule type. Rules are now grouped by Cache Behavior path pattern, not by rule type — count all rows of each rule type across all Cache Behavior tables.
+For each rule in the original file:
+1. Find the corresponding row(s) in the summary by matching the rule's expression against summary rows
+2. A rule that was split (OR paths, ≤5 extensions, simple regex OR) will have multiple rows — all must be present
+3. A rule with >5 extensions appears as ONE row under `* (Default)` — verify it is there
 
-**Important exception:** Rules that were split due to OR paths, simple regex OR branches, or multiple extensions with **≤ 5 extensions** will appear as multiple rows in the summary but count as one rule in the original file. Rules with **> 5 extensions** are NOT split — they appear as ONE row under `* (Default)`. When a count mismatch is found, check whether it can be explained by split rules before flagging as an error.
+Then check the reverse: for each row in the summary, verify it corresponds to a rule in the original file. Rows with no matching original rule are extra and must be removed.
 
-**Pass condition:** Total rule count matches for each rule type (accounting for split rules).
+**Pass condition:** Every original rule has at least one corresponding summary row; every summary row corresponds to an original rule.
 
-**Fail:** Record which rule type has a count mismatch and by how much.
+**Fail:** Record which rules are missing from the summary, or which summary rows have no corresponding original rule.
 
 ---
 
