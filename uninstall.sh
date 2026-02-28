@@ -18,22 +18,12 @@ fi
 
 # Remove subagent configurations
 REMOVED_COUNT=0
-if [ -f "$AGENTS_DIR/cf-waf-converter.json" ]; then
-    rm "$AGENTS_DIR/cf-waf-converter.json"
-    ((REMOVED_COUNT++))
-fi
-if [ -f "$AGENTS_DIR/cf-functions-converter.json" ]; then
-    rm "$AGENTS_DIR/cf-functions-converter.json"
-    ((REMOVED_COUNT++))
-fi
-if [ -f "$AGENTS_DIR/cf-cdn-analyzer.json" ]; then
-    rm "$AGENTS_DIR/cf-cdn-analyzer.json"
-    ((REMOVED_COUNT++))
-fi
-if [ -f "$AGENTS_DIR/cf-cdn-analyzer-validator.json" ]; then
-    rm "$AGENTS_DIR/cf-cdn-analyzer-validator.json"
-    ((REMOVED_COUNT++))
-fi
+for agent in cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator cf-waf-converter cf-functions-converter cf-cdn-analyzer cf-cdn-analyzer-validator; do
+    if [ -f "$AGENTS_DIR/$agent.json" ]; then
+        rm "$AGENTS_DIR/$agent.json"
+        ((REMOVED_COUNT++))
+    fi
+done
 
 if [ $REMOVED_COUNT -gt 0 ]; then
     echo "Removing subagent configurations from $AGENTS_DIR..."
