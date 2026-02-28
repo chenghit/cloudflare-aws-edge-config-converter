@@ -7,7 +7,7 @@ description: Converts Cloudflare transformation rules (redirect rules, URL rewri
 
 Convert Cloudflare transformation rules to CloudFront Functions (JavaScript Runtime 2.0).
 
-**Language Adaptation**: Generate output files in the same language as the user's conversation. If user speaks Chinese, generate Chinese markdown files. If user speaks English, generate English markdown files.
+**Language Adaptation**: Generate output files in the language specified in the query (e.g., "Generate output files in Chinese"). If no language is specified, default to English.
 
 ## Path Resolution
 

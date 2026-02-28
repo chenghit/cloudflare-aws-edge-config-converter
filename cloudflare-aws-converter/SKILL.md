@@ -53,7 +53,7 @@ Invoke in this order (when multiple are needed):
 1. `cf-waf-converter`
 2. `cf-functions-converter`
 
-For each subagent, pass a clear instruction with the conversion task and the exact config directory path.
+For each subagent, pass a clear instruction in English with the conversion task, the exact config directory path, and the output language: `"... Generate output files in {user_language}."`
 
 ### Step 4: Report results
 

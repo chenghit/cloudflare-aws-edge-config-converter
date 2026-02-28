@@ -7,7 +7,7 @@ description: Validates the output of cf-cdn-analyzer by cross-checking hostname-
 
 Validate `cloudflare-cdn-analysis/hostname-based-config-summary.md` by cross-checking it against the original Cloudflare configuration files. Fix errors directly in the summary. Do NOT re-run the full analysis workflow.
 
-**Language Adaptation**: Write output files in the same language as the user's conversation.
+**Language Adaptation**: Write output files in the language specified in the query (e.g., "Generate output files in Chinese"). If no language is specified, default to English.
 
 ## Input
 
