@@ -37,11 +37,14 @@
 
 | 技能 | 输入 | 输出 | 状态 |
 |-------|-------|--------|--------|
-| **cf-waf-converter** | Cloudflare 安全规则（WAF、速率限制、IP 访问等） | AWS WAF 配置（Terraform） | ✅ 可用 |
+| **cf-waf-analyzer** | Cloudflare 安全规则（WAF、速率限制、IP 访问等） | 安全规则摘要和转换计划 | ✅ 可用 |
+| **cf-waf-analyzer-validator** | 安全规则摘要 | 已验证的摘要（就地修复错误） | ✅ 可用 |
+| **cf-waf-terraform-generator** | 已验证的安全规则摘要 | AWS WAF 配置（Terraform） | ✅ 可用 |
 | **cf-functions-converter** | Cloudflare 转换规则（重定向、URL 重写、标头转换等） | CloudFront Functions（JavaScript） | ✅ 可用 |
 | **cf-cdn-analyzer** | Cloudflare CDN 配置（缓存、源站、重定向等） | 基于主机名的配置摘要和用户决策模板 | ✅ 可用 |
+| **cf-cdn-analyzer-validator** | 基于主机名的配置摘要 | 已验证的摘要（就地修复错误） | ✅ 可用 |
 
-**为什么使用子代理？** 每个技能在独立的 Kiro 子代理中运行，具有隔离的上下文。这防止了在处理复杂多步转换时的上下文污染，特别是对于即将推出的 CDN 迁移工作流程（技能 3-11），需要并行执行多个转换器技能。详见 [架构设计](./docs/architecture/)。
+**为什么使用子代理？** 每个技能在独立的 Kiro 子代理中运行，具有隔离的上下文。这防止了在处理复杂多步转换时的上下文污染。WAF 流水线以 3 阶段流程运行（分析器 → 验证器 → 生成器），CDN 流水线以 2 阶段流程运行（分析器 → 验证器）。详见 [架构设计](./docs/architecture/)。
 
 ## 推荐配置
 
@@ -142,7 +145,12 @@ cd cloudflare-aws-edge-config-converter
 - 将子代理配置复制到 `~/.kiro/agents/`
 
 已安装的子代理：
-- `cf-waf-converter` - 将 Cloudflare 安全规则转换为 AWS WAF
+- `cf-waf-analyzer` - 分析 Cloudflare 安全规则
+- `cf-waf-analyzer-validator` - 验证 WAF 分析摘要
+- `cf-waf-terraform-generator` - 从已验证的摘要生成 AWS WAF Terraform
+- `cf-functions-converter` - 将 Cloudflare 转换规则转换为 CloudFront Functions
+- `cf-cdn-analyzer` - 分析 Cloudflare CDN 配置
+- `cf-cdn-analyzer-validator` - 验证 CDN 分析摘要
 - `cf-functions-converter` - 将 Cloudflare 转换规则转换为 CloudFront Functions
 
 ### 更新技能
@@ -185,32 +193,50 @@ git pull
 ```
 User: Convert Cloudflare security rules in /path/to/cloudflare-config to AWS WAF
 
-Kiro: [自动调用 cf-waf-converter 子代理]
-      [读取配置文件，生成 Terraform 文件]
+Kiro: [自动调用 cf-waf-analyzer 子代理]
+      [读取配置文件，生成安全规则摘要]
+      [调用 cf-waf-analyzer-validator 子代理]
+      [验证摘要，修复发现的错误]
+      [调用 cf-waf-terraform-generator 子代理]
+      [从已验证的摘要生成 Terraform 文件]
       ✅ 转换完成！生成的文件：
+      - cloudflare-security-rules-summary.md
       - versions.tf
+      - ip_sets.tf
       - main.tf
-      - variables.tf
-      - terraform.tfvars
+      - modules/waf/main.tf, variables.tf, outputs.tf
       - README_aws-waf-terraform-deployment.md
 ```
 
 **备选用法**（手动切换子代理）：
 
 ```
-User: /agent swap cf-waf-converter
+User: /agent swap cf-waf-analyzer
 
-User: Convert security rules in /path/to/cloudflare-config
+User: Analyze security rules in /path/to/cloudflare-config
+
+Kiro: [生成安全规则摘要]
+
+User: /agent swap cf-waf-analyzer-validator
+
+User: Validate WAF analysis in /path/to/cloudflare-config. This is validation round 1.
+
+Kiro: [验证并修复摘要]
+
+User: /agent swap cf-waf-terraform-generator
+
+User: Generate AWS WAF Terraform from the validated summary.
 
 Kiro: [生成 Terraform 配置文件]
 ```
 
 **输出文件**：
 
-- `versions.tf` - Terraform 和 AWS Provider 版本约束（需要 AWS Provider >= 6.4.0）
-- `main.tf` - 两个 Web ACL 配置（website 和 api-and-file）
-- `variables.tf` - 变量定义
-- `terraform.tfvars` - 变量值
+- `cloudflare-security-rules-summary.md` - 安全规则分析和转换计划
+- `versions.tf` - Terraform 和 AWS Provider 版本约束
+- `ip_sets.tf` - 共享 IP 集资源
+- `main.tf` - 根模块，包含两个 Web ACL 配置（website 和 api-and-file）
+- `modules/waf/` - Web ACL 模块（main.tf, variables.tf, outputs.tf）
 - `README_aws-waf-terraform-deployment.md` - 部署指南
 
 **完整示例**：[examples/conversation-history/cloudflare-to-aws-waf.txt](examples/conversation-history/cloudflare-to-aws-waf.txt)
@@ -303,7 +329,7 @@ Kiro: [生成配置摘要和下一步指南]
    - WAF 转换：提及"security rules"或"AWS WAF"
    - CloudFront Functions 转换：提及"transformation rules"或"CloudFront Functions"
    - CDN 分析：提及"CDN configuration"或"CDN config"
-   - 也可以手动切换：`/agent swap cf-waf-converter` 等
+   - 也可以手动切换：`/agent swap cf-waf-analyzer` 等
    - 每个子代理都有隔离的上下文以避免混淆
 
 2. **一次转换一个项目**
@@ -394,7 +420,7 @@ Kiro: [生成配置摘要和下一步指南]
 **问题**：`/agent swap` 命令不起作用或找不到子代理
 
 **解决方案**：
-1. 验证安装：检查 `~/.kiro/agents/cf-waf-converter.json` 是否存在
+1. 验证安装：检查 `~/.kiro/agents/cf-waf-analyzer.json` 是否存在
 2. 重启 Kiro CLI：退出并启动新的 `kiro-cli chat` 会话
 3. 列出可用代理：使用 `/agent list` 查看已安装的子代理
 
@@ -428,14 +454,14 @@ Kiro: [生成配置摘要和下一步指南]
 
 **解决方案**：
 在请求中使用与技能描述匹配的特定关键词：
-- 对于 cf-waf-converter：说"convert **security rules**"或"convert to **AWS WAF**"
+- 对于 cf-waf-analyzer：说"convert **security rules**"或"convert to **AWS WAF**"
 - 对于 cf-functions-converter：说"convert **transformation rules**"或"convert to **CloudFront Functions**"
 - 对于 cf-cdn-analyzer：说"analyze **CDN configuration**"或"analyze **CDN config**"
 
 **示例**：
 - ❌ 模糊："analyze my cloudflare config files"（技能可能不激活）
 - ✅ 具体："analyze my cloudflare **CDN config**"（技能正确激活）
-- ✅ 具体："convert **security rules** in /path/to/config to **AWS WAF**"（路由到 cf-waf-converter）
+- ✅ 具体："convert **security rules** in /path/to/config to **AWS WAF**"（路由到 cf-waf-analyzer）
 
 ## 为什么不用 cf-terraforming？
 

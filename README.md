@@ -37,11 +37,14 @@ This tool contains multiple independent Agent Skills, each focused on specific c
 
 | Skill | Input | Output | Status |
 |-------|-------|--------|--------|
-| **cf-waf-converter** | Cloudflare security rules (WAF, Rate Limiting, IP Access, etc.) | AWS WAF configuration (Terraform) | ✅ Available |
+| **cf-waf-analyzer** | Cloudflare security rules (WAF, Rate Limiting, IP Access, etc.) | Security rules summary with conversion plan | ✅ Available |
+| **cf-waf-analyzer-validator** | Security rules summary | Validated summary (fixes errors in-place) | ✅ Available |
+| **cf-waf-terraform-generator** | Validated security rules summary | AWS WAF configuration (Terraform) | ✅ Available |
 | **cf-functions-converter** | Cloudflare transformation rules (Redirect, URL Rewrite, Header Transform, etc.) | CloudFront Functions (JavaScript) | ✅ Available |
 | **cf-cdn-analyzer** | Cloudflare CDN configuration (Cache, Origin, Redirect, etc.) | Hostname-based configuration summary with user decision template | ✅ Available |
+| **cf-cdn-analyzer-validator** | Hostname-based configuration summary | Validated summary (fixes errors in-place) | ✅ Available |
 
-**Why Subagents?** Each skill runs in a separate Kiro subagent with isolated context. This prevents context pollution when handling complex multi-step conversions, especially for the upcoming CDN migration workflow (Skills 3-11) which requires parallel execution of multiple converter skills. See [Architecture Design](./docs/architecture/) for details.
+**Why Subagents?** Each skill runs in a separate Kiro subagent with isolated context. This prevents context pollution when handling complex multi-step conversions. The WAF pipeline runs as a 3-stage process (analyzer → validator → generator), and the CDN pipeline runs as a 2-stage process (analyzer → validator). See [Architecture Design](./docs/architecture/) for details.
 
 ## Recommended Configuration
 
@@ -144,8 +147,12 @@ This will:
 - Copy subagent configurations to `~/.kiro/agents/`
 
 Installed subagents:
-- `cf-waf-converter` - Converts Cloudflare security rules to AWS WAF
+- `cf-waf-analyzer` - Analyzes Cloudflare security rules
+- `cf-waf-analyzer-validator` - Validates WAF analysis summary
+- `cf-waf-terraform-generator` - Generates AWS WAF Terraform from validated summary
 - `cf-functions-converter` - Converts Cloudflare transformation rules to CloudFront Functions
+- `cf-cdn-analyzer` - Analyzes Cloudflare CDN configuration
+- `cf-cdn-analyzer-validator` - Validates CDN analysis summary
 
 ### Updating Skills
 
@@ -187,32 +194,50 @@ If you want to test the tool without backing up your own configuration, you can 
 ```
 User: Convert Cloudflare security rules in /path/to/cloudflare-config to AWS WAF
 
-Kiro: [Automatically invokes cf-waf-converter subagent]
-      [Reads configuration files, generates Terraform files]
+Kiro: [Automatically invokes cf-waf-analyzer subagent]
+      [Reads configuration files, generates security rules summary]
+      [Invokes cf-waf-analyzer-validator subagent]
+      [Validates summary, fixes errors if found]
+      [Invokes cf-waf-terraform-generator subagent]
+      [Generates Terraform files from validated summary]
       ✅ Conversion complete! Generated files:
+      - cloudflare-security-rules-summary.md
       - versions.tf
+      - ip_sets.tf
       - main.tf
-      - variables.tf
-      - terraform.tfvars
+      - modules/waf/main.tf, variables.tf, outputs.tf
       - README_aws-waf-terraform-deployment.md
 ```
 
 **Alternative Usage** (Manual subagent switch):
 
 ```
-User: /agent swap cf-waf-converter
+User: /agent swap cf-waf-analyzer
 
-User: Convert security rules in /path/to/cloudflare-config
+User: Analyze security rules in /path/to/cloudflare-config
+
+Kiro: [Generates security rules summary]
+
+User: /agent swap cf-waf-analyzer-validator
+
+User: Validate WAF analysis in /path/to/cloudflare-config. This is validation round 1.
+
+Kiro: [Validates and fixes summary]
+
+User: /agent swap cf-waf-terraform-generator
+
+User: Generate AWS WAF Terraform from the validated summary.
 
 Kiro: [Generates Terraform configuration files]
 ```
 
 **Output Files**:
 
-- `versions.tf` - Terraform and AWS Provider version constraints (requires AWS Provider >= 6.4.0)
-- `main.tf` - Two Web ACL configurations (website and api-and-file)
-- `variables.tf` - Variable definitions
-- `terraform.tfvars` - Variable values
+- `cloudflare-security-rules-summary.md` - Security rules analysis and conversion plan
+- `versions.tf` - Terraform and AWS Provider version constraints
+- `ip_sets.tf` - Shared IP set resources
+- `main.tf` - Root module with two Web ACL configurations (website and api-and-file)
+- `modules/waf/` - Web ACL module (main.tf, variables.tf, outputs.tf)
 - `README_aws-waf-terraform-deployment.md` - Deployment guide
 
 **Complete Example**: [examples/conversation-history/cloudflare-to-aws-waf.txt](examples/conversation-history/cloudflare-to-aws-waf.txt)
@@ -305,7 +330,7 @@ Kiro: [Generates configuration summary and next steps guide]
    - For WAF: mention "security rules" or "AWS WAF"
    - For CloudFront Functions: mention "transformation rules" or "CloudFront Functions"
    - For CDN analysis: mention "CDN configuration" or "CDN config"
-   - You can also manually switch with `/agent swap cf-waf-converter` etc.
+   - You can also manually switch with `/agent swap cf-waf-analyzer` etc.
    - Each subagent has isolated context to avoid confusion
 
 2. **Convert One Project at a Time**
@@ -396,7 +421,7 @@ Kiro: [Generates configuration summary and next steps guide]
 **Problem**: `/agent swap` command doesn't work or subagent not found
 
 **Solution**:
-1. Verify installation: Check if `~/.kiro/agents/cf-waf-converter.json` exists
+1. Verify installation: Check if `~/.kiro/agents/cf-waf-analyzer.json` exists
 2. Restart Kiro CLI: Exit and start a new `kiro-cli chat` session
 3. List available agents: Use `/agent list` to see installed subagents
 
@@ -430,14 +455,14 @@ Kiro: [Generates configuration summary and next steps guide]
 
 **Solution**:
 Use specific keywords in your request that match the skill's description:
-- For cf-waf-converter: Say "convert **security rules**" or "convert to **AWS WAF**"
+- For cf-waf-analyzer: Say "convert **security rules**" or "convert to **AWS WAF**"
 - For cf-functions-converter: Say "convert **transformation rules**" or "convert to **CloudFront Functions**"
 - For cf-cdn-analyzer: Say "analyze **CDN configuration**" or "analyze **CDN config**"
 
 **Example**:
 - ❌ Vague: "analyze my cloudflare config files" (skill may not activate)
 - ✅ Specific: "analyze my cloudflare **CDN config**" (skill activates correctly)
-- ✅ Specific: "convert **security rules** in /path/to/config to **AWS WAF**" (routes to cf-waf-converter)
+- ✅ Specific: "convert **security rules** in /path/to/config to **AWS WAF**" (routes to cf-waf-analyzer)
 
 ## Why Not cf-terraforming?
 
