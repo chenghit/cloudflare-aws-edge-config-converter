@@ -118,6 +118,10 @@ For advanced users: `/agent swap <subagent-name>` to run individual stages. Avai
 - [AWS WAF Documentation](https://docs.aws.amazon.com/waf/)
 - [CloudFront Functions Documentation](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-functions.html)
 
+## License
+
+[MIT](./LICENSE)
+
 ## Feedback and Contributions
 
 For issues or suggestions, please submit an Issue or Pull Request.

@@ -118,6 +118,10 @@ cd cloudflare-aws-edge-config-converter
 - [AWS WAF 文档](https://docs.aws.amazon.com/waf/)
 - [CloudFront Functions 文档](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-functions.html)
 
+## 许可证
+
+[MIT](./LICENSE)
+
 ## 反馈和贡献
 
 如有问题或建议，请提交 Issue 或 Pull Request。
