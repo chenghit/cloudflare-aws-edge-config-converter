@@ -26,7 +26,7 @@ kiro-cli chat
 Then reference the example configs:
 
 ```
-Convert Cloudflare security rules in ./examples/cloudflare-configs/c.example.com/ to AWS WAF
-Convert transformation rules in ./examples/cloudflare-configs/c.example.com/ to CloudFront Functions
-Analyze CDN configuration in ./examples/cloudflare-configs/c.example.com/
+Convert Cloudflare security rules in ./examples/cloudflare-configs/ to AWS WAF
+Convert transformation rules in ./examples/cloudflare-configs/ to CloudFront Functions
+Analyze CDN configuration in ./examples/cloudflare-configs/
 ```
