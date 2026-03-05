@@ -1,9 +1,0 @@
-{
-  "name": "cf-waf-converter",
-  "description": "Converts Cloudflare WAF rules, firewall rules, and security policies to AWS WAF Terraform configuration",
-  "resources": [
-    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-waf-converter/SKILL.md"
-  ],
-  "tools": ["fs_read", "fs_write", "glob", "grep"],
-  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
-}

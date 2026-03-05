@@ -55,7 +55,7 @@ cloudflare-cdn-analysis/
 - Custom Pages (zone-level Cloudflare challenge/error page templates — listed for reference, no migration action required)
 
 **Out of Scope:** 
-- Security rules (use cf-waf-converter)
+- Security rules (use cf-waf-analyzer)
 - Implementation decisions (handled by Planner skill)
 - Actual CloudFront configuration generation (handled by downstream skills)
 

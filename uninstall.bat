@@ -15,11 +15,11 @@ if exist "%SKILLS_DIR%" (
     echo   Skills directory not found (already uninstalled?)
 )
 
-:: Remove subagent configurations
+:: Remove subagent configurations (including deprecated cf-waf-converter)
 set REMOVED=0
-for %%F in (cf-waf-converter.json cf-functions-converter.json cf-cdn-analyzer.json cf-cdn-analyzer-validator.json) do (
-    if exist "%AGENTS_DIR%\%%F" (
-        del /q "%AGENTS_DIR%\%%F"
+for %%F in (cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator cf-waf-converter cf-functions-converter cf-cdn-analyzer cf-cdn-analyzer-validator) do (
+    if exist "%AGENTS_DIR%\%%F.json" (
+        del /q "%AGENTS_DIR%\%%F.json"
         set /a REMOVED+=1
     )
 )
