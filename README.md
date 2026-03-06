@@ -27,7 +27,43 @@ Manually converting hundreds of rules when migrating from Cloudflare to AWS is t
 | **cf-cdn-analyzer** | Cloudflare CDN configuration (Cache, Origin, Redirect, etc.) | Hostname-based configuration summary | ✅ Available |
 | **cf-cdn-analyzer-validator** | Hostname-based configuration summary | Validated summary (fixes errors in-place) | ✅ Available |
 
-Each skill runs in a separate Kiro subagent with isolated context. The default agent loads the `cloudflare-aws-converter` orchestrator skill and automatically dispatches to the appropriate subagents. WAF runs as a 3-stage pipeline (analyzer → validator → generator), CDN as a 2-stage pipeline (analyzer → validator). You don't need to understand this architecture — just describe what you want and Kiro handles the rest.
+Each skill runs in a separate Kiro subagent with isolated context. The default agent loads the `cloudflare-aws-converter` orchestrator skill and automatically dispatches to the appropriate subagents. You don't need to understand this architecture — just describe what you want and Kiro handles the rest.
+
+```mermaid
+flowchart TD
+    User([User]) -->|"Convert WAF / CDN / Functions / All"| Main["Kiro Default Agent<br/>(cloudflare-aws-converter orchestrator)"]
+
+    Main -->|WAF intent| WAF_A["cf-waf-analyzer"]
+    WAF_A -->|"cloudflare-security-rules-summary.md"| WAF_V["cf-waf-analyzer-validator"]
+    WAF_V -->|PASS| WAF_G["cf-waf-terraform-generator"]
+    WAF_V -->|"FIXED → re-validate"| WAF_V
+    WAF_G -->|"*.tf modules"| WAF_Done([WAF Terraform])
+
+    Main -->|CDN intent| CDN_A["cf-cdn-analyzer"]
+    CDN_A -->|"hostname-based-config-summary.md"| CDN_V["cf-cdn-analyzer-validator"]
+    CDN_V -->|PASS| CDN_P["Skill 4: Implementation Planner"]
+    CDN_V -->|"FIXED → re-validate"| CDN_V
+    CDN_P --> CDN_VR["Skill 7: Viewer Request Function"]
+    CDN_P --> CDN_VResp["Skill 8: Viewer Response Function"]
+    CDN_P --> CDN_OR["Skill 9: Origin Request Lambda"]
+    CDN_P --> CDN_OResp["Skill 10: Origin Response Lambda"]
+    CDN_VR & CDN_VResp & CDN_OR & CDN_OResp --> CDN_TF["Skill 11: CloudFront Config Generator"]
+    CDN_TF -->|"*.tf modules"| CDN_Done([CDN Terraform])
+
+    Main -->|Functions intent| FUNC["cf-functions-converter"]
+    FUNC -->|"*.js functions"| FUNC_Done([CloudFront Functions])
+
+    style Main fill:#f9f,stroke:#333
+    style WAF_Done fill:#9f9,stroke:#333
+    style CDN_Done fill:#9f9,stroke:#333
+    style FUNC_Done fill:#9f9,stroke:#333
+    style CDN_P fill:#ffd,stroke:#f90
+    style CDN_VR fill:#ffd,stroke:#f90
+    style CDN_VResp fill:#ffd,stroke:#f90
+    style CDN_OR fill:#ffd,stroke:#f90
+    style CDN_OResp fill:#ffd,stroke:#f90
+    style CDN_TF fill:#ffd,stroke:#f90
+```
 
 ## Quick Start
 

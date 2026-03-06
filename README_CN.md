@@ -27,7 +27,43 @@
 | **cf-cdn-analyzer** | Cloudflare CDN 配置（缓存、源站、重定向等） | 基于主机名的配置摘要 | ✅ 可用 |
 | **cf-cdn-analyzer-validator** | 基于主机名的配置摘要 | 已验证的摘要（就地修复错误） | ✅ 可用 |
 
-每个技能在独立的 Kiro 子代理中运行，具有隔离的上下文。默认代理加载 `cloudflare-aws-converter` 编排器技能，自动调度到对应的子代理。WAF 以 3 阶段流水线运行（分析器 → 验证器 → 生成器），CDN 以 2 阶段流水线运行（分析器 → 验证器）。你不需要了解这些内部架构——只需描述你的需求，Kiro 会自动处理。
+每个技能在独立的 Kiro 子代理中运行，具有隔离的上下文。默认代理加载 `cloudflare-aws-converter` 编排器技能，自动调度到对应的子代理。你不需要了解这些内部架构——只需描述你的需求，Kiro 会自动处理。
+
+```mermaid
+flowchart TD
+    User([用户]) -->|"转换 WAF / CDN / Functions / 全部"| Main["Kiro 默认代理<br/>(cloudflare-aws-converter 编排器)"]
+
+    Main -->|WAF 意图| WAF_A["cf-waf-analyzer"]
+    WAF_A -->|"cloudflare-security-rules-summary.md"| WAF_V["cf-waf-analyzer-validator"]
+    WAF_V -->|通过| WAF_G["cf-waf-terraform-generator"]
+    WAF_V -->|"已修复 → 重新验证"| WAF_V
+    WAF_G -->|"*.tf 模块"| WAF_Done([WAF Terraform])
+
+    Main -->|CDN 意图| CDN_A["cf-cdn-analyzer"]
+    CDN_A -->|"hostname-based-config-summary.md"| CDN_V["cf-cdn-analyzer-validator"]
+    CDN_V -->|通过| CDN_P["Skill 4: 实施规划器"]
+    CDN_V -->|"已修复 → 重新验证"| CDN_V
+    CDN_P --> CDN_VR["Skill 7: Viewer Request 函数"]
+    CDN_P --> CDN_VResp["Skill 8: Viewer Response 函数"]
+    CDN_P --> CDN_OR["Skill 9: Origin Request Lambda"]
+    CDN_P --> CDN_OResp["Skill 10: Origin Response Lambda"]
+    CDN_VR & CDN_VResp & CDN_OR & CDN_OResp --> CDN_TF["Skill 11: CloudFront 配置生成器"]
+    CDN_TF -->|"*.tf 模块"| CDN_Done([CDN Terraform])
+
+    Main -->|Functions 意图| FUNC["cf-functions-converter"]
+    FUNC -->|"*.js 函数"| FUNC_Done([CloudFront Functions])
+
+    style Main fill:#f9f,stroke:#333
+    style WAF_Done fill:#9f9,stroke:#333
+    style CDN_Done fill:#9f9,stroke:#333
+    style FUNC_Done fill:#9f9,stroke:#333
+    style CDN_P fill:#ffd,stroke:#f90
+    style CDN_VR fill:#ffd,stroke:#f90
+    style CDN_VResp fill:#ffd,stroke:#f90
+    style CDN_OR fill:#ffd,stroke:#f90
+    style CDN_OResp fill:#ffd,stroke:#f90
+    style CDN_TF fill:#ffd,stroke:#f90
+```
 
 ## 快速开始
 
