@@ -145,6 +145,20 @@ kiro-cli chat
 
 ## 前提条件
 
+### ACM 证书（仅 CDN 流程需要）
+
+CloudFront 要求 TLS 证书位于 **us-east-1**（弗吉尼亚北部）。运行 CDN 流程前，请先为你的域名申请通配符证书：
+
+```bash
+# 示例：为 *.example.com 申请通配符证书
+aws acm request-certificate \
+  --domain-name "*.example.com" \
+  --validation-method DNS \
+  --region us-east-1
+```
+
+完成 DNS 验证并等待状态变为 `ISSUED`。在流程中填写 CSV 模板时输入证书 ARN，或留空让 Terraform 自动按域名查找已签发的证书。
+
 ### Terraform
 
 AWS WAF 和 CloudFront 输出需要 Terraform >= 1.8.0、AWS Provider >= 6.x。

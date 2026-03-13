@@ -145,6 +145,20 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 
 ## Prerequisites
 
+### ACM Certificates (CDN pipeline only)
+
+CloudFront requires TLS certificates in **us-east-1** (N. Virginia). Before running the CDN pipeline, provision wildcard certificates for your domains:
+
+```bash
+# Example: request a wildcard cert for *.example.com
+aws acm request-certificate \
+  --domain-name "*.example.com" \
+  --validation-method DNS \
+  --region us-east-1
+```
+
+Complete DNS validation and wait for status `ISSUED`. You'll enter the certificate ARN in the CSV template during the pipeline, or leave it blank to let Terraform look up an existing ISSUED cert by domain name automatically.
+
 ### Terraform
 
 AWS WAF and CloudFront output requires Terraform >= 1.8.0 and AWS Provider >= 6.x.
