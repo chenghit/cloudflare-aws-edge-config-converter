@@ -3,7 +3,7 @@ name: cf-cdn-ir-finalizer
 description: >
   Finalizer for the Cloudflare → CloudFront migration pipeline.
   Runs after ALL domains have passed V1 validation (cf-cdn-ir-chunk-validator).
-  Reads all ir_accumulator/*.yaml files, sorts cache behaviors by specificity,
+  Reads all ir/accumulator/*.yaml files, sorts cache behaviors by specificity,
   deduplicates shared policies, detects shadowed rules, and writes finalized
   IR files plus a conversion report.
 ---
@@ -34,8 +34,8 @@ cloudflare-to-aws-cdn/
 
 | Logical path              | Resolved path                                                      |
 |---------------------------|--------------------------------------------------------------------|
-| IR accumulator input glob | `cloudflare-to-aws-cdn/ir/ir_accumulator/*.yaml`                  |
-| V1 validation results     | `cloudflare-to-aws-cdn/ir/validation/chunk/*.yaml`                 |
+| IR accumulator input glob | `cloudflare-to-aws-cdn/ir/accumulator/*.yaml`                  |
+| V1 validation results     | `cloudflare-to-aws-cdn/ir/validation/chunk/*.json`                 |
 | Finalized IR output       | `cloudflare-to-aws-cdn/ir/final/<hostname>.yaml`                  |
 | Dedup manifest            | `cloudflare-to-aws-cdn/shared/dedup_manifest.json`                |
 | Conversion report         | `cloudflare-to-aws-cdn/conversion_report.md`                      |
@@ -65,11 +65,11 @@ cloudflare-to-aws-cdn/conversion_report.md
 
 Before executing any logic, read the following reference documents in order:
 
-1. `cf-converter/cf-cdn-per-domain-processor/SKILL.md` — authoritative IR
+1. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` — authoritative IR
    schema. Know what fields exist in cache_behavior and metadata documents.
-2. `cf-converter/cf-cdn-ir-chunk-validator/SKILL.md` — understand what
+2. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` — understand what
    validations have already passed. Do not re-validate; trust the V1 pass.
-3. `cf-converter/cf-cdn-ir-finalizer/SKILL.md` (this file) — finalization
+3. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` (this file) — finalization
    logic and algorithms.
 
 Proceeding without reading these documents may produce incorrect finalized IR.
@@ -101,12 +101,12 @@ If no V1 validation files exist at all:
 
 **1b. Confirm at least one accumulator file exists:**
 
-List all `*.yaml` files in `cloudflare-to-aws-cdn/ir/ir_accumulator/`.
+List all `*.yaml` files in `cloudflare-to-aws-cdn/ir/accumulator/`.
 
 If none found:
 - Output:
   ```
-  NO_INPUT_FILES: No YAML files found in cloudflare-to-aws-cdn/ir/ir_accumulator/. Nothing to finalize.
+  NO_INPUT_FILES: No YAML files found in cloudflare-to-aws-cdn/ir/accumulator/. Nothing to finalize.
   ```
 - **Stop.**
 
@@ -114,7 +114,7 @@ If none found:
 
 ### Step 2 — Load All IR Accumulator Files
 
-For each `*.yaml` file in `cloudflare-to-aws-cdn/ir/ir_accumulator/`:
+For each `*.yaml` file in `cloudflare-to-aws-cdn/ir/accumulator/`:
 
 1. Parse the multi-document YAML file.
 2. Separate documents by `document_type`:
@@ -132,7 +132,7 @@ For each `*.yaml` file in `cloudflare-to-aws-cdn/ir/ir_accumulator/`:
 
 If a file fails to parse, output a warning and skip it:
 ```
-WARN: Could not parse cloudflare-to-aws-cdn/ir/ir_accumulator/<filename>. Skipping.
+WARN: Could not parse cloudflare-to-aws-cdn/ir/accumulator/<filename>. Skipping.
 ```
 
 ---
@@ -301,8 +301,11 @@ different full hashes (truncation collision):
 For each domain in `domain_map`:
 
 1. Reconstruct a multi-document YAML with:
-   - First document: the metadata document (with `hostname`, `kvs_requirements`,
-     etc.) — update `finalized_at` timestamp if that field exists, or add it.
+   - First document: the metadata document — pass through **all** fields
+     verbatim (`document_type`, `hostname`, `sanitized_name`, `apex_domain`,
+     `cert_arn_mode`, `cert_arn`, `kvs_requirements`, `kvs_data`,
+     `custom_error_responses`, `lambda_edge`, and any other fields present).
+     Update `finalized_at` timestamp if that field exists, or add it.
    - Subsequent documents: the sorted, deduplicated cache_behavior documents,
      in order of ascending `precedence`.
 
@@ -466,9 +469,9 @@ Next step: run cf-cdn-ir-final-validator for each domain.
 
 | Document | Purpose |
 |---|---|
-| `cf-converter/cf-cdn-per-domain-processor/SKILL.md` | IR schema — field definitions for cache_behavior and metadata documents |
-| `cf-converter/cf-cdn-ir-chunk-validator/SKILL.md` | V1 validation rules — understand what has already been checked |
-| `cf-converter/cf-cdn-ir-finalizer/SKILL.md` | This file — sorting, dedup, and finalization algorithms |
+| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` | IR schema — field definitions for cache_behavior and metadata documents |
+| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` | V1 validation rules — understand what has already been checked |
+| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` | This file — sorting, dedup, and finalization algorithms |
 
 ---
 
@@ -521,7 +524,7 @@ Superset examples:
 ## Important Constraints
 
 - **Do not run if any domain failed V1 validation.** Check Step 1 rigorously.
-- **Do not modify input files** in `ir_accumulator/`. All writes go to `ir/final/`.
+- **Do not modify input files** in `ir/accumulator/`. All writes go to `ir/final/`.
 - **Preserve all non-policy fields** from input documents verbatim.
 - **The dedup manifest must be complete** — every `*_policy_id` reference in
   any `ir/final/*.yaml` file must have a corresponding entry in
@@ -530,3 +533,26 @@ Superset examples:
   absence is a V2 validation failure.
 - **Precedence 999 is reserved** for the default `"*"` pattern. No other
   pattern may receive precedence 999.
+
+---
+
+## Final Response
+
+After completing all steps, end your response with a `---RESULT---` block so the orchestrator can parse the outcome:
+
+```
+---RESULT---
+STATUS: COMPLETE
+DOMAINS_PROCESSED: 5
+FILES_WRITTEN: ir/final/*.yaml, shared/dedup_manifest.json, conversion_report.md
+---
+```
+
+Or on failure:
+
+```
+---RESULT---
+STATUS: ERROR
+ISSUE: No V1 validation reports found in ir/validation/chunk/
+---
+```

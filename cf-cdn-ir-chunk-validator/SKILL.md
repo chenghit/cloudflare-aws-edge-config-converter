@@ -3,7 +3,7 @@ name: cf-cdn-ir-chunk-validator
 description: >
   Validator V1 for the Cloudflare → CloudFront migration pipeline.
   Runs after cf-cdn-per-domain-processor for each domain.
-  Validates a single ir_accumulator/<hostname>.yaml file using an
+  Validates a single ir/accumulator/<hostname>.yaml file using an
   adversarial checking posture: default assumption is the input is WRONG.
   Produces a structured JSON validation report and halts on any failure.
 ---
@@ -59,12 +59,13 @@ where `<workspace>` is the current working directory when the skill is invoked.
 
 | Logical path           | Resolved path                                               |
 |------------------------|-------------------------------------------------------------|
-| IR accumulator input   | `cloudflare-to-aws-cdn/ir/ir_accumulator/<hostname>.yaml`  |
+| IR accumulator input   | `cloudflare-to-aws-cdn/ir/accumulator/<sanitized_hostname>.yaml`  |
 | Validation output      | `cloudflare-to-aws-cdn/ir/validation/chunk/<hostname>-v1.json` |
 
-The `<hostname>` token is the sanitized hostname string — the same value used
-as the YAML filename stem (e.g., `cdn.example.com` → file is
-`cdn.example.com.yaml`, output is `cdn.example.com-v1.json`).
+The `<sanitized_hostname>` token is the hostname with every `.` and `-` replaced by `_`
+(e.g., `cdn.c.example.com` → `cdn_c_example_com`).
+The `<hostname>` token in the validation output is the **raw** hostname (e.g., `cdn.c.example.com`)
+read from the `hostname` field inside the YAML.
 
 ---
 
@@ -118,9 +119,9 @@ Rules:
 
 Before beginning any validation, read the following reference files in order:
 
-1. `cf-converter/cf-cdn-per-domain-processor/SKILL.md` — understand the IR
+1. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` — understand the IR
    schema produced by the upstream processor.
-2. `cf-converter/cf-cdn-ir-chunk-validator/SKILL.md` (this file) — confirm
+2. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` (this file) — confirm
    the checks to perform.
 
 Do not skip this step. The IR schema definition is authoritative; if the
@@ -131,10 +132,12 @@ input file deviates from it, that deviation is an error.
 ### Step 1 — Identify the Target Hostname
 
 Determine the hostname being validated. This is provided as the skill input
-parameter (e.g., `cdn.example.com`). Derive:
+parameter (e.g., `cdn.c.example.com`). Derive:
 
-- **Input file path:** `cloudflare-to-aws-cdn/ir/ir_accumulator/<hostname>.yaml`
+- **Sanitized name:** replace every `.` and `-` with `_` (e.g., `cdn_c_example_com`)
+- **Input file path:** `cloudflare-to-aws-cdn/ir/accumulator/<sanitized_name>.yaml`
 - **Output file path:** `cloudflare-to-aws-cdn/ir/validation/chunk/<hostname>-v1.json`
+  (raw hostname in the output filename, consistent with all other validation outputs)
 
 If no hostname parameter is provided, FAIL immediately with:
 
@@ -151,7 +154,7 @@ Check that the input YAML file exists at the resolved path.
 If the file does not exist:
 - Write the validation JSON with `status: "FAIL"` and error:
   ```
-  FILE_NOT_FOUND: Expected input file does not exist: cloudflare-to-aws-cdn/ir/ir_accumulator/<hostname>.yaml
+  FILE_NOT_FOUND: Expected input file does not exist: cloudflare-to-aws-cdn/ir/accumulator/<sanitized_hostname>.yaml
   ```
 - Output a clear FAILURE message to the user.
 - **Stop. Do not proceed.**
@@ -402,16 +405,20 @@ Locate the `hostname` field:
 
 **7b.** Compare the found `hostname` value to the input hostname parameter:
 
-The "sanitized filename" is derived from the hostname by replacing characters
-not valid in filenames with underscores or hyphens (implementation must match
-the upstream processor's sanitization logic — refer to the processor SKILL.md).
+The sanitized filename is derived from the raw hostname by replacing every `.` and `-`
+with `_` (e.g., `cdn.c.example.com` → `cdn_c_example_com`).
 
-For standard hostnames (alphanumeric + dots + hyphens), the sanitized form
-equals the raw hostname.
+The `hostname` field inside the YAML must equal the **raw** hostname (e.g.,
+`cdn.c.example.com`), not the sanitized form. The filename uses the sanitized form,
+but the YAML content uses the raw form.
 
-If `hostname` value in YAML does not match the expected hostname:
+To verify: derive the expected sanitized filename from the input hostname parameter,
+then check that the file exists at that path. Then check that the `hostname` field
+inside the YAML equals the raw input hostname parameter.
+
+If `hostname` value in YAML does not match the raw input hostname:
 ```
-HOSTNAME_MISMATCH: hostname field in YAML is "<yaml_value>" but expected "<expected_hostname>" based on filename "<filename>". These must match exactly.
+HOSTNAME_MISMATCH: hostname field in YAML is "<yaml_value>" but expected "<raw_hostname>". The hostname field must contain the raw FQDN, not the sanitized filename stem.
 ```
 
 ---
@@ -497,8 +504,8 @@ Before executing this skill, read the following documents:
 
 | Document | Purpose |
 |---|---|
-| `cf-converter/cf-cdn-per-domain-processor/SKILL.md` | IR schema definition — authoritative source for what fields are expected in cache_behavior and metadata documents |
-| `cf-converter/cf-cdn-ir-chunk-validator/SKILL.md` | This file — defines all validation rules |
+| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` | IR schema definition — authoritative source for what fields are expected in cache_behavior and metadata documents |
+| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` | This file — defines all validation rules |
 
 If any reference document is missing or unreadable, FAIL with:
 ```

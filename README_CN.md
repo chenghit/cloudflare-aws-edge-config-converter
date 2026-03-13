@@ -23,7 +23,6 @@
 | **cf-waf-analyzer** | Cloudflare 安全规则（WAF、速率限制、IP 访问控制等） | 安全规则摘要及转换计划 | ✅ 可用 |
 | **cf-waf-analyzer-validator** | 安全规则摘要 | 已校验摘要（就地修复错误） | ✅ 可用 |
 | **cf-waf-terraform-generator** | 已校验安全规则摘要 | AWS WAF 配置（Terraform） | ✅ 可用 |
-| **cf-functions-converter** | Cloudflare 转换规则（重定向、URL 重写、请求头转换等） | CloudFront Functions（JavaScript） | ✅ 可用 |
 | **cf-cdn-dns-parser** | Cloudflare DNS 备份 | 域名清单 + 用户输入模板 CSV | ✅ 可用 |
 | **cf-cdn-input-validator** | 用户确认后的域名 CSV | 已验证的域名范围 JSON | ✅ 可用 |
 | **cf-cdn-per-domain-processor** | Cloudflare CDN 所有规则类型 | 每域名 CloudFront 原生 IR YAML | ✅ 可用 |
@@ -57,14 +56,10 @@ flowchart TD
     CDN8 --> CDN9["cf-cdn-js-validator × N"]
     CDN9 -->|全部通过| CDN_Done([CDN Terraform + JS ✅])
 
-    Main -->|Functions 意图| FUNC["cf-functions-converter"]
-    FUNC --> FUNC_Done([CloudFront Functions ✅])
-
     style Main fill:#f9f,stroke:#333
     style Pause fill:#ff9,stroke:#f90
     style WAF_Done fill:#9f9,stroke:#333
     style CDN_Done fill:#9f9,stroke:#333
-    style FUNC_Done fill:#9f9,stroke:#333
 ```
 
 ## CDN 完整流程：工作原理
@@ -85,13 +80,14 @@ cloudflare-to-aws-cdn/
 │   ├── final/                       # 排序并去重后的中间表示
 │   └── validation/                  # 验证报告（V1、V2、V3）
 └── terraform/
-    ├── modules/cloudfront_distribution/
+    ├── modules/
+    │   └── cloudfront_distribution/ # 共享模块（从 skill 复制而来）
     ├── shared/
-    │   ├── policies.tf              # 去重后的 CachePolicy 资源
-    │   └── providers.tf
+    │   └── policies.tf              # 去重后的 CachePolicy 资源 + outputs
     └── domains/
         └── <域名>/
-            ├── main.tf
+            ├── main.tf              # module call（约 50-80 行）
+            ├── outputs.tf
             ├── functions.tf
             ├── kvs.tf               # KVS 存储（如有批量重定向）
             ├── functions/
@@ -101,7 +97,23 @@ cloudflare-to-aws-cdn/
 
 **ACM 证书：** 在 CSV 中填入证书 ARN，或留空——工具会生成 `data "aws_acm_certificate"` 数据源，在 `terraform plan` 时自动查找你已有的 ISSUED 证书。
 
+**日志：** 本工具不配置 CloudFront 访问日志——这涉及 S3 桶 region、日志格式、共用桶还是每域名独立桶等与配置迁移无关的决策。如有需要，自行在生成的 `main.tf` 中添加 `logging_config` 块。
+
 **设计目标：** 最多支持 50 个代理域名（对应 CloudFront KVS 默认配额 50 个/账号）。每个域名一个独立 KVS，不跨域共享。
+
+**部署顺序：** 生成的 Terraform 使用独立的 root module。按以下顺序 apply：
+
+```bash
+# 1. 先部署共享策略（创建 CachePolicy、ORP、RHP 资源）
+cd cloudflare-to-aws-cdn/terraform/shared
+terraform init && terraform apply
+
+# 2. 再逐个部署各域名（通过 data source 按名称查找共享策略）
+cd cloudflare-to-aws-cdn/terraform/domains/cdn_example_com
+terraform init && terraform apply
+```
+
+各域名可以在共享策略部署完成后独立 plan/apply。这样做的好处是爆炸半径小——修改一个域名不会影响其他域名。
 
 ## 快速开始
 
@@ -135,7 +147,7 @@ kiro-cli chat
 
 ### Terraform
 
-AWS WAF 和 CloudFront 输出需要 Terraform >= 1.5.0、AWS Provider >= 6.x。
+AWS WAF 和 CloudFront 输出需要 Terraform >= 1.8.0、AWS Provider >= 6.x。
 
 ```bash
 terraform version
@@ -167,11 +179,13 @@ cd cloudflare-aws-edge-config-converter
 
 更新：`git pull && ./install.sh`
 
+> **使用其他 Agent 工具？** 安装脚本和所有 SKILL.md 文件默认使用 `~/.kiro/skills/` 作为 skill 安装目录（Kiro CLI 约定）。如需配合其他 agent 工具使用，需要：(1) 修改 `install.sh` / `uninstall.sh` 中的目标目录；(2) 在所有 SKILL.md 文件中将 `~/.kiro/skills/` 全局替换为你的 agent 工具的 skill 路径——subagent 之间通过绝对安装路径互相引用。
+
 ### 手动控制 Subagent
 
 高级用户可通过 `/agent swap <subagent-name>` 单独运行各流程阶段。
 
-可用 subagent：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-functions-converter`、`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-per-domain-processor`、`cf-cdn-ir-chunk-validator`、`cf-cdn-ir-finalizer`、`cf-cdn-ir-final-validator`、`cf-cdn-tf-shared-policies`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。
+可用 subagent：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-per-domain-processor`、`cf-cdn-ir-chunk-validator`、`cf-cdn-ir-finalizer`、`cf-cdn-ir-final-validator`、`cf-cdn-tf-shared-policies`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。
 
 ## 更多信息
 

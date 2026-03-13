@@ -30,27 +30,24 @@ structured output files:
 
 ## Path Resolution
 
-All paths below are relative to the **base directory** of this skill:
-
-```
-/home/chencch/.openclaw/workspace/cf-converter/
-```
+All paths below are relative to the **output directory** created by this skill.
+The output directory is `cloudflare-to-aws-cdn/` under the current working directory
+when the skill is invoked (i.e., the Cloudflare backup directory or the directory
+specified by the orchestrator).
 
 | Alias              | Resolved Path                                                                 |
 |--------------------|-------------------------------------------------------------------------------|
-| `BASE`             | `/home/chencch/.openclaw/workspace/cf-converter`                              |
-| `REF_DIR`          | `BASE/cf-cdn-analyzer/references/`                                            |
-| `OUTPUT_DIR`       | `BASE/cloudflare-to-aws-cdn/`                                                 |
+| `OUTPUT_DIR`       | `cloudflare-to-aws-cdn/` (relative to current working directory)              |
 | `DNS_MANIFEST`     | `OUTPUT_DIR/dns_manifest.yaml`                                                |
 | `INPUT_TEMPLATE`   | `OUTPUT_DIR/user_input_template.csv`                                          |
-| `BACKUP_PATH`      | User-supplied at runtime (e.g. `/path/to/backup/DNS.txt`)                     |
+| `BACKUP_PATH`      | User-supplied at runtime (e.g. `/path/to/backup/`)                            |
 | `SAAS_FALLBACK`    | Same directory as `BACKUP_PATH`: `<backup_dir>/SaaS-Fallback-Origin.txt`      |
 
 ---
 
 ## Output Directory
 
-Create `cloudflare-to-aws-cdn/` under `BASE` if it does not already exist before
+Create `cloudflare-to-aws-cdn/` under the current working directory if it does not already exist before
 writing any output files. Do **not** overwrite existing files without warning the
 operator.
 
@@ -65,7 +62,7 @@ Follow every step in order. Do not skip steps or reorder them.
 Before touching any backup data, read the following reference document:
 
 ```
-BASE/cf-cdn-analyzer/references/cloudflare-rule-execution-order.md
+references/cloudflare-rule-execution-order.md
 ```
 
 This document explains Cloudflare's rule execution model, which provides essential
@@ -133,10 +130,10 @@ Cloudflare exports DNS records as a JSON array inside `DNS.txt`. The file format
   - `hostname` = `name` field (fully qualified hostname)
   - `record_type` = `type` field (A, CNAME, AAAA, etc.)
   - `origin_content` = `content` field (the actual origin: IP address or hostname)
-  - `apex_domain` = derived from `hostname` by stripping the leftmost label(s) until
-    only 2 labels remain (e.g., `cdn.c.example.com` → `c.example.com`). For
-    second-level domains (e.g., `example.com` with no subdomain), use the zone name
-    directly.
+  - `apex_domain` = the `zone_name` field from the DNS record (e.g., `cdn.c.example.com`
+    with `zone_name: "c.example.com"` → `apex_domain = "c.example.com"`). This correctly
+    handles zones at any label depth — `example.com`, `c.example.com`, `sub.c.example.com`
+    — without assuming a fixed number of labels.
 
 **Edge cases:**
 
@@ -189,7 +186,7 @@ Do not write any output files. Do not proceed.
 
 ### Step 5 — Group Hostnames by Apex Domain
 
-For each proxied hostname, determine its apex domain (Step 3 logic applies).
+For each proxied hostname, `apex_domain` = the `zone_name` from its DNS record (Step 3 logic applies).
 
 Build `apex_groups`:
 
@@ -197,12 +194,9 @@ Build `apex_groups`:
 - Value:
   - `hostnames`: sorted list of all proxied hostnames under this apex
   - `suggested_cert_domain`: wildcard cert suggestion
-    - If there is only **one** hostname matching the apex and it equals the apex
-      itself → suggest the exact domain (e.g., `"c.example.com"`)
-    - Otherwise → suggest `"*.c.example.com"` (wildcard covers all subdomains)
-    - If hostnames span more than 2 levels deep (e.g., `deep.sub.c.example.com`) →
-      suggest both `"*.c.example.com"` and note that a SAN cert may be needed for
-      deeper subdomains, adding a `cert_note` field
+    - If there is only **one** hostname and it equals the apex itself → suggest the exact domain
+    - Otherwise → suggest `"*.<apex_domain>"` (wildcard covers all direct subdomains)
+    - If any hostname has more labels than `<subdomain>.<apex_domain>` (i.e., deeper than one level below the zone) → add a `cert_note` field noting that a SAN cert covering deeper subdomains may be needed
 
 ### Step 6 — Write dns_manifest.yaml
 
@@ -316,7 +310,7 @@ Workflow steps above.
 
 | File                                               | When to Read     | Purpose                                              |
 |----------------------------------------------------|------------------|------------------------------------------------------|
-| `cf-cdn-analyzer/references/cloudflare-rule-execution-order.md` | Step 1 (required) | Cloudflare execution model context        |
+| `references/cloudflare-rule-execution-order.md` | Step 1 (required) | Cloudflare execution model context        |
 
 ---
 
@@ -344,7 +338,7 @@ saas_detected: boolean      # always false if we reach this point
 
 proxied_domains:            # list, sorted by hostname
   - hostname: string        # FQDN
-    apex_domain: string     # 2-label apex
+    apex_domain: string     # zone_name from the DNS record (e.g. "c.example.com" or "example.com")
     record_type: string     # A | CNAME | AAAA | etc.
     origin_content: string  # IP or hostname of actual origin
 

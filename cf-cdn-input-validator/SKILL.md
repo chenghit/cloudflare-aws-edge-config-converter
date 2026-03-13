@@ -31,16 +31,12 @@ potentially wrong configuration.
 
 ## Path Resolution
 
-All paths are relative to the **base directory**:
-
-```
-/home/chencch/.openclaw/workspace/cf-converter/
-```
+All paths are relative to the **output directory** (`cloudflare-to-aws-cdn/`) under
+the current working directory when the skill is invoked.
 
 | Alias            | Resolved Path                                                                 |
 |------------------|-------------------------------------------------------------------------------|
-| `BASE`           | `/home/chencch/.openclaw/workspace/cf-converter`                              |
-| `OUTPUT_DIR`     | `BASE/cloudflare-to-aws-cdn/`                                                 |
+| `OUTPUT_DIR`     | `cloudflare-to-aws-cdn/` (relative to current working directory)              |
 | `MANIFEST`       | `OUTPUT_DIR/dns_manifest.yaml`                                                |
 | `USER_INPUT`     | `OUTPUT_DIR/user_input.csv`                                                   |
 | `DOMAIN_SCOPE`   | `OUTPUT_DIR/domain_scope.json`                                                |
@@ -424,6 +420,12 @@ Next steps:
 }
 ```
 
+Note: Fields like `geo_restriction`, `price_class`, `waf_acl_arn`, `http_version`,
+and `ipv6_enabled` are **not** in `domain_scope.json`. They are derived from
+Cloudflare configuration rules during per-domain processing and written into the
+IR accumulator's `distribution_settings` block. `cf-cdn-tf-domain` reads them
+from the IR, not from `domain_scope.json`.
+
 ---
 
 ## Reference Documents
@@ -433,7 +435,7 @@ the following provide context if edge cases arise:
 
 | File                                                              | Purpose                              |
 |-------------------------------------------------------------------|--------------------------------------|
-| `cf-cdn-analyzer/references/cloudflare-rule-execution-order.md`  | Background on what rules will follow |
+| `references/cloudflare-rule-execution-order.md`  | Background on what rules will follow |
 
 ---
 
@@ -452,3 +454,38 @@ the following provide context if edge cases arise:
 - If `dns_manifest.yaml` is regenerated (re-running cf-cdn-dns-parser), `domain_scope.json`
   must be regenerated too. Warn the operator if `dns_manifest.yaml` is newer than
   `domain_scope.json` (if both exist).
+
+---
+
+## Final Response
+
+After completing all steps, end your response with a `---RESULT---` block so the orchestrator can parse the outcome:
+
+```
+---RESULT---
+STATUS: PASS
+FILES_WRITTEN: domain_scope.json
+DOMAINS: 5
+---
+```
+
+Or on failure:
+
+```
+---RESULT---
+STATUS: ERRORS
+ISSUES:
+- Row 3: cert_arn format invalid
+- Row 5: hostname not found in dns_manifest.yaml
+---
+```
+
+Or for unrecoverable issues:
+
+```
+---RESULT---
+STATUS: CANNOT_FIX
+ISSUES:
+- dns_manifest.yaml is missing
+---
+```

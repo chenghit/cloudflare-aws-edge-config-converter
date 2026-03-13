@@ -3,7 +3,7 @@ name: cf-cdn-ir-final-validator
 description: >
   Validator V2 for the Cloudflare → CloudFront migration pipeline.
   Runs after cf-cdn-ir-finalizer completes for all domains.
-  Validates ir_final/<hostname>.yaml files for correct sorting, CloudFront
+  Validates ir/final/<hostname>.yaml files for correct sorting, CloudFront
   hard limits, cross-reference integrity, and required output files.
   Uses the same adversarial checking posture as V1: input is assumed wrong
   until every check passes. Never suggests fixes — only reports errors.
@@ -104,12 +104,12 @@ Rules:
 
 Before any validation logic, read the following documents in order:
 
-1. `cf-converter/cf-cdn-per-domain-processor/SKILL.md` — IR schema reference.
-2. `cf-converter/cf-cdn-ir-chunk-validator/SKILL.md` — V1 validation rules
+1. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` — IR schema reference.
+2. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` — V1 validation rules
    (to understand what was already checked and must not be re-checked here).
-3. `cf-converter/cf-cdn-ir-finalizer/SKILL.md` — finalization logic, including
+3. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` — finalization logic, including
    the sorting algorithm, policy deduplication scheme, and shadowing detection.
-4. `cf-converter/cf-cdn-ir-final-validator/SKILL.md` (this file) — V2 checks.
+4. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-final-validator/SKILL.md` (this file) — V2 checks.
 
 Do not proceed without reading these. The sorting algorithm and policy ID
 format defined in the finalizer SKILL.md are required to verify Check 7.
@@ -520,10 +520,10 @@ Correct file order (ascending precedence):
 
 | Document | Purpose |
 |---|---|
-| `cf-converter/cf-cdn-per-domain-processor/SKILL.md` | IR schema reference |
-| `cf-converter/cf-cdn-ir-chunk-validator/SKILL.md` | V1 checks — do not re-run these |
-| `cf-converter/cf-cdn-ir-finalizer/SKILL.md` | Sorting algorithm, dedup logic, output format |
-| `cf-converter/cf-cdn-ir-final-validator/SKILL.md` | This file — V2 checks |
+| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` | IR schema reference |
+| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` | V1 checks — do not re-run these |
+| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` | Sorting algorithm, dedup logic, output format |
+| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-final-validator/SKILL.md` | This file — V2 checks |
 
 ---
 

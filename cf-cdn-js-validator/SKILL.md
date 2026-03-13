@@ -32,15 +32,17 @@ but **never modifies files** and **never suggests fixes**.
 
 ## Path Resolution
 
+All paths are relative to the current working directory when the skill is invoked.
+
 | Logical name | Resolved path |
 |---|---|
-| Workspace root | `/home/chencch/.openclaw/workspace/cf-converter` |
-| CFF functions dir | `<workspace>/cloudflare-to-aws-cdn/terraform/domains/<hostname>/functions/` |
-| Lambda dir | `<workspace>/cloudflare-to-aws-cdn/terraform/domains/<hostname>/lambda/` |
-| Output JSON | `<workspace>/cloudflare-to-aws-cdn/ir/validation/js/<hostname>-v3.json` |
+| CFF functions dir | `cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/functions/` |
+| Lambda dir | `cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/lambda/` |
+| Domain IR | `cloudflare-to-aws-cdn/ir/final/<hostname>.yaml` |
+| Output JSON | `cloudflare-to-aws-cdn/ir/validation/js/<hostname>-v3.json` |
 
-`<hostname>` is the raw hostname (e.g., `cdn.c.example.com`), not the sanitized
-Terraform name.
+`<hostname>` is the raw hostname (e.g., `cdn.c.example.com`).
+`<sanitized-hostname>` replaces every `.` and `-` with `_` (e.g., `cdn_c_example_com`).
 
 ---
 
@@ -93,14 +95,13 @@ least one file was validated (an empty domain is itself a FAIL — see Step 2).
 
 Before running any checks, read:
 
-1. `<workspace>/cf-cdn-tf-domain/SKILL.md` — to understand what the generator
-   was supposed to produce (JavaScript constraints, file structure, handler
-   signatures, etc.).
-2. The domain's IR: `<workspace>/cloudflare-to-aws-cdn/ir/ir_final/<hostname>.yaml`
+1. `references/unsupported-syntax.md` — tested forbidden ES6+ features.
+2. `references/validation-checklist.md` — complete validation checklist.
+3. The domain's IR: `cloudflare-to-aws-cdn/ir/final/<hostname>.yaml`
    — to understand whether Lambda@Edge escalation was expected, whether KVS is
    in use, and which ops should be present.
 
-If either file is missing, record it as a prerequisite failure in the output
+If the IR file is missing, record it as a prerequisite failure in the output
 JSON under a synthetic file entry with type `"prerequisite"` and halt.
 
 ---
@@ -108,8 +109,10 @@ JSON under a synthetic file entry with type `"prerequisite"` and halt.
 ### Step 1 — Discover files
 
 Enumerate all `.js` files under:
-- `<workspace>/cloudflare-to-aws-cdn/terraform/domains/<hostname>/functions/`
-- `<workspace>/cloudflare-to-aws-cdn/terraform/domains/<hostname>/lambda/`
+- `cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/functions/`
+- `cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/lambda/`
+
+where `<sanitized-hostname>` = raw hostname with every `.` and `-` replaced by `_`.
 
 Use:
 ```bash
@@ -201,16 +204,17 @@ wc -c < "<file_path>"
 - `detail`: `"File size: <N> bytes (limit: 8192)"`.
 - Hard limit for CloudFront Function code package.
 
-#### CHECK CFF-07: Import statement
+#### CHECK CFF-07: Import statement (conditional)
 
 ```bash
-head -1 "<file_path>"
+grep -n 'cf\.kvs\|cf\.updateRequestOrigin\|cf\.edgeLocation' "<file_path>"
 ```
 
-- `status`: `FAIL` if the first line does not contain the exact string
-  `import cf from 'cloudfront'`.
-- `detail`: include the actual first line on FAIL.
-- This is required for CloudFront Functions Runtime 2.0 to access the `cf` API.
+- If any of these `cf.*` API calls are present in the file, then the first line
+  MUST be `import cf from 'cloudfront'`.
+- If none of these calls are present, the import is optional — skip this check.
+- `status`: `FAIL` only if `cf.*` API is used but the import is absent.
+- `detail`: include the actual first line and the found `cf.*` usage on FAIL.
 
 #### CHECK CFF-08: Handler signature
 
@@ -244,15 +248,7 @@ grep -n '\.catch(' "<file_path>"
 - `status`: `FAIL` if either grep returns any output.
 - `detail`: include all matching lines on FAIL.
 
-#### CHECK CFF-11: No `var` declarations
-
-```bash
-grep -n '\bvar ' "<file_path>"
-```
-
-- `status`: `FAIL` if grep returns any output.
-- `detail`: include all matching lines on FAIL.
-- `const` and `let` are required; `var` is not allowed in Runtime 2.0 strict mode.
+#### CHECK CFF-11: No `.then` / `.catch` chains (moved — see CFF-10)
 
 ---
 
@@ -378,7 +374,7 @@ Rules:
 - Include the actual grep output, line numbers, byte counts, or exit codes in
   `detail` — not just "check failed".
 
-Write the JSON to: `<workspace>/cloudflare-to-aws-cdn/ir/validation/js/<hostname>-v3.json`
+Write the JSON to: `cloudflare-to-aws-cdn/ir/validation/js/<hostname>-v3.json`
 
 Create the parent directory if it does not exist.
 
@@ -425,11 +421,11 @@ NOT suggest what the fix should be. Report and stop.
 | `CFF-04` | cloudfront_function | No object destructuring |
 | `CFF-05` | cloudfront_function | No `Promise.` usage |
 | `CFF-06` | cloudfront_function | File size ≤ 8192 bytes |
-| `CFF-07` | cloudfront_function | First line is `import cf from 'cloudfront'` |
+| `CFF-07` | cloudfront_function | `import cf from 'cloudfront'` required only when `cf.*` API is used |
 | `CFF-08` | cloudfront_function | Contains `async function handler(event)` |
 | `CFF-09` | cloudfront_function | Contains a valid return statement |
 | `CFF-10` | cloudfront_function | No `.then()` / `.catch()` chains |
-| `CFF-11` | cloudfront_function | No `var` declarations |
+| `CFF-11` | cloudfront_function | (removed) |
 | `LE-01`  | lambda_edge | Node.js syntax check |
 | `LE-02`  | lambda_edge | Valid handler export pattern |
 | `LE-03`  | lambda_edge | File size ≤ 1 MB |
@@ -456,12 +452,8 @@ treat any field not present in V3 schema as ignored.
 
 ## Reference Documents
 
-- `<workspace>/cf-cdn-tf-domain/SKILL.md` — generator spec (what was supposed
-  to be generated)
-- `<workspace>/cloudflare-to-aws-cdn/ir/ir_final/<hostname>.yaml` — domain IR
-- `<workspace>/cloudflare-to-aws-cdn/ir/validation/js/<hostname>-v1.json` —
-  V1 validator output (if present, for comparison)
-- `<workspace>/cloudflare-to-aws-cdn/ir/validation/js/<hostname>-v2.json` —
-  V2 validator output (if present, for comparison)
+- `references/unsupported-syntax.md` — **MUST READ.** Tested forbidden ES6+ features (optional chaining, destructuring) with evidence from live testing. These cause silent runtime errors.
+- `references/validation-checklist.md` — Complete validation checklist covering syntax, async ops, rule execution order, continent logic, bulk redirects, query string handling.
+- `cloudflare-to-aws-cdn/ir/final/<hostname>.yaml` — domain IR
 - CloudFront Functions Runtime 2.0 developer guide (JavaScript constraints)
 - Lambda@Edge developer guide (Node.js runtime, event shape)

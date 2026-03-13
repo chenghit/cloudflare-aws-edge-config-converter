@@ -2,7 +2,7 @@
 name: cf-cdn-tf-domain
 description: >
   Main Terraform generator for a single CDN domain. Reads the domain's final IR
-  YAML (ir_final/<hostname>.yaml) and the shared dedup manifest, then emits all
+  YAML (ir/final/<hostname>.yaml) and the shared dedup manifest, then emits all
   Terraform and JavaScript artefacts needed to deploy a CloudFront distribution
   for that domain. Invoked once per domain; multiple domains may be processed
   in parallel. Handles function-size management, Lambda@Edge fallback, KVS data
@@ -18,14 +18,16 @@ Generates the complete per-domain Terraform workspace under
 
 ## Path Resolution
 
+All paths are relative to the current working directory when the skill is invoked.
+
 | Logical name | Resolved path |
 |---|---|
-| Workspace root | `/home/chencch/.openclaw/workspace/cf-converter` |
-| Domain IR (input) | `<workspace>/cloudflare-to-aws-cdn/ir/ir_final/<hostname>.yaml` |
-| Dedup manifest (read-only) | `<workspace>/cloudflare-to-aws-cdn/ir/shared/dedup_manifest.json` |
-| Domain scope | `<workspace>/cloudflare-to-aws-cdn/ir/domain_scope.json` |
-| Output directory | `<workspace>/cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/` |
+| Domain IR (input) | `cloudflare-to-aws-cdn/ir/final/<hostname>.yaml` |
+| Dedup manifest (read-only) | `cloudflare-to-aws-cdn/shared/dedup_manifest.json` |
+| Domain scope | `cloudflare-to-aws-cdn/domain_scope.json` |
+| Output directory | `cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/` |
 | Shared module source | `../../modules/cloudfront_distribution` (relative, for Terraform `source`) |
+| Module template | `references/modules/cloudfront_distribution/` (in this skill directory) |
 
 **Sanitized hostname**: replace `.` and `-` with `_`, lowercase.
 Example: `cdn.c.example.com` → `cdn_c_example_com`.
@@ -36,10 +38,14 @@ Example: `cdn.c.example.com` → `cdn_c_example_com`.
 
 ```
 cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/
-  main.tf                   ← aws_cloudfront_distribution (always)
+  main.tf                   ← module call to cloudfront_distribution (always)
+  outputs.tf                ← distribution_id, domain_name outputs (always)
   functions.tf              ← aws_cloudfront_function resources (always)
   kvs.tf                    ← KVS store + data (only if kvs_requirements non-empty)
   kvs-data.json             ← bulk redirect seed data (only if kvs_requirements non-empty)
+  functions/
+    <sanitized_name>_viewer_request.js   ← always (unless all logic in Lambda@Edge)
+    <sanitized_name>_viewer_response.js  ← only if viewer_response_ops non-empty
   lambda/                   ← only if lambda_edge in IR is non-null
     origin_request_handler.js   ← only if lambda_edge.origin_request is set
     viewer_request_handler.js   ← only if lambda_edge.viewer_request is set (last resort)
@@ -53,56 +59,113 @@ cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/
 
 Before generating any code, read:
 
-1. `<workspace>/cf-cdn-ir-builder/SKILL.md` — understand the IR schema, field
-   names, and what viewer_request_ops / origin_request_ops contain.
-2. `<workspace>/cloudflare-to-aws-cdn/ir/ir_final/<hostname>.yaml` — the actual
+1. `references/modules/cloudfront_distribution/variables.tf` — the module's
+   input variables. Every variable you pass in `main.tf` must match a declared
+   variable here. Do not invent variable names.
+2. `references/modules/cloudfront_distribution/main.tf` — the module
+   implementation. Understand what each variable controls so you pass correct
+   values.
+3. `references/cloudfront/runtime2-guide.md` — **MUST READ before generating any JavaScript.** Contains correct API signatures for `rawQueryString()`, `cf.kvs()`, `cf.updateRequestOrigin()`, supported/forbidden syntax, and complete code patterns.
+4. `references/cloudfront/operator-conversion.md` — Cloudflare expression operators → JS code patterns. Read before generating condition logic.
+5. `references/cloudfront/unsupported-syntax.md` — Tested forbidden ES6+ features. Read before generating any JS.
+6. `cloudflare-to-aws-cdn/ir/final/<hostname>.yaml` — the actual
    domain IR you will process.
-3. `<workspace>/cloudflare-to-aws-cdn/ir/shared/dedup_manifest.json` — to
+7. `cloudflare-to-aws-cdn/shared/dedup_manifest.json` — to
    resolve policy hashes to Terraform resource addresses.
-4. `<workspace>/cloudflare-to-aws-cdn/ir/domain_scope.json` — global settings
-   such as default origin, WAF ACL ARN, logging bucket, tags, etc.
+8. `cloudflare-to-aws-cdn/domain_scope.json` — global settings
+   such as default origin, WAF ACL ARN, tags, etc.
 
-If any of files 2–4 is missing, halt and report the missing path.
+If any of files 6–8 is missing, halt and report the missing path.
+
+Additional references to consult as needed during codegen:
+- `references/cloudfront/cloudfront-event-structure.md` — event object shape
+- `references/cloudfront/conversion-examples.md` — URL field mapping and wildcard patterns
+- `references/cloudfront/cloudfront-viewer-headers.md` — header mapping table
+- `references/cloudfront/kvs-usage-and-limits.md` — KVS constraints
 
 ---
 
 ### Step 1 — Parse inputs and derive identifiers
 
-From the IR YAML, extract the following top-level fields (non-exhaustive; read
-the IR schema for the full list):
+**From the IR metadata document** (`cloudflare-to-aws-cdn/ir/final/<hostname>.yaml`, first document):
 
 ```
 hostname:              cdn.c.example.com
-sanitized_name:        cdn_c_example_com        # computed
-cert_arn:              "arn:aws:acm:..." | ""   # blank → Pattern B
-origin_domain:         my-origin.example.com
-origin_protocol:       https | http
-cache_policy_hash:     a3f2b1c4
-origin_request_policy_hash: ...
-response_headers_policy_hash: ...
-viewer_request_ops:    [ ... ]
-origin_request_ops:    [ ... ]   # from IR; may be empty
-kvs_requirements:      [ ... ]   # may be empty
-lambda_edge:           null | { origin_request: ..., viewer_request: ... }
-geo_restriction:       none | whitelist | blacklist
-geo_locations:         [...]
-price_class:           PriceClass_All | PriceClass_100 | PriceClass_200
-waf_acl_arn:           "arn:..." | null
-logging_bucket:        "..." | null
-aliases:               [ "cdn.c.example.com" ]
-default_root_object:   "" | "index.html"
-http_version:          http2 | http2and3
-ipv6_enabled:          true | false
+sanitized_name:        cdn_c_example_com        # computed: replace . and - with _
+cert_arn_mode:         "explicit" | "data_source"
+cert_arn:              "arn:aws:acm:..." | null  # null when cert_arn_mode == "data_source"
+apex_domain:           "c.example.com"           # used for wildcard cert derivation
+kvs_requirements:      { needs_redirects, needs_continent, needs_eu }
+kvs_data:              [...]
+custom_error_responses: [...]                    # distribution-level error pages (may be empty)
+lambda_edge:           { origin_request, origin_response }  # null if no Lambda@Edge needed
 ```
 
-Derive:
-- `tf_resource_name` = `cdn_c_example_com` (same as sanitized_name)
-- `cache_policy_ref` = `aws_cloudfront_cache_policy.policy_<cache_policy_hash>.id`
-  (or `policy_bypass_<hash>` for bypass policies; check `dedup_manifest.json`)
-- `orp_ref` = `aws_cloudfront_origin_request_policy.policy_<orp_hash>.id`
-  (or null if no ORP hash in IR)
-- `rhp_ref` = `aws_cloudfront_response_headers_policy.policy_<rhp_hash>.id`
-  (or null if no RHP hash in IR)
+**From the IR cache_behavior documents** (all documents after the first):
+
+```
+distribution_settings.viewer_protocol_policy
+distribution_settings.minimum_protocol_version
+distribution_settings.http_version
+distribution_settings.is_ipv6_enabled
+distribution_settings.geo_restriction_type      # "none" | "whitelist" | "blacklist"
+distribution_settings.geo_restriction_locations # list of country codes
+distribution_settings.price_class               # "PriceClass_All" | "PriceClass_100" | "PriceClass_200"
+distribution_settings.waf_acl_arn               # null if no WAF
+distribution_settings.default_root_object       # "" if not set
+```
+
+Use the `distribution_settings` from the **default cache behavior** (`path_pattern: "*"`)
+as the distribution-level settings. These apply to the entire CloudFront distribution.
+
+**From `cloudflare-to-aws-cdn/shared/dedup_manifest.json`:**
+
+```
+cache_policy_id:              "policy-<hash>"   # look up by matching config hash
+origin_request_policy_id:     "policy-<hash>"   # null if no ORP
+response_headers_policy_id:   "policy-<hash>"   # null if no RHP
+```
+
+Derive Terraform data source lookups (each domain is an independent Terraform root
+module — it cannot reference resources in `terraform/shared/` directly):
+
+For each unique policy ID referenced by this domain's cache behaviors, generate a
+`data` source that looks up the policy by its **name** (as generated by
+`cf-cdn-tf-shared-policies`):
+
+```hcl
+# Cache policy data sources
+data "aws_cloudfront_cache_policy" "policy_<policy_id>" {
+  name = "cfcdn-cache-policy-<policy_id>"
+}
+
+# If the cache policy has bypass: true, the name is different:
+data "aws_cloudfront_cache_policy" "policy_<policy_id>" {
+  name = "cfcdn-cache-bypass-<policy_id>"
+}
+
+# Origin request policy data sources (only for non-null ORP references)
+data "aws_cloudfront_origin_request_policy" "policy_<policy_id>" {
+  name = "cfcdn-orp-<policy_id>"
+}
+
+# Response headers policy data sources (only for non-null RHP references)
+data "aws_cloudfront_response_headers_policy" "policy_<policy_id>" {
+  name = "cfcdn-rhp-<policy_id>"
+}
+```
+
+Then use these references in the module call:
+- `cache_policy_ref` = `data.aws_cloudfront_cache_policy.policy_<policy_id>.id`
+- `orp_ref` = `data.aws_cloudfront_origin_request_policy.policy_<policy_id>.id` (or null)
+- `rhp_ref` = `data.aws_cloudfront_response_headers_policy.policy_<policy_id>.id` (or null)
+
+To determine whether a cache policy uses `cfcdn-cache-policy-` or `cfcdn-cache-bypass-`
+prefix, check the `config.bypass` field in the dedup manifest entry for that policy ID.
+
+**Important**: Only generate data sources for policy IDs actually used by this domain.
+Collect all unique policy IDs from the default behavior and all ordered behaviors,
+then deduplicate before generating data source blocks.
 
 ---
 
@@ -188,32 +251,53 @@ request.uri = request.uri.replace(/<pattern>/, "<replacement>");
 if (<condition>) {
   cf.updateRequestOrigin({
     domainName: "<new_origin>",
-    port: <443|80>,
-    protocol: "<https|http>",
-    path: "<prefix_path_or_empty_string>"
+    originPath: "<prefix_path_or_empty_string>",
+    customOriginConfig: {
+      port: <443|80>,
+      protocol: "<https|http>",
+      sslProtocols: ["TLSv1.2"]
+    }
   });
 }
 ```
+
+Omit `customOriginConfig` entirely if port/protocol match the existing origin
+(i.e., only `domainName` changes). Omit `originPath` if empty string.
+See `references/cloudfront/runtime2-guide.md` for full `updateRequestOrigin()` API.
 
 **4. bulk_redirects** — if `kvs_requirements` is non-empty AND bulk_redirect ops exist:
 
 ```javascript
 // bulk_redirects via KVS
 const kvsHandle = cf.kvs();
-const lookupKey = 'redirect:' + request.uri;
+const host = request.headers.host.value;
+const uri = request.uri;
+
+// Try exact host match
 let kvsValue = null;
 try {
-  kvsValue = await kvsHandle.get(lookupKey);
-} catch (e) {
-  // key not found — continue
+  kvsValue = await kvsHandle.get('redirect:' + host + uri);
+} catch (e) {}
+
+// Try subdomain match if exact match failed
+if (kvsValue === null && host.includes('.')) {
+  const dotDomain = '.' + host.substring(host.indexOf('.'));
+  try {
+    kvsValue = await kvsHandle.get('redirect:' + dotDomain + uri);
+  } catch (e) {}
 }
+
 if (kvsValue !== null) {
   const parts = kvsValue.split('|');
   const statusCode = parseInt(parts[0], 10);
-  const preserveQS = parts[1] === 'true';
+  const preserveQS = parts[1] === '1';
   let target = parts[2];
-  if (preserveQS && request.querystring) {
-    target = target + '?' + request.querystring;
+  if (preserveQS) {
+    const qs = request.rawQueryString();
+    if (qs) {
+      const sep = target.includes('?') ? '&' : '?';
+      target = target + sep + qs;
+    }
   }
   return {
     statusCode: statusCode,
@@ -250,6 +334,47 @@ if (!request.headers["<header-name-lowercase>"]) {
 - First line MUST be: `import cf from 'cloudfront';`
 - Handler MUST be: `async function handler(event) {`
 - Handler MUST end with: `return request;` (or an early return with statusCode)
+- **Prefer string methods over regex** for simple operators: use `startsWith()`,
+  `endsWith()`, `includes()`, `===` instead of regex when the Cloudflare expression
+  uses `eq`, `contains`, `starts_with`, `ends_with`, or simple `wildcard` patterns.
+  See `references/cloudfront/operator-conversion.md` for the full mapping.
+- **Preserve regex from `matches` operator unchanged**: when the Cloudflare expression
+  uses `matches` with a regex pattern, pass the regex through to `/.../` in JS without
+  attempting to simplify it.
+
+**Continent matching codegen** (when `kvs_requirements.needs_continent` is true):
+
+```javascript
+// Continent lookup — NEVER compare country code to continent code directly
+const countryHeader = request.headers['cloudfront-viewer-country'];
+const country = countryHeader ? countryHeader.value : '';
+let continent = '';
+if (country) {
+  try { continent = await kvsHandle.get('continent:' + country); } catch (e) {}
+}
+if (continent === 'AS') {
+  // Asia-specific logic
+}
+```
+
+**EU country check codegen** (when `kvs_requirements.needs_eu` is true):
+
+```javascript
+let isEU = false;
+if (country) {
+  isEU = await kvsHandle.exists('eu:' + country);
+}
+```
+
+**Header value substitution**: If any `set_header` op has a value containing
+`"Cloudflare"`, replace with `"CloudFront"` in the generated JS.
+Example: `request.headers['x-cdn'] = {value: 'CloudFront'};`
+
+**`CloudFront-Viewer-Address` format**: Value is `ip:port`. To extract IP only:
+```javascript
+const addr = request.headers['cloudfront-viewer-address'];
+const ip = addr ? addr.value.split(':')[0] : '';
+```
 
 #### 2b. Size check and escalation
 
@@ -259,12 +384,12 @@ After generating the draft, calculate the byte count of the draft string.
 
 ```
 draft size ≤ 6KB?
-  → YES: use as-is, write to functions/<hostname>_viewer_request.js
+  → YES: use as-is, write to functions/<sanitized_name>_viewer_request.js
   → NO:  minify (Step 2c)
 
 After minification:
   minified size ≤ 10KB?
-    → YES: write minified to functions/<hostname>_viewer_request.js
+    → YES: write minified to functions/<sanitized_name>_viewer_request.js
     → NO:  escalate (Step 2d)
 ```
 
@@ -295,7 +420,7 @@ If the minified size is still > 10 KB:
 **Case B — no origin_override ops, OR Case A step 5**:
 1. Move ALL viewer_request logic (entire function body) to
    `lambda/viewer_request_handler.js` as Lambda@Edge
-2. Replace `functions/<hostname>_viewer_request.js` with a minimal pass-through:
+2. Replace `functions/<sanitized_name>_viewer_request.js` with a minimal pass-through:
    ```javascript
    import cf from 'cloudfront';
    async function handler(event) {
@@ -341,27 +466,51 @@ Lambda@Edge constraints:
 
 ### Step 3 — Generate `functions.tf`
 
-This file declares all `aws_cloudfront_function` resources. One function per
-`.js` file in the `functions/` directory that is not a pass-through.
+This file declares all `aws_cloudfront_function` resources.
 
+**viewer_request function** (always, unless omitted per Step 2e):
 ```hcl
-# AUTO-GENERATED by cf-cdn-tf-domain skill
-# DO NOT EDIT MANUALLY
-
 resource "aws_cloudfront_function" "<sanitized_name>_viewer_request" {
   name    = "cfcdn-<sanitized_name>-viewer-request"
   runtime = "cloudfront-js-2.0"
   publish = true
-  code    = file("${path.module}/functions/<hostname>_viewer_request.js")
+  code    = file("${path.module}/functions/<sanitized_name>_viewer_request.js")
 }
 ```
 
-If a viewer_request function file exists (non-trivial), generate the resource.
-If only a pass-through exists and Lambda@Edge covers all behaviour, omit the
-CloudFront Function resource (do not reference an empty function).
+**viewer_response function** (only if `viewer_response_ops` in the IR is non-empty):
+
+Generate `functions/<sanitized_name>_viewer_response.js` with this structure:
+```javascript
+async function handler(event) {
+  const response = event.response;
+
+  // --- viewer_response_ops (set_header / add_header / remove_header) ---
+  // (generated code here)
+  // Note: can modify/add/delete response headers and cookies
+  // Note: cannot read the original response body (can only replace it entirely)
+  // Note: this function does NOT execute when origin returns HTTP 400+
+
+  return response;
+}
+```
+
+Note: `import cf from 'cloudfront'` is only needed if the function uses `cf.*` APIs (e.g., KVS). For header-only operations it is not required.
+
+Then declare the Terraform resource:
+```hcl
+resource "aws_cloudfront_function" "<sanitized_name>_viewer_response" {
+  name    = "cfcdn-<sanitized_name>-viewer-response"
+  runtime = "cloudfront-js-2.0"
+  publish = true
+  code    = file("${path.module}/functions/<sanitized_name>_viewer_response.js")
+}
+```
+
+The viewer_response function is associated in `main.tf` with `event_type = "viewer-response"`.
 
 If there are origin_request ops handled at CFF level (not escalated to Lambda),
-add a second resource for origin_request similarly.
+add a third resource for origin_request similarly.
 
 ---
 
@@ -390,19 +539,18 @@ output "<sanitized_name>_kvs_arn" {
 
 ### Step 5 — Generate `kvs-data.json` (conditional)
 
-Only generate if `kvs_requirements` is non-empty.
+Only generate if `kvs_requirements` in the metadata document is non-empty (any field is `true`).
 
-Collect all bulk redirect entries from `viewer_request_ops` where type ==
-`bulk_redirect`. For each entry:
-- `key`: `"redirect:<source_path>"`
-- `value`: `"<status_code>|<preserve_querystring>|<target>"`
-  - `preserve_querystring`: `"true"` or `"false"`
+Read `kvs_data` directly from the metadata document of the final IR YAML. Each entry has:
+- `key`: e.g. `"redirect:example.com/old-path"` (includes host)
+- `value`: e.g. `"301|0|https://example.com/new-path"` (status|preserve_qs(1/0)|target)
 
 ```json
 {
   "data": [
-    { "key": "redirect:/old-path", "value": "301|false|/new-path" },
-    { "key": "redirect:/promo",    "value": "302|true|/sale" }
+    { "key": "redirect:example.com/old-path", "value": "301|0|https://example.com/new-path" },
+    { "key": "redirect:example.com/promo",    "value": "302|1|https://example.com/sale" },
+    { "key": "redirect:.example.com/promo",   "value": "302|1|https://example.com/sale" }
   ]
 }
 ```
@@ -413,7 +561,9 @@ Write to: `<output_dir>/kvs-data.json`
 
 ### Step 6 — Generate `main.tf`
 
-This is the core CloudFront distribution definition.
+This file calls the shared `cloudfront_distribution` module. It must NOT contain
+a `resource "aws_cloudfront_distribution"` block — all distribution logic lives
+in the module.
 
 #### 6a. ACM certificate locals / data
 
@@ -436,10 +586,39 @@ data "aws_acm_certificate" "<sanitized_name>" {
 }
 ```
 
-Wildcard domain derivation: if hostname is `cdn.c.example.com`, the wildcard
-is `*.c.example.com`. If hostname is a bare apex `example.com`, use `example.com`.
+Wildcard domain derivation: use `apex_domain` from the IR metadata document.
+- If hostname == apex_domain (bare zone apex) → use exact domain (e.g. `"c.example.com"`)
+- Otherwise → use `"*.<apex_domain>"` (e.g. `"*.c.example.com"`)
 
-#### 6b. Distribution resource
+This correctly handles zones at any depth without assuming a fixed label count.
+
+#### 6b. Shared policy data sources
+
+Collect all unique policy IDs referenced by this domain's behaviors (default +
+ordered). For each unique ID, generate a `data` source block. These must appear
+before the module call.
+
+```hcl
+# --- Shared policy lookups (created by cf-cdn-tf-shared-policies) ---
+
+data "aws_cloudfront_cache_policy" "policy_<policy_id>" {
+  name = "cfcdn-cache-policy-<policy_id>"
+  # Use "cfcdn-cache-bypass-<policy_id>" if dedup manifest config.bypass == true
+}
+
+data "aws_cloudfront_origin_request_policy" "policy_<policy_id>" {
+  name = "cfcdn-orp-<policy_id>"
+}
+
+data "aws_cloudfront_response_headers_policy" "policy_<policy_id>" {
+  name = "cfcdn-rhp-<policy_id>"
+}
+```
+
+Only generate data sources for policy types actually used. If no behavior
+references an ORP, omit all ORP data sources. Same for RHP.
+
+#### 6c. Module call
 
 ```hcl
 # AUTO-GENERATED by cf-cdn-tf-domain skill
@@ -461,121 +640,166 @@ provider "aws" {
 
 # <Pattern A locals OR Pattern B data source here>
 
-resource "aws_cloudfront_distribution" "<sanitized_name>" {
-  aliases             = [<quoted list of aliases>]
-  comment             = "CDN for <hostname> — migrated from Cloudflare"
-  default_root_object = "<default_root_object>"
-  enabled             = true
+module "cdn_<sanitized_name>" {
+  source = "../../modules/cloudfront_distribution"
+
+  hostname    = "<hostname>"
+  aliases     = [<quoted list of aliases>]
+  price_class = "<price_class>"
   http_version        = "<http_version>"
   is_ipv6_enabled     = <true|false>
-  price_class         = "<price_class>"
   wait_for_deployment = false
 
-  # ── Origin ──────────────────────────────────────────────────────────────────
-  origin {
-    domain_name = "<origin_domain>"
-    origin_id   = "primary"
+  # ACM certificate — Pattern A or B
+  acm_certificate_arn = local.cert_arn_<sanitized_name>   # Pattern A
+  # acm_certificate_arn = data.aws_acm_certificate.<sanitized_name>.arn  # Pattern B
 
-    custom_origin_config {
-      http_port              = 80
-      https_port             = 443
-      origin_protocol_policy = "<origin_protocol>-only"
-      origin_ssl_protocols   = ["TLSv1.2"]
-    }
-  }
+  # Origins
+  origins = [
+    {
+      origin_id             = "<origin_id>"
+      domain_name           = "<origin_domain>"
+      protocol_policy       = "<https-only|http-only|match-viewer>"
+      http_port             = 80
+      https_port            = 443
+      custom_origin_headers = [
+        # { name = "X-Header", value = "value" }
+      ]
+    },
+    # additional origins if present
+  ]
 
-  # ── Default cache behaviour ──────────────────────────────────────────────────
-  default_cache_behavior {
-    allowed_methods        = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
-    cached_methods         = ["GET", "HEAD"]
-    target_origin_id       = "primary"
-    viewer_protocol_policy = "redirect-to-https"
-    compress               = true
+  # Default cache behavior
+  default_target_origin_id           = "<origin_id>"
+  default_viewer_protocol_policy     = "redirect-to-https"
+  default_compress                   = true
+  default_cache_policy_id            = data.aws_cloudfront_cache_policy.policy_<policy_id>.id
+  default_origin_request_policy_id   = data.aws_cloudfront_origin_request_policy.policy_<policy_id>.id   # omit line if null
+  default_response_headers_policy_id = data.aws_cloudfront_response_headers_policy.policy_<policy_id>.id # omit line if null
 
-    cache_policy_id            = "<cache_policy_ref>"
-    <# only include orp line if orp_ref is non-null #>
-    origin_request_policy_id   = "<orp_ref>"
-    <# only include rhp line if rhp_ref is non-null #>
-    response_headers_policy_id = "<rhp_ref>"
-
-    <# CloudFront Function associations — include only if functions exist #>
-    function_association {
+  default_function_associations = [
+    # Include only if viewer_request CloudFront Function exists
+    {
       event_type   = "viewer-request"
       function_arn = aws_cloudfront_function.<sanitized_name>_viewer_request.arn
-    }
+    },
+    # Include only if viewer_response CloudFront Function exists (viewer_response_ops non-empty)
+    {
+      event_type   = "viewer-response"
+      function_arn = aws_cloudfront_function.<sanitized_name>_viewer_response.arn
+    },
+  ]
 
-    <# Lambda@Edge associations — include only if lambda_edge is non-null in IR #>
-    lambda_function_association {
+  default_lambda_function_associations = [
+    # Include only if lambda_edge.origin_request is set in IR
+    {
       event_type   = "origin-request"
-      lambda_arn   = "<lambda_arn_placeholder>"
+      lambda_arn   = "REPLACE_WITH_DEPLOYED_LAMBDA_ARN"
       include_body = false
-    }
-  }
+    },
+  ]
 
-  # ── Restrictions ──────────────────────────────────────────────────────────────
-  restrictions {
-    geo_restriction {
-      restriction_type = "<none|whitelist|blacklist>"
-      <# omit locations line if restriction_type == "none" #>
-      locations        = [<sorted quoted list of country codes>]
-    }
-  }
+  # Ordered cache behaviors (one entry per path pattern, sorted by precedence)
+  ordered_cache_behaviors = [
+    {
+      path_pattern               = "<path_pattern>"
+      target_origin_id           = "<origin_id>"
+      viewer_protocol_policy     = "redirect-to-https"
+      compress                   = true
+      cache_policy_id            = data.aws_cloudfront_cache_policy.policy_<policy_id>.id
+      origin_request_policy_id   = data.aws_cloudfront_origin_request_policy.policy_<policy_id>.id   # omit if null
+      response_headers_policy_id = data.aws_cloudfront_response_headers_policy.policy_<policy_id>.id # omit if null
+      function_associations = [
+        # { event_type = "viewer-request", function_arn = "..." }
+      ]
+      lambda_function_associations = [
+        # { event_type = "origin-request", lambda_arn = "...", include_body = false }
+      ]
+    },
+  ]
 
-  # ── Viewer certificate ────────────────────────────────────────────────────────
-  viewer_certificate {
-    <# Pattern A: #>
-    acm_certificate_arn      = local.cert_arn_<sanitized_name>
-    <# Pattern B: #>
-    acm_certificate_arn      = data.aws_acm_certificate.<sanitized_name>.arn
+  # Geo restriction
+  geo_restriction_type      = "none"
+  geo_restriction_locations = []
 
-    ssl_support_method       = "sni-only"
-    minimum_protocol_version = "TLSv1.2_2021"
-  }
-
-  <# WAF — only include if waf_acl_arn is non-null #>
+  # WAF — omit if waf_acl_arn is null
   web_acl_id = "<waf_acl_arn>"
 
-  <# Logging — only include if logging_bucket is non-null #>
-  logging_config {
-    bucket          = "<logging_bucket>"
-    include_cookies = false
-    prefix          = "<hostname>/"
-  }
-
   tags = {
-    ManagedBy   = "terraform"
-    MigratedFrom = "cloudflare"
-    Domain      = "<hostname>"
+    Domain = "<hostname>"
   }
 }
 ```
 
+**`custom_error_response` blocks** (distribution-level, outside the module call):
+
+If `custom_error_responses` in the IR metadata document is non-empty, add these blocks
+directly to the `aws_cloudfront_distribution` resource inside the module. Since the
+module wraps the distribution, you must pass them as a variable. Add to the module call:
+
+```hcl
+  custom_error_responses = [
+    {
+      error_code            = 404
+      response_page_path    = "/errors/404.html"
+      response_code         = 404
+      error_caching_min_ttl = 10
+    },
+  ]
+```
+
+And add the corresponding variable to `references/modules/cloudfront_distribution/variables.tf`
+and a `dynamic "custom_error_response"` block to `references/modules/cloudfront_distribution/main.tf`.
+
 **Important rules**:
-- Remove every comment line (lines starting with `<#`) from the actual output —
-  they are instructions to you, not Terraform HCL.
-- Include only the blocks and attributes that are relevant (non-null, non-empty).
-- `origin_protocol_policy` must be exactly `"https-only"` or `"http-only"` or
-  `"match-viewer"` (not `"https"` or `"http"`).
-- For `geo_restriction`, if `restriction_type == "none"`, the `locations` list
-  MUST be omitted (Terraform will error if both `none` and locations are present).
-- The `lambda_arn_placeholder` for Lambda@Edge is intentionally a placeholder
-  string (`"REPLACE_WITH_DEPLOYED_LAMBDA_ARN"`) with a comment instructing the
-  operator to fill it in after deploying the Lambda function. This is because
-  Lambda@Edge ARNs include the function version and cannot be predicted at
-  generation time.
+- Remove every comment line (lines starting with `#` that are instructions)
+  from the actual output — emit only real HCL.
+- Include only the variables that are relevant (non-null, non-empty). Omit
+  optional variables entirely rather than passing `null`.
+- `protocol_policy` must be exactly `"https-only"`, `"http-only"`, or
+  `"match-viewer"`.
+- For `geo_restriction_type == "none"`, set `geo_restriction_locations = []`.
+- The `lambda_arn` placeholder `"REPLACE_WITH_DEPLOYED_LAMBDA_ARN"` is
+  intentional — Lambda@Edge ARNs include the version and cannot be predicted
+  at generation time. Add a comment instructing the operator to fill it in.
+- `default_function_associations` and `default_lambda_function_associations`
+  must be omitted entirely (not set to `[]`) if there are no associations,
+  because the module defaults to `[]` already.
+- Policy refs (`cache_policy_ref`, `orp_ref`, `rhp_ref`) are Terraform
+  expressions like `data.aws_cloudfront_cache_policy.policy_<id>.id` — they
+  reference data sources that look up shared policies by name. They must not be
+  quoted as strings.
 
 ---
 
 ### Step 7 — Write all files
 
 Write files in this order:
-1. `functions/<hostname>_viewer_request.js` (always, unless omitted per Step 2e)
-2. `lambda/origin_request_handler.js` (if generated)
-3. `lambda/viewer_request_handler.js` (if generated)
-4. `kvs-data.json` (if kvs_requirements non-empty)
-5. `functions.tf`
-6. `kvs.tf` (if kvs_requirements non-empty)
-7. `main.tf`
+1. Copy the module to `cloudflare-to-aws-cdn/terraform/modules/cloudfront_distribution/`:
+   - Copy `references/modules/cloudfront_distribution/main.tf`
+   - Copy `references/modules/cloudfront_distribution/variables.tf`
+   - Copy `references/modules/cloudfront_distribution/outputs.tf`
+   - Skip if the files already exist (another domain invocation may have written them first)
+2. `functions/<sanitized_name>_viewer_request.js` (always, unless omitted per Step 2e)
+3. `functions/<sanitized_name>_viewer_response.js` (only if `viewer_response_ops` non-empty)
+4. `lambda/origin_request_handler.js` (if generated)
+5. `lambda/viewer_request_handler.js` (if generated)
+6. `kvs-data.json` (if kvs_requirements non-empty)
+7. `functions.tf`
+8. `kvs.tf` (if kvs_requirements non-empty)
+9. `outputs.tf` — always write with these outputs:
+   ```hcl
+   output "distribution_id" {
+     value = module.cdn_<sanitized_name>.distribution_id
+   }
+   output "domain_name" {
+     value = module.cdn_<sanitized_name>.domain_name
+   }
+   output "hosted_zone_id" {
+     value = module.cdn_<sanitized_name>.hosted_zone_id
+   }
+   ```
+10. `main.tf`
 
 Create all parent directories as needed.
 
@@ -587,18 +811,22 @@ After writing all files:
 
 1. **main.tf**: Verify every opened `{` has a matching `}`. Count opening and
    closing braces — they must match.
-2. **viewer_request.js**: Verify file size ≤ 8192 bytes. Report the actual byte
+2. **main.tf**: Verify it contains `module "cdn_<sanitized_name>"` and does NOT
+   contain `resource "aws_cloudfront_distribution"` (distribution must be in module).
+3. **main.tf**: Verify `source = "../../modules/cloudfront_distribution"` is present.
+4. **viewer_request.js**: Verify file size ≤ 8192 bytes. Report the actual byte
    count. If exceeded, re-trigger Step 2d escalation.
-3. **viewer_request.js**: Verify first line is exactly `import cf from 'cloudfront';`
-4. **viewer_request.js**: Verify `async function handler(event)` is present.
-5. **viewer_request.js**: Scan for `?.` — FAIL and escalate if found.
-6. **viewer_request.js**: Scan for `const [` or `let [` or `const {` or `let {`
+5. **viewer_request.js**: Verify `async function handler(event)` is present.
+6. **viewer_request.js**: Scan for `?.` — FAIL and escalate if found.
+7. **viewer_request.js**: Scan for `const [` or `let [` or `const {` or `let {`
    — FAIL and escalate if found.
 7. **viewer_request.js**: Scan for `Promise.` — FAIL and escalate if found.
 8. **lambda/*.js** (if present): Verify `exports.handler` or `export const handler`
    is present. Verify `import cf from 'cloudfront'` is ABSENT.
-9. **Policy refs**: Verify every policy hash referenced in main.tf actually
-   exists in `dedup_manifest.json`. Report any unresolved hash.
+9. **Policy refs**: Verify every `data.aws_cloudfront_*_policy` block in main.tf
+   has a matching policy ID in `dedup_manifest.json`, and the `name` attribute
+   uses the correct prefix (`cfcdn-cache-policy-`, `cfcdn-cache-bypass-`,
+   `cfcdn-orp-`, or `cfcdn-rhp-`). Report any unresolved hash.
 
 Report a summary:
 ```
@@ -616,14 +844,17 @@ file needs to be fixed. Re-generate the affected file only.
 
 ## Reference Documents
 
-- IR schema: `<workspace>/cf-cdn-ir-builder/SKILL.md`
-- Dedup manifest: `<workspace>/cloudflare-to-aws-cdn/ir/shared/dedup_manifest.json`
-- Shared policies Terraform: `<workspace>/cloudflare-to-aws-cdn/terraform/shared/policies.tf`
-- Domain scope: `<workspace>/cloudflare-to-aws-cdn/ir/domain_scope.json`
+- Module variables: `references/modules/cloudfront_distribution/variables.tf`
+- Module implementation: `references/modules/cloudfront_distribution/main.tf`
+- **CloudFront Functions Runtime 2.0**: `references/cloudfront/runtime2-guide.md` — complete guide to all Runtime 2.0 APIs (`rawQueryString()`, `cf.kvs()`, `cf.updateRequestOrigin()`, `cf.edgeLocation`), supported/forbidden syntax, and code patterns. **Read this before generating any JavaScript.**
+- **Event structure**: `references/cloudfront/cloudfront-event-structure.md` — exact event object shape (headers, querystring, cookies format)
+- **Operator conversion**: `references/cloudfront/operator-conversion.md` — Cloudflare expression operators → JS code patterns
+- **URL conversion**: `references/cloudfront/conversion-examples.md` — URL field mapping, wildcard patterns, query string handling
+- **Unsupported syntax**: `references/cloudfront/unsupported-syntax.md` — tested forbidden ES6+ features with evidence
+- **Viewer headers**: `references/cloudfront/cloudfront-viewer-headers.md` — CloudFront viewer headers and Cloudflare→CloudFront mapping
+- **KVS limits**: `references/cloudfront/kvs-usage-and-limits.md` — 5 MB store, 512 char key, 1 KB value, 1 KVS per function
 - AWS provider ≥ 6.x resource docs:
-  - `aws_cloudfront_distribution`
   - `aws_cloudfront_function`
   - `aws_cloudfront_key_value_store`
   - `aws_acm_certificate` (data source)
-- CloudFront Functions Runtime 2.0 developer guide (JavaScript constraints)
 - Lambda@Edge developer guide (Node.js runtime, `event.Records[0].cf` shape)

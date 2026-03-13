@@ -1,6 +1,6 @@
 ---
 name: cf-cdn-per-domain-processor
-description: Core CDN processing skill. For a single proxied hostname, reads all relevant Cloudflare CDN configuration files, processes all 10 rule types in Cloudflare execution order, and generates a complete CloudFront-native IR accumulator YAML file (ir_accumulator/<hostname>.yaml). This skill is invoked once per domain — for N domains, N parallel invocations are used. The IR format contains fully resolved CloudFront resource specs that downstream Terraform generators can consume directly without re-reading Cloudflare files.
+description: Core CDN processing skill. For a single proxied hostname, reads all relevant Cloudflare CDN configuration files, processes all 10 rule types in Cloudflare execution order, and generates a complete CloudFront-native IR accumulator YAML file (ir/accumulator/<hostname>.yaml). This skill is invoked once per domain — for N domains, N parallel invocations are used. The IR format contains fully resolved CloudFront resource specs that downstream Terraform generators can consume directly without re-reading Cloudflare files.
 ---
 
 # cf-cdn-per-domain-processor
@@ -30,6 +30,9 @@ Sanitize the hostname for the filename:
 
 **Example:** `cdn.c.example.com` → `cdn_c_example_com.yaml`
 
+The orchestrator passes the raw hostname (e.g. `cdn.c.example.com`) as the `{domain}`
+parameter. This skill must derive the sanitized filename from it.
+
 ---
 
 ## Reference Documents — MUST Read ALL Before Processing
@@ -39,12 +42,18 @@ Resolve paths relative to **this skill's directory** (i.e., `cf-cdn-per-domain-p
 
 | # | Relative path | Purpose |
 |---|---------------|---------|
-| 1 | `../cf-cdn-analyzer/references/cloudflare-rule-execution-order.md` | Canonical execution order for all 10 rule types |
-| 2 | `../cf-cdn-analyzer/references/cloudflare-default-cache-behavior.md` | ~70 cacheable file extensions with default 2 h TTL |
-| 3 | `../cf-cdn-analyzer/references/cloudfront-cache-behavior-path-pattern.md` | CloudFront wildcard rules (`*`, `?`), regex limitations |
-| 4 | `../cf-functions-converter/references/convertible-rules.md` | Which Cloudflare rule actions can be expressed in CF Functions |
-| 5 | `../cf-functions-converter/references/field-mapping.md` | Cloudflare field names → CloudFront / CF Functions equivalents |
-| 6 | `../cf-functions-converter/references/cloudfront-function-limits.md` | JS 10 KB size cap, forbidden syntax, runtime constraints |
+| 1 | `references/cloudflare-rule-execution-order.md` | Canonical execution order for all 10 rule types |
+| 2 | `references/cloudflare-default-cache-behavior.md` | ~70 cacheable file extensions with default 2 h TTL |
+| 3 | `references/cloudfront-cache-behavior-path-pattern.md` | CloudFront wildcard rules (`*`, `?`), regex limitations |
+| 4 | `references/convertible-rules.md` | Which Cloudflare rule actions can be expressed in CF Functions |
+| 5 | `references/field-mapping.md` | Cloudflare field names → CloudFront / CF Functions equivalents |
+| 6 | `references/cloudfront-function-limits.md` | JS 10 KB size cap, forbidden syntax, runtime constraints |
+| 7 | `references/cloudfront-origin-request-policy.md` | ORP allExcept/allViewerAndWhitelistCloudFront — Terraform syntax and available CF-generated headers |
+| 8 | `references/bulk-redirects-handling.md` | Bulk redirect KVS key format, include_subdomains handling, value format |
+| 9 | `references/non-convertible-rules.md` | Rules that cannot be converted and why — mark as non_convertible |
+| 10 | `references/cloudfront-viewer-headers.md` | CloudFront viewer headers, Cloudflare→CloudFront header mapping |
+| 11 | `references/continent-countries.md` | Country→continent mapping (239 countries) for KVS data |
+| 12 | `references/kvs-usage-and-limits.md` | KVS limits: 5 MB store, 512 char key, 1 KB value, 1 KVS per function |
 
 **Do not skip any.** Processing without these references risks incorrect field mapping,
 missed non-convertibles, or invalid path patterns.
@@ -54,8 +63,8 @@ missed non-convertibles, or invalid path patterns.
 ## Step 0 — Read ALL Reference Documents
 
 Use the `read` tool on each path listed above, in order.
-Store key facts mentally (execution order, extension list, field mappings, limits).
-Only proceed to Step 1 after all six files have been read.
+Store key facts mentally (execution order, extension list, field mappings, limits, ORP behavior values, bulk redirect KVS format, non-convertible rules, viewer headers, KVS limits).
+Only proceed to Step 1 after all twelve files have been read.
 
 ---
 
@@ -63,7 +72,8 @@ Only proceed to Step 1 after all six files have been read.
 
 ### 1a. Read domain_scope.json
 
-Path: `<backup_path>/domain_scope.json` (or as provided by orchestrator).
+Path: `cloudflare-to-aws-cdn/domain_scope.json` (relative to current working directory,
+or as provided by orchestrator).
 
 Extract:
 
@@ -73,7 +83,8 @@ Extract:
 | `apex_domain` | string | Parent zone (e.g. `example.com`) |
 | `apply_default_cache_behavior` | boolean | Whether to emit cache behaviors for all ~70 default extensions |
 | `origin_content` | string | DNS CNAME target — used as the default CloudFront origin domain |
-| `cert_arn_mode` | string | `"acm"` or `"iam"` — passed through to distribution_settings |
+| `cert_arn_mode` | string | `"explicit"` or `"data_source"` — passed through to metadata doc |
+| `cert_arn` | string\|null | ACM certificate ARN if `cert_arn_mode == "explicit"`, else null |
 
 ### 1b. Determine backup_path
 
@@ -226,7 +237,7 @@ Action type: `route` with `action_parameters.origin` containing override fields.
     strip_path_prefix: null
     custom_headers: []
   ```
-- `default_origin_id`: `"origin-<sanitized_hostname>"` using the same sanitization
+- `default_origin_id`: `"origin_<sanitized_hostname>"` using the same sanitization
   rule as the filename.
 - If `action_parameters.origin.port` is absent, default to 443 for https, 80 for http.
 
@@ -253,16 +264,33 @@ Each line format: `<source_path> <status_code> <target_url> [preserve_qs=true|fa
       kvs_prefix: "redirect:"
   ```
 - Set `kvs_requirements.needs_redirects: true`.
-- For each redirect item, generate a `kvs_data` entry:
+- For each redirect item, generate `kvs_data` entries. The KVS key format is
+  `redirect:{host}{path}` — the host is included in the key so the CF Function
+  can match by both host and path.
+
+  **`include_subdomains: false` (default)** — generate ONE entry:
   ```yaml
-  - key: "redirect:/old/path"
-    value: "301|true|/new/path"   # status|preserve_qs|target
+  - key: "redirect:example.com/old/path"
+    value: "301|0|https://example.com/new/path"   # status|preserve_qs(1/0)|target
   ```
-- Subdomain wildcard entries (source starts with `*.`): use key prefix `"redirect:."`:
+
+  **`include_subdomains: true`** — generate TWO entries:
   ```yaml
-  - key: "redirect:.example.com"
-    value: "301|false|https://www.example.com"
+  - key: "redirect:example.com/old/path"
+    value: "301|0|https://example.com/new/path"
+  - key: "redirect:.example.com/old/path"
+    value: "301|0|https://example.com/new/path"
   ```
+  The `.example.com` key (leading dot) matches any subdomain
+  (cdn.example.com, www.example.com, etc.).
+
+- **Value format**: `{status_code}|{preserve_qs}|{target_url}`
+  - `preserve_qs`: use `1` (true) or `0` (false) — NOT `true`/`false` strings
+  - `target_url`: full URL with protocol
+  - `status_code`: 301 or 302 (default 301)
+
+- See `references/bulk-redirects-handling.md` for the
+  complete specification including validation checklist.
 
 ---
 
@@ -276,7 +304,7 @@ Each header operation has an `operation` field: `"set"`, `"add"`, or `"remove"`.
 |-----------|----------|
 | `"set"` with static value | Add `type: set_header` to `viewer_request_ops` |
 | `"add"` with static value | Add `type: add_header` to `viewer_request_ops` |
-| `"remove"` | **Do NOT** add to function. Add the header name to `origin_request_policy.forward.headers_whitelist` exclusion list with a comment. Set `origin_request_policy.forward.headers: "whitelist"`. |
+| `"remove"` | Use `origin_request_policy.forward.headers: "allExcept"` and add the header name to `origin_request_policy.forward.headers_list` (which acts as an exclusion list when behavior is `allExcept`). This tells CloudFront to forward all viewer headers to origin **except** the listed ones. No CF Function needed. |
 | `"set"` with dynamic value (e.g. `concat(...)`) | Add to `viewer_request_ops`; note in `non_convertible` if CF Functions cannot evaluate the expression |
 | Device detection (e.g. `X-Is-Mobile` set from user-agent regex) | **Do NOT** convert. Note in `non_convertible`: `"Device detection headers should use CloudFront's native device detection via origin_request_policy"`. Set `kvs_requirements.needs_continent: true` if continent-based. |
 
@@ -309,7 +337,7 @@ Action type: `set_cache_settings`.
 
 | Cloudflare parameter | IR field | Notes |
 |----------------------|----------|-------|
-| `edge_ttl.value` | `cache_policy.ttl.default` and `cache_policy.ttl.max` | Value in seconds |
+| `edge_ttl.value` | `cache_policy.ttl.default` | Value in seconds. Set `cache_policy.ttl.max` to `max(edge_ttl.value * 2, 86400)` to allow origin Cache-Control headers to extend beyond the default. |
 | `edge_ttl.mode: "bypass_by_default"` | `cache_policy.bypass: false`, use `edge_ttl.value` | Cache only on explicit cache headers |
 | `cache: false` | `cache_policy.bypass: true`, all TTL = 0 | Pass-through, no caching |
 | `cache_key.custom_key.header.include` | `cache_policy.cache_key.headers` | List of header names |
@@ -339,24 +367,35 @@ Action type: `set_cache_settings`.
 
 Action type: `serve_error` (fixed response) or conditional error handling.
 
-**Static error pages** (action has `action_parameters.response.content` — fixed body):
-```yaml
-custom_error_response:
-  - error_code: 404
-    response_page_path: "/errors/404.html"  # if path-based
-    response_code: 404
-    ttl: 10
-```
-Add `custom_error_response` as a top-level field in the Cache Behavior document.
+**Case 1 — Simple error page / status code remap** (action specifies a static page path or just a status code change):
 
-**Dynamic error handling** (condition-based, requires request inspection):
-- Set `lambda_edge.origin_response` to a placeholder object:
-  ```yaml
-  lambda_edge:
-    origin_response:
-      cf_source_rule: "<rule_id>"
-      reason: "Dynamic custom error page requires Lambda@Edge origin-response trigger"
-  ```
+Add to the **metadata document** under `custom_error_responses`:
+```yaml
+custom_error_responses:
+  - error_code: 404              # HTTP status code from origin to intercept
+    response_page_path: "/errors/404.html"  # path to static file in origin; omit if no custom page
+    response_code: 404           # HTTP status code to return to viewer (can differ from error_code)
+    error_caching_min_ttl: 10    # seconds to cache this error response
+```
+
+CloudFront `custom_error_response` supports exactly these 4 fields. It can:
+- Serve a static error page from your origin
+- Change the HTTP status code returned to the viewer (e.g., 403 → 200 for SPAs)
+- Control error caching TTL
+
+It **cannot** add response headers or return inline JSON bodies.
+
+**Case 2 — Advanced error handling** (requires adding headers, returning JSON body, or dynamic logic):
+
+CloudFront Functions **do NOT execute** when the origin returns HTTP 400+. Only Lambda@Edge `origin-response` is invoked for all origin responses including errors.
+
+Set `lambda_edge.origin_response` in the metadata document:
+```yaml
+lambda_edge:
+  origin_response:
+    cf_source_rule: "<rule_id>"
+    reason: "Advanced custom error handling (add headers / return JSON body) requires Lambda@Edge origin-response — CloudFront Functions do not execute on HTTP 400+ responses"
+```
 
 ---
 
@@ -392,12 +431,20 @@ security_headers:
 
 Action type: `compress` with `action_parameters.algorithms`.
 
-- Gzip or Brotli enabled for a path → set `cache_policy.compress: true` on the
-  affected Cache Behavior.
-- No path condition → set `compress: true` on the Default `"*"` Cache Behavior.
-- If compression is **disabled** for a path that inherits compression from a wider rule,
-  set `compress: false` and add a `non_convertible` note:
-  `"CloudFront compress setting is per-distribution and cannot be disabled per path"`.
+**Simplified strategy:** All CloudFront cache behaviors always have `compress = true` (the behavior-level switch is always on). The Cache Policy controls which encodings are included in the cache key via `enable_gzip` and `enable_brotli`. Unsupported algorithms are ignored.
+
+Mapping rules based on Cloudflare `algorithms`:
+
+| Cloudflare `algorithms` | `cache_policy.enable_gzip` | `cache_policy.enable_brotli` |
+|------------------------|---------------------------|------------------------------|
+| `["gzip"]` | `true` | `false` |
+| `["brotli"]` | `false` | `true` |
+| `["gzip", "brotli"]` or unspecified | `true` | `true` |
+| disabled / `[]` | `false` | `false` |
+
+- If the rule has a path condition → apply to the matching Cache Behavior's cache policy.
+- If no path condition → apply to the Default `"*"` Cache Behavior's cache policy.
+- Default (no Compression Rules present): `enable_gzip: true, enable_brotli: true`.
 
 ---
 
@@ -448,7 +495,7 @@ Cache Behavior document. Each document is self-contained for the Terraform gener
 For every Cache Behavior, set:
 ```yaml
 origin:
-  id: "origin-<sanitized_hostname>"
+  id: "origin_<sanitized_hostname>"
   domain: "<origin_content from domain_scope.json>"
   protocol: "https"
   port: 443
@@ -470,13 +517,33 @@ Create the directory if it does not exist.
 
 ### File format
 
-One YAML document per Cache Behavior, separated by `---`.
-**First document** = lowest precedence number (most specific path, evaluated first by CloudFront).
-**Last document** = Default Cache Behavior (`path_pattern: "*"`, `precedence: 999`).
+The output is a **multi-document YAML file** separated by `---`.
 
-### Required schema per document
+**Document 1 (metadata):** Always present, always first.
+**Documents 2…N (cache_behavior):** One per Cache Behavior, sorted by ascending precedence.
+**Last cache_behavior document:** Default Cache Behavior (`path_pattern: "*"`, `precedence: 999`).
+
+### Metadata document schema
 
 ```yaml
+document_type: metadata
+hostname: "cdn.c.example.com"
+sanitized_name: "cdn_c_example_com"
+apex_domain: "c.example.com"
+cert_arn_mode: "explicit"        # or "data_source"
+cert_arn: "arn:aws:acm:..."      # null if cert_arn_mode == "data_source"
+kvs_requirements:
+  needs_redirects: false
+  needs_continent: false
+  needs_eu: false
+kvs_data: []                     # populated by Step 3e if bulk redirects exist
+custom_error_responses: []       # populated by Step 3h; distribution-level setting
+```
+
+### Required schema per cache_behavior document
+
+```yaml
+document_type: cache_behavior
 hostname: "cdn.c.example.com"
 path_pattern: "/api/*"
 precedence: 20
@@ -486,11 +553,14 @@ distribution_settings:
   minimum_protocol_version: "TLSv1.2_2021"
   http_version: "http2and3"                      # "http1.1" | "http2" | "http2and3"
   is_ipv6_enabled: true
-  compress: true
-  cert_arn_mode: "acm"                           # from domain_scope.json
+  cert_arn_mode: "explicit"                      # from domain_scope.json ("explicit" | "data_source")
+  price_class: "PriceClass_All"                  # always PriceClass_All (Cloudflare has no equivalent)
+  waf_acl_arn: null                              # always null (WAF is separate; user adds post-migration)
+  geo_restriction_type: "none"                   # always "none" (geo-blocking is in WAF, not CDN rules)
+  geo_restriction_locations: []
 
 origin:
-  id: "origin-cdn-c-example-com"
+  id: "origin_cdn_c_example_com"
   domain: "httpecho.a.letsmakeit.link"           # from origin_content (CNAME target)
   protocol: "https"
   port: 443
@@ -506,18 +576,19 @@ cache_policy:
     headers: []
     cookies: []
     query_strings: "none"                        # "none" | "all" | ["param1", "param2"]
-  compress: true
+  enable_gzip: true                              # from Compression Rules algorithms; default true
+  enable_brotli: true                            # from Compression Rules algorithms; default true
   ttl_sources: []                                # [{cf_source_rule, ttl}]
   resolved_ttl: 300
 
 origin_request_policy:
   forward:
-    headers: "none"                              # "none" | "all" | "whitelist"
-    headers_whitelist: []
-    cookies: "none"                              # "none" | "all" | "whitelist"
-    cookies_whitelist: []
-    query_strings: "none"                        # "none" | "all" | "whitelist"
-    query_strings_whitelist: []
+    headers: "none"                              # "none" | "whitelist" | "allViewer" | "allViewerAndWhitelistCloudFront" | "allExcept"
+    headers_list: []                             # items to INCLUDE (whitelist/allViewerAndWhitelistCloudFront) or EXCLUDE (allExcept)
+    cookies: "none"                              # "none" | "whitelist" | "allExcept" | "all"
+    cookies_list: []                             # items to INCLUDE (whitelist) or EXCLUDE (allExcept)
+    query_strings: "none"                        # "none" | "whitelist" | "allExcept" | "all"
+    query_strings_list: []                       # items to INCLUDE (whitelist) or EXCLUDE (allExcept)
 
 response_headers_policy:
   security_headers: {}
@@ -526,15 +597,6 @@ response_headers_policy:
 
 viewer_request_ops: []
 viewer_response_ops: []
-
-kvs_requirements:
-  needs_redirects: false
-  needs_continent: false
-  needs_eu: false
-
-kvs_data: []
-
-custom_error_response: []                        # omit if empty
 
 lambda_edge:
   origin_request: null
@@ -555,7 +617,8 @@ non_convertible: []
 | `cache_policy.ttl.min` | `0` | Allows origin to override |
 | `cache_policy.ttl.default` | `300` | 5-minute safe default |
 | `cache_policy.ttl.max` | `3600` | 1-hour cap |
-| `cache_policy.compress` | `true` | Cost and performance benefit |
+| `cache_policy.enable_gzip` | `true` | Default: enable both encodings |
+| `cache_policy.enable_brotli` | `true` | Default: enable both encodings |
 | `origin.protocol` | `"https"` | Encrypted in transit |
 | `origin.port` | `443` | Matches https default |
 
@@ -630,7 +693,7 @@ All entries in `viewer_request_ops` and `viewer_response_ops` follow these schem
         host_header: null
         strip_path_prefix: null
         custom_headers: []
-  default_origin_id: "origin-cdn-c-example-com"
+  default_origin_id: "origin_cdn_c_example_com"
 
 # ── bulk_redirect (KVS lookup) ─────────────────────────────────────────────────
 - type: bulk_redirect
@@ -701,3 +764,57 @@ Always process rule types in the order defined in reference #1
 Each Cache Behavior YAML document must be fully self-contained — i.e., it must include
 `distribution_settings`, `origin`, and all policy fields. Downstream Terraform generators
 read one document at a time and must not need to cross-reference other documents.
+
+### Cloudflare `concat()` semantics
+`concat("/prefix", http.request.uri.path)` **prepends** — it does NOT replace.
+Example: if `http.request.uri.path` is `/old/page`, the result is `/prefix/old/page`.
+Do NOT strip the original path when converting concat-based rewrites.
+
+### Continent and EU matching — KVS required
+Cloudflare `ip.src.continent` returns continent codes (`AS`, `EU`, `AF`, `NA`, `SA`,
+`OC`, `AN`). CloudFront only provides `cloudfront-viewer-country` (country codes like
+`CN`, `US`, `GB`). These are **different data types** — you MUST derive continent from
+country code via KVS lookup, never compare directly.
+
+When `needs_continent: true`:
+- Generate KVS entries with prefix `continent:` for all 239 countries
+  (see `references/continent-countries.md`): `continent:CN` → `NA`, `continent:US` → `NA`, etc.
+- CF Function code: `const continent = await kvsHandle.get('continent:' + country);`
+
+When `needs_eu: true`:
+- Generate KVS entries with prefix `eu:` for all 27 EU countries:
+  AT, BE, BG, CY, CZ, DE, DK, EE, ES, FI, FR, GR, HR, HU, IE, IT, LT, LU, LV,
+  MT, NL, PL, PT, RO, SE, SI, SK
+- Value is `1` (existence check): `eu:AT` → `1`, `eu:BE` → `1`, etc.
+- CF Function code: `const isEU = await kvsHandle.exists('eu:' + country);`
+
+### Response Header Transform — cost consideration
+For `viewer_response_ops` on cacheable objects (images, CSS, JS, fonts):
+- CloudFront Functions viewer-response runs on **every** request (including cache hits)
+- Lambda@Edge origin-response runs only on **cache misses**
+- For high-traffic cacheable paths, Lambda@Edge is more cost-effective
+- Add a `non_convertible` note when response header transforms apply to cacheable paths:
+  `"Response header transform on cacheable path — consider Lambda@Edge origin-response for cost efficiency"`
+
+### URL Normalization — do not convert
+Cloudflare URL Normalization has no CloudFront equivalent and is not needed.
+CloudFront normalizes URI paths consistent with RFC 3986 before cache behavior matching.
+If encountered, skip silently — do not add to `non_convertible`.
+
+### Header value substitution
+When a Cloudflare rule sets a header value containing the string `"Cloudflare"`,
+replace it with `"CloudFront"` in the IR. Example: `X-CDN: Cloudflare` → `X-CDN: CloudFront`.
+
+### `CloudFront-Viewer-Address` format
+The `CloudFront-Viewer-Address` header value is `ip:port` (e.g., `14.155.12.123:61246`),
+not just an IP address. If converting rules that reference client IP via this header,
+the port must be stripped: `address.split(':')[0]`.
+
+### Bulk redirect subdomain wildcard key derivation
+When generating subdomain wildcard KVS keys (`include_subdomains: true`), the domain
+in the key MUST come from the **hostname being processed** (from `domain_scope.json`),
+NOT extracted from the `source_url` field. The hostname is the authoritative source.
+
+Example: hostname is `app.example.com`, source_url is `app.example.com/about`
+- Correct wildcard key: `redirect:.app.example.com/about`
+- WRONG: `redirect:.example.com/about` (extracted from source_url, missing `app`)

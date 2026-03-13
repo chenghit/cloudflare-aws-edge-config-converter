@@ -23,7 +23,6 @@ Manually converting hundreds of rules when migrating from Cloudflare to AWS is t
 | **cf-waf-analyzer** | Cloudflare security rules (WAF, Rate Limiting, IP Access, etc.) | Security rules summary with conversion plan | ✅ Available |
 | **cf-waf-analyzer-validator** | Security rules summary | Validated summary (fixes errors in-place) | ✅ Available |
 | **cf-waf-terraform-generator** | Validated security rules summary | AWS WAF configuration (Terraform) | ✅ Available |
-| **cf-functions-converter** | Cloudflare transformation rules (Redirect, URL Rewrite, Header Transform, etc.) | CloudFront Functions (JavaScript) | ✅ Available |
 | **cf-cdn-dns-parser** | Cloudflare DNS backup | Domain manifest + user input template CSV | ✅ Available |
 | **cf-cdn-input-validator** | User-confirmed domain CSV | Validated domain scope JSON | ✅ Available |
 | **cf-cdn-per-domain-processor** | Cloudflare CDN rules (all types) | CloudFront-native IR accumulator YAML per domain | ✅ Available |
@@ -57,14 +56,10 @@ flowchart TD
     CDN8 --> CDN9["cf-cdn-js-validator × N"]
     CDN9 -->|all PASS| CDN_Done([CDN Terraform + JS ✅])
 
-    Main -->|Functions intent| FUNC["cf-functions-converter"]
-    FUNC --> FUNC_Done([CloudFront Functions ✅])
-
     style Main fill:#f9f,stroke:#333
     style Pause fill:#ff9,stroke:#f90
     style WAF_Done fill:#9f9,stroke:#333
     style CDN_Done fill:#9f9,stroke:#333
-    style FUNC_Done fill:#9f9,stroke:#333
 ```
 
 ## CDN Full Pipeline: What Happens
@@ -85,13 +80,14 @@ cloudflare-to-aws-cdn/
 │   ├── final/                       # Sorted, deduplicated IR
 │   └── validation/                  # Validator reports (V1, V2, V3)
 └── terraform/
-    ├── modules/cloudfront_distribution/
+    ├── modules/
+    │   └── cloudfront_distribution/ # Shared module (copied from skill)
     ├── shared/
-    │   ├── policies.tf              # Deduplicated CachePolicy resources
-    │   └── providers.tf
+    │   └── policies.tf              # Deduplicated CachePolicy resources + outputs
     └── domains/
         └── <domain>/
-            ├── main.tf
+            ├── main.tf              # module call (~50-80 lines)
+            ├── outputs.tf
             ├── functions.tf
             ├── kvs.tf               # KVS store (if bulk redirects exist)
             ├── functions/
@@ -101,7 +97,23 @@ cloudflare-to-aws-cdn/
 
 **ACM certificates:** Add your certificate ARN in the CSV, or leave blank — the tool generates a `data "aws_acm_certificate"` lookup that finds your existing ISSUED cert automatically at `terraform plan` time.
 
+**Logging:** CloudFront access logging is not configured by this tool — it involves decisions (S3 bucket region, log format, shared vs. per-domain buckets) that are outside the scope of config migration. Add a `logging_config` block to the generated `main.tf` if needed.
+
 **Design target:** Up to 50 proxied domains (matching the default CloudFront KVS quota of 50 per account). One KVS per domain, no cross-domain sharing.
+
+**Deployment order:** The generated Terraform uses independent root modules. Apply in this order:
+
+```bash
+# 1. Shared policies first (creates CachePolicy, ORP, RHP resources)
+cd cloudflare-to-aws-cdn/terraform/shared
+terraform init && terraform apply
+
+# 2. Each domain independently (looks up shared policies by name via data sources)
+cd cloudflare-to-aws-cdn/terraform/domains/cdn_example_com
+terraform init && terraform apply
+```
+
+Each domain can be planned and applied independently after the shared policies exist. This keeps blast radius small — changing one domain doesn't affect others.
 
 ## Quick Start
 
@@ -135,7 +147,7 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 
 ### Terraform
 
-AWS WAF and CloudFront output requires Terraform >= 1.5.0 and AWS Provider >= 6.x.
+AWS WAF and CloudFront output requires Terraform >= 1.8.0 and AWS Provider >= 6.x.
 
 ```bash
 terraform version
@@ -167,11 +179,13 @@ cd cloudflare-aws-edge-config-converter
 
 Update: `git pull && ./install.sh`
 
+> **Using a different agent tool?** The install scripts and all SKILL.md files use `~/.kiro/skills/` as the default skill directory (Kiro CLI convention). To use these skills with another agent tool, you need to: (1) modify `install.sh` / `uninstall.sh` to point to your tool's skill directory, and (2) find-and-replace `~/.kiro/skills/` with your tool's skill path across all SKILL.md files — subagents reference each other by absolute installed path.
+
 ### Manual Subagent Control
 
 For advanced users: `/agent swap <subagent-name>` to run individual pipeline stages.
 
-Available subagents: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-terraform-generator`, `cf-functions-converter`, `cf-cdn-dns-parser`, `cf-cdn-input-validator`, `cf-cdn-per-domain-processor`, `cf-cdn-ir-chunk-validator`, `cf-cdn-ir-finalizer`, `cf-cdn-ir-final-validator`, `cf-cdn-tf-shared-policies`, `cf-cdn-tf-domain`, `cf-cdn-js-validator`.
+Available subagents: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-terraform-generator`, `cf-cdn-dns-parser`, `cf-cdn-input-validator`, `cf-cdn-per-domain-processor`, `cf-cdn-ir-chunk-validator`, `cf-cdn-ir-finalizer`, `cf-cdn-ir-final-validator`, `cf-cdn-tf-shared-policies`, `cf-cdn-tf-domain`, `cf-cdn-js-validator`.
 
 ## More Information
 
