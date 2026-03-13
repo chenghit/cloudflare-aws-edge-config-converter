@@ -24,46 +24,84 @@ Manually converting hundreds of rules when migrating from Cloudflare to AWS is t
 | **cf-waf-analyzer-validator** | Security rules summary | Validated summary (fixes errors in-place) | ✅ Available |
 | **cf-waf-terraform-generator** | Validated security rules summary | AWS WAF configuration (Terraform) | ✅ Available |
 | **cf-functions-converter** | Cloudflare transformation rules (Redirect, URL Rewrite, Header Transform, etc.) | CloudFront Functions (JavaScript) | ✅ Available |
-| **cf-cdn-analyzer** | Cloudflare CDN configuration (Cache, Origin, Redirect, etc.) | Hostname-based configuration summary | ✅ Available |
-| **cf-cdn-analyzer-validator** | Hostname-based configuration summary | Validated summary (fixes errors in-place) | ✅ Available |
+| **cf-cdn-dns-parser** | Cloudflare DNS backup | Domain manifest + user input template CSV | ✅ Available |
+| **cf-cdn-input-validator** | User-confirmed domain CSV | Validated domain scope JSON | ✅ Available |
+| **cf-cdn-per-domain-processor** | Cloudflare CDN rules (all types) | CloudFront-native IR accumulator YAML per domain | ✅ Available |
+| **cf-cdn-ir-chunk-validator** | IR accumulator YAML | Validation report (adversarial checker) | ✅ Available |
+| **cf-cdn-ir-finalizer** | All domain IR accumulators | Sorted final IR + dedup manifest + conversion report | ✅ Available |
+| **cf-cdn-ir-final-validator** | Final IR YAML | Validation report (adversarial checker) | ✅ Available |
+| **cf-cdn-tf-shared-policies** | Dedup manifest | Shared Terraform policies (CachePolicy, etc.) | ✅ Available |
+| **cf-cdn-tf-domain** | Final IR per domain | CloudFront Terraform + CloudFront Functions JS | ✅ Available |
+| **cf-cdn-js-validator** | Generated JS functions | JS validation report (syntax + runtime constraints) | ✅ Available |
 
-Each skill runs in a separate Kiro subagent with isolated context. The default agent loads the `cloudflare-aws-converter` orchestrator skill and automatically dispatches to the appropriate subagents. You don't need to understand this architecture — just describe what you want and Kiro handles the rest.
+Each skill runs in a separate Kiro subagent with isolated context. The default agent loads the `cloudflare-aws-converter` orchestrator skill and automatically dispatches to the appropriate subagents.
 
 ```mermaid
 flowchart TD
-    User([User]) -->|"Convert WAF / CDN / Functions / All"| Main["Kiro Default Agent<br/>(cloudflare-aws-converter orchestrator)"]
+    User([User]) -->|"Convert WAF / CDN / Functions / All"| Main["Kiro Default Agent\n(cloudflare-aws-converter)"]
 
     Main -->|WAF intent| WAF_A["cf-waf-analyzer"]
-    WAF_A -->|"cloudflare-security-rules-summary.md"| WAF_V["cf-waf-analyzer-validator"]
+    WAF_A --> WAF_V["cf-waf-analyzer-validator"]
     WAF_V -->|PASS| WAF_G["cf-waf-terraform-generator"]
-    WAF_V -->|"FIXED → re-validate"| WAF_V
-    WAF_G -->|"*.tf modules"| WAF_Done([WAF Terraform])
+    WAF_G --> WAF_Done([WAF Terraform ✅])
 
-    Main -->|CDN intent| CDN_A["cf-cdn-analyzer"]
-    CDN_A -->|"hostname-based-config-summary.md"| CDN_V["cf-cdn-analyzer-validator"]
-    CDN_V -->|PASS| CDN_P["Skill 4: Implementation Planner"]
-    CDN_V -->|"FIXED → re-validate"| CDN_V
-    CDN_P --> CDN_VR["Skill 7: Viewer Request Function"]
-    CDN_P --> CDN_VResp["Skill 8: Viewer Response Function"]
-    CDN_P --> CDN_OR["Skill 9: Origin Request Lambda"]
-    CDN_P --> CDN_OResp["Skill 10: Origin Response Lambda"]
-    CDN_VR & CDN_VResp & CDN_OR & CDN_OResp --> CDN_TF["Skill 11: CloudFront Config Generator"]
-    CDN_TF -->|"*.tf modules"| CDN_Done([CDN Terraform])
+    Main -->|CDN full pipeline| CDN1["cf-cdn-dns-parser"]
+    CDN1 -->|user_input_template.csv| Pause[/"⏸ User fills in CSV\n(default cache + cert ARN)"/]
+    Pause --> CDN2["cf-cdn-input-validator"]
+    CDN2 --> CDN3["cf-cdn-per-domain-processor × N\n(parallel per domain)"]
+    CDN3 --> CDN4["cf-cdn-ir-chunk-validator × N"]
+    CDN4 -->|all PASS| CDN5["cf-cdn-ir-finalizer"]
+    CDN5 --> CDN6["cf-cdn-ir-final-validator × N"]
+    CDN6 -->|all PASS| CDN7["cf-cdn-tf-shared-policies"]
+    CDN7 --> CDN8["cf-cdn-tf-domain × N\n(parallel per domain)"]
+    CDN8 --> CDN9["cf-cdn-js-validator × N"]
+    CDN9 -->|all PASS| CDN_Done([CDN Terraform + JS ✅])
 
     Main -->|Functions intent| FUNC["cf-functions-converter"]
-    FUNC -->|"*.js functions"| FUNC_Done([CloudFront Functions])
+    FUNC --> FUNC_Done([CloudFront Functions ✅])
 
     style Main fill:#f9f,stroke:#333
+    style Pause fill:#ff9,stroke:#f90
     style WAF_Done fill:#9f9,stroke:#333
     style CDN_Done fill:#9f9,stroke:#333
     style FUNC_Done fill:#9f9,stroke:#333
-    style CDN_P fill:#ffd,stroke:#f90
-    style CDN_VR fill:#ffd,stroke:#f90
-    style CDN_VResp fill:#ffd,stroke:#f90
-    style CDN_OR fill:#ffd,stroke:#f90
-    style CDN_OResp fill:#ffd,stroke:#f90
-    style CDN_TF fill:#ffd,stroke:#f90
 ```
+
+## CDN Full Pipeline: What Happens
+
+The CDN pipeline converts all Cloudflare CDN configurations (Cache Rules, Origin Rules, Redirect Rules, URL Rewrites, Header Transforms, Bulk Redirects, Compression Rules, Custom Error Rules, and more) into working Terraform for AWS CloudFront.
+
+**One user interaction point:** After parsing DNS records, the tool generates a CSV template. You fill in two columns per domain — whether to apply Cloudflare's default 2-hour cache for 70+ file extensions, and optionally your ACM certificate ARN. Everything else is fully automated.
+
+**Output structure:**
+```
+cloudflare-to-aws-cdn/
+├── user_input_template.csv          # Fill this in, save as user_input.csv
+├── dns_manifest.yaml
+├── domain_scope.json
+├── conversion_report.md             # Non-convertible rules + warnings
+├── ir/
+│   ├── accumulator/                 # Per-domain CloudFront-native IR
+│   ├── final/                       # Sorted, deduplicated IR
+│   └── validation/                  # Validator reports (V1, V2, V3)
+└── terraform/
+    ├── modules/cloudfront_distribution/
+    ├── shared/
+    │   ├── policies.tf              # Deduplicated CachePolicy resources
+    │   └── providers.tf
+    └── domains/
+        └── <domain>/
+            ├── main.tf
+            ├── functions.tf
+            ├── kvs.tf               # KVS store (if bulk redirects exist)
+            ├── functions/
+            │   └── viewer_request.js
+            └── lambda/              # Lambda@Edge (only if CF Function too large)
+```
+
+**ACM certificates:** Add your certificate ARN in the CSV, or leave blank — the tool generates a `data "aws_acm_certificate"` lookup that finds your existing ISSUED cert automatically at `terraform plan` time.
+
+**Design target:** Up to 50 proxied domains (matching the default CloudFront KVS quota of 50 per account). One KVS per domain, no cross-domain sharing.
 
 ## Quick Start
 
@@ -87,22 +125,17 @@ Then just describe what you want:
 
 ```
 Convert Cloudflare security rules in /path/to/cloudflare-backup to AWS WAF
-Convert transformation rules in /path/to/cloudflare-backup to CloudFront Functions
-Analyze CDN configuration in /path/to/cloudflare-backup
+Convert CDN configuration in /path/to/cloudflare-backup to CloudFront Terraform
 Convert all Cloudflare configuration in /path/to/cloudflare-backup to AWS
 ```
 
-Kiro automatically invokes the appropriate subagents. No `/agent swap` needed.
-
 For testing without your own config, use `examples/cloudflare-configs/`.
-
-Complete conversation examples: [examples/conversation-history/](examples/conversation-history/)
 
 ## Prerequisites
 
 ### Terraform
 
-AWS WAF output requires Terraform >= 1.8.0 (AWS Provider 6.x dependency).
+AWS WAF and CloudFront output requires Terraform >= 1.5.0 and AWS Provider >= 6.x.
 
 ```bash
 terraform version
@@ -121,8 +154,8 @@ terraform version
 >
 > Earlier models see skill metadata but do not load the full SKILL.md body, causing tasks to fail.
 
-- `claude-sonnet-4.6` — Recommended for < 100 rules
-- `claude-sonnet-4.6-1m` — For > 100 rules or CDN migration with many domains. Switch with `/model` in Kiro.
+- `claude-sonnet-4.6` — Recommended for WAF conversion and small CDN configs (< 10 domains)
+- `claude-sonnet-4.6-1m` — Required for CDN migration with many domains (> 10) or large rule sets. Switch with `/model` in Kiro.
 
 ## Installation
 
@@ -136,7 +169,9 @@ Update: `git pull && ./install.sh`
 
 ### Manual Subagent Control
 
-For advanced users: `/agent swap <subagent-name>` to run individual stages. Available: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-terraform-generator`, `cf-functions-converter`, `cf-cdn-analyzer`, `cf-cdn-analyzer-validator`.
+For advanced users: `/agent swap <subagent-name>` to run individual pipeline stages.
+
+Available subagents: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-terraform-generator`, `cf-functions-converter`, `cf-cdn-dns-parser`, `cf-cdn-input-validator`, `cf-cdn-per-domain-processor`, `cf-cdn-ir-chunk-validator`, `cf-cdn-ir-finalizer`, `cf-cdn-ir-final-validator`, `cf-cdn-tf-shared-policies`, `cf-cdn-tf-domain`, `cf-cdn-js-validator`.
 
 ## More Information
 
@@ -152,7 +187,8 @@ For advanced users: `/agent swap <subagent-name>` to run individual stages. Avai
 - [Kiro Documentation](https://kiro.dev/docs/)
 - [Agent Skills Support in Kiro CLI](https://kiro.dev/changelog/cli/1-24/)
 - [AWS WAF Documentation](https://docs.aws.amazon.com/waf/)
-- [CloudFront Functions Documentation](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-functions.html)
+- [CloudFront Developer Guide](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/)
+- [CloudFront Functions Runtime 2.0](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/functions-javascript-runtime-20.html)
 
 ## License
 

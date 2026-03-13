@@ -1,0 +1,9 @@
+{
+  "name": "cf-cdn-ir-finalizer",
+  "description": "Merges and finalizes all validated per-domain accumulator YAMLs into production-ready final IR files. Deduplicates shared cache policies, response headers policies, and origin request policies across all domains to minimize AWS resource count; records deduplicated shared resources in shared/dedup_manifest.json. For each domain, writes ir/final/{hostname}.yaml with resolved references to shared policies. Generates conversion_report.md summarizing: total domains processed, rules translated, policies created, rules that could not be automatically converted (with migration notes), and any feature-parity gaps between Cloudflare and CloudFront. Also validates that all accumulated IR chunks passed validation before finalizing.",
+  "resources": [
+    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md"
+  ],
+  "tools": ["fs_read", "fs_write", "glob", "grep"],
+  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
+}

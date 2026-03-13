@@ -1,0 +1,9 @@
+{
+  "name": "cf-cdn-input-validator",
+  "description": "Validates the operator-filled user_input.csv against dns_manifest.yaml to ensure every proxied domain has a valid origin URL, cache policy selection, and routing configuration. Checks for required columns, valid enum values, reachable origin hostnames, and consistent ACM certificate groupings. On success, produces domain_scope.json — a machine-readable domain registry used by all downstream CDN pipeline subagents. Reports validation errors with clear remediation hints.",
+  "resources": [
+    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-input-validator/SKILL.md"
+  ],
+  "tools": ["fs_read", "fs_write", "glob", "grep"],
+  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
+}
