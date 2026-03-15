@@ -275,6 +275,8 @@ Use the same scoring function defined in `cf-cdn-ir-finalizer`:
 ```
 function specificity_score(pattern):
   if pattern == "*": return 0
+  if pattern == "/*": return 1          # near-default catch-all
+  if pattern starts with "*." and does not contain "/": return 5  # extension pattern
   wildcard_pos = index of first '*' or '?' in pattern
   if wildcard_pos == -1:
     return len(pattern) * 10 + 100  # exact match

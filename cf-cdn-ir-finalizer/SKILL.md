@@ -2,7 +2,9 @@
 name: cf-cdn-ir-finalizer
 description: >
   Finalizer for the Cloudflare → CloudFront migration pipeline.
-  Runs after ALL domains have passed V1 validation (cf-cdn-ir-chunk-validator).
+  Runs after per-domain processing and V1 validation are complete.
+  Some domains may have been SKIPPED by the orchestrator — the finalizer
+  only processes accumulator files that exist in ir/accumulator/.
   Reads all ir/accumulator/*.yaml files, sorts cache behaviors by specificity,
   deduplicates shared policies, detects shadowed rules, and writes finalized
   IR files plus a conversion report.
@@ -18,9 +20,9 @@ domains simultaneously to enable cross-domain policy deduplication. It writes
 one finalized YAML per domain, a shared deduplication manifest, and a human-
 readable conversion report.
 
-This skill must only run after **all** domains have received a `PASS` from
-`cf-cdn-ir-chunk-validator`. Running it against unvalidated or failed inputs
-produces undefined behavior.
+This skill must only run after per-domain processing and V1 validation are
+complete for all non-SKIPPED domains. Running it against unvalidated or failed
+inputs produces undefined behavior.
 
 ---
 
@@ -71,7 +73,7 @@ Before executing any logic, read the following reference documents in order:
    IR output schema. Know what fields exist in cache_behavior and metadata documents.
 3. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` — understand what
    validations have already passed. Do not re-validate; trust the V1 pass.
-3. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` (this file) — finalization
+4. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` (this file) — finalization
    logic and algorithms.
 
 Proceeding without reading these documents may produce incorrect finalized IR.
@@ -83,8 +85,13 @@ Proceeding without reading these documents may produce incorrect finalized IR.
 **1a. Confirm all accumulator files have passed V1 validation:**
 
 List all `*.yaml` files in `cloudflare-to-aws-cdn/ir/accumulator/`. For each
-accumulator file, check that a corresponding V1 validation report exists in
-`cloudflare-to-aws-cdn/ir/validation/chunk/` with `status: "PASS"`.
+accumulator file:
+
+1. Parse the YAML (at minimum the first document) to extract the `hostname` field.
+   The accumulator filename uses the sanitized form (e.g., `cdn_c_example_com.yaml`),
+   but the V1 report filename uses the raw hostname (e.g., `cdn.c.example.com-v1.json`).
+2. Look up the V1 report at: `cloudflare-to-aws-cdn/ir/validation/chunk/{hostname}-v1.json`
+3. Read the report and check `status`.
 
 Note: Some domains from `domain_scope.json` may have been SKIPPED by the
 orchestrator (failed processing after retry). These domains will NOT have
@@ -171,6 +178,16 @@ function specificity_score(pattern):
   if pattern == "*":
     return 0                          # bare wildcard: lowest specificity
 
+  # Special case: "/*" is a near-default catch-all, not a specific path
+  if pattern == "/*":
+    return 1                          # just above "*", below everything else
+
+  # Special case: extension patterns like "*.jpg", "*.css"
+  # These match by file type, not by path — they are less specific than
+  # any path-prefix pattern like "/api/*"
+  if pattern starts with "*." and does not contain "/":
+    return 5                          # above "/*", below path-prefix patterns
+
   # Count literal characters before the first wildcard
   wildcard_pos = index of first '*' or '?' in pattern
   
@@ -187,7 +204,9 @@ function specificity_score(pattern):
 | Pattern         | Literal chars | Has wildcard | Score calculation          | Score |
 |-----------------|---------------|--------------|----------------------------|-------|
 | `*`             | 0             | yes          | special case               | 0     |
-| `/*`            | 1             | yes          | 1 × 10                     | 10    |
+| `/*`            | 1             | yes          | special case (near-default)| 1     |
+| `*.jpg`         | 0             | yes          | special case (extension)   | 5     |
+| `*.css`         | 0             | yes          | special case (extension)   | 5     |
 | `/api/*`        | 4             | yes          | 4 × 10                     | 40    |
 | `/static/*`     | 7             | yes          | 7 × 10                     | 70    |
 | `/api/v2/users` | 12            | no           | 12 × 10 + 100              | 220   |
@@ -548,7 +567,9 @@ Next step: run cf-cdn-ir-final-validator for each domain.
 
 ```
 pattern = "*"             → score 0     (special: precedence 999)
-pattern starts with "/*"  → score 10    (one literal char '/')
+pattern = "/*"            → score 1     (special: near-default catch-all)
+pattern = "*.jpg"         → score 5     (special: extension pattern)
+pattern = "*.css"         → score 5     (special: extension pattern)
 pattern = "/api/*"        → score 40    (4 literal chars: /api)
 pattern = "/static/*"     → score 70    (7 literal chars: /static)
 pattern = "/api/v2/*"     → score 70    (7 literal chars: /api/v2)
