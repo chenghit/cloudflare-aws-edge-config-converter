@@ -15,7 +15,7 @@ These can be used to test conversion without your own Cloudflare backup.
 `conversation-history/` contains complete conversation transcripts showing how to use each skill:
 
 - `cloudflare-to-aws-waf.txt` — WAF conversion (3-stage pipeline: analyzer → validator → generator)
-- `cloudflare-to-cloudfront-functions.txt` — Transformation rules to CloudFront Functions
+- CDN full pipeline example — coming soon
 
 ## How to Use
 
@@ -27,6 +27,5 @@ Then reference the example configs:
 
 ```
 Convert Cloudflare security rules in ./examples/cloudflare-configs/ to AWS WAF
-Convert transformation rules in ./examples/cloudflare-configs/ to CloudFront Functions
-Analyze CDN configuration in ./examples/cloudflare-configs/
+Convert CDN configuration in ./examples/cloudflare-configs/ to CloudFront Terraform
 ```
