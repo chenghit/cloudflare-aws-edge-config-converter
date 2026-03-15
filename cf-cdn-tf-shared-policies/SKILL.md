@@ -148,12 +148,6 @@ terraform {
     }
   }
 }
-
-# Provider alias required for ACM (certificates must be in us-east-1)
-provider "aws" {
-  alias  = "us_east_1"
-  region = "us-east-1"
-}
 ```
 
 ---
@@ -399,7 +393,10 @@ output "cache_policy_ids" {
   description = "Map of policy_id → cache policy resource ID"
   value = {
     <for each cache policy entry in manifest.policies>
-    "<policy_id>" = aws_cloudfront_cache_policy.policy_<policy_id>.id,
+    # If config.bypass == true:
+    #   "<policy_id>" = aws_cloudfront_cache_policy.policy_bypass_<policy_id>.id
+    # If config.bypass == false:
+    #   "<policy_id>" = aws_cloudfront_cache_policy.policy_<policy_id>.id
     <end for>
   }
 }
@@ -449,11 +446,10 @@ After writing, read the file back and verify:
 
 1. Every resource block that was opened with `{` has a matching `}`.
 2. No resource name contains characters other than `[a-z0-9_]`.
-3. The `provider "aws"` block with `alias = "us_east_1"` is present exactly once.
-4. No Terraform string contains unescaped `${}` from variable interpolation
+3. No Terraform string contains unescaped `${}` from variable interpolation
    (only intentional `${var.xxx}` patterns are allowed; all policy values are
    literal strings).
-5. The `outputs` block lists exactly as many entries as there are resources of
+4. The `outputs` block lists exactly as many entries as there are resources of
    each type.
 
 If any check fails, report the specific failure and re-generate. Do not leave a
