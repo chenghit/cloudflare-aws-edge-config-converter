@@ -1,25 +1,96 @@
 # Limitations and Caveats
 
-## Content Not Converted
+## CDN Pipeline — What Gets Converted
 
-* **Managed Rules** — Cloudflare-specific managed rules (e.g., API Abuse Detection) have no direct equivalent in AWS WAF. Use AWS WAF's own managed rule groups instead (Anti-DDoS, Core Rule Set, Bot Control, etc.). These standardized configurations don't require AI conversion.
+The CDN pipeline converts these Cloudflare rule types to CloudFront equivalents:
 
-* **Page Rules (Deprecated)** — Cloudflare has deprecated Page Rules. First migrate to modern rule types in Cloudflare (Redirect Rules, URL Rewrite Rules, etc.), then use this tool.
+| Rule Type | CloudFront Equivalent |
+|-----------|----------------------|
+| Redirect Rules | CloudFront Functions (viewer-request) |
+| URL Rewrite Rules | CloudFront Functions (viewer-request) |
+| Configuration Rules | Distribution settings (TLS, HTTP version, protocol policy) |
+| Origin Rules | CloudFront Functions (`updateRequestOrigin`) or independent cache behaviors |
+| Bulk Redirects | KVS + CloudFront Functions |
+| Request Header Transform | CloudFront Functions + Origin Request Policy |
+| Cache Rules | Cache policies on cache behaviors |
+| Cloud Connector Rules | Independent cache behaviors with separate origins |
+| Custom Error Rules | CloudFront custom error responses |
+| Response Header Transform | Response Headers Policy + CloudFront Functions (viewer-response) |
+| Compression Rules | Cache policy `enable_gzip` / `enable_brotli` |
 
-* **Snippets and Workers** — Custom JavaScript/TypeScript functions, not configuration rules. Manual conversion required — review logic and rewrite as CloudFront Functions or Lambda@Edge.
+## CDN Pipeline — What Does NOT Get Converted
 
-* **SaaS and mTLS Configurations** — Complex multi-tenant and certificate management configurations require manual architecture design. Cloudflare Custom Hostnames and CloudFront SaaS have fundamentally different implementation models.
+### Rule types not processed
 
-* **Image Optimization and Advanced Features** — CloudFront doesn't natively support Cloudflare's Image Optimization, Zaraz, etc. Deploy AWS solutions separately (e.g., Dynamic Image Transformation for Amazon CloudFront).
+| Item | Reason | Alternative |
+|------|--------|-------------|
+| Page Rules (legacy) | Deprecated by Cloudflare. Migrate to modern rule types first, then use this tool. | Cloudflare migration guide |
+| Snippets / Workers | Arbitrary code, not declarative config. | Manual rewrite as CloudFront Functions or Lambda@Edge |
+| URL Normalization | CloudFront normalizes URIs per RFC 3986 by default. No conversion needed. | N/A |
+| Managed Transforms (except True-Client-IP) | Cloudflare-specific features. | CloudFront native equivalents where available |
+| Trace | Cloudflare-specific testing feature. | CloudWatch Logs, CloudFront real-time logs |
 
-* **Some Advanced Transformation Rules** — Cloudflare and CloudFront features are not one-to-one. Tool will list unconvertible rules and alternatives in generated documentation.
+### Settings within convertible rule types that cannot be mapped
 
-## Large-Scale Configurations
+| Setting | Rule Type | Reason | Alternative |
+|---------|-----------|--------|-------------|
+| `serve_stale` (SWR/SIE) | Cache Rules | No CloudFront cache policy equivalent | Origin `Cache-Control: stale-while-revalidate` (limited) |
+| `origin_error_page_passthru` | Cache Rules | Requires Lambda@Edge to intercept origin errors | Lambda@Edge origin-response |
+| Query string-only rewrite | URL Rewrite | CloudFront Functions cannot modify query strings independently | Lambda@Edge |
+| `browser_check` | Configuration | No CloudFront equivalent | AWS WAF Bot Control |
+| `minify` (HTML/CSS/JS) | Configuration | Not supported natively in CloudFront | Origin-side minification |
+| `rocket_loader` | Configuration | Cloudflare-specific JS optimization | N/A |
+| `hotlink_protection` | Configuration | Requires custom referer-checking logic | Lambda@Edge |
+| Device detection headers (UA regex) | Request Header Transform | CloudFront provides native device detection | Origin Request Policy with `CloudFront-Is-*-Viewer` headers |
+| Dynamic values with non-mappable CF variables | Request/Response Header Transform | CloudFront Functions cannot evaluate all Cloudflare expressions | Manual review |
+| Cloud Connector with non-path expressions | Cloud Connector | CloudFront cache behaviors only match on path patterns | Manual origin configuration |
+| Disallowed/read-only response headers | Response Header Transform | CloudFront restricts modification of certain headers (`Via`, `X-Amz-Cf-*`, etc.) | N/A |
 
-* **Token Consumption** — Increases significantly with > 100 rules. Use `claude-sonnet-4.6-1m` model, or convert in batches.
-* **Conversion Time** — More rules = longer time. Typical: ~5-10 minutes for 50 rules.
+### Cloudflare match fields with no CloudFront equivalent
 
-## Conversion Accuracy
+| Field | Reason |
+|-------|--------|
+| `cf.edge.server_port`, `cf.zone.name`, `cf.metal.id`, `cf.ray_id` | Cloudflare-specific internal fields |
+| `cf.tls_client_auth.*` | mTLS certificate fields not available in CloudFront Functions |
+| `ip.src.subdivision_2_iso_code` | CloudFront only provides first-level subdivision |
+| `http.request.timestamp.sec/msec` | Use `Date.now()` in CloudFront Functions instead |
 
-* **Manual Review Required** — AI-generated configurations require manual review, especially for complex conditional logic and regular expressions. Validate in test environment first.
-* **Edge Cases** — Some complex nested conditions may require manual adjustment. Tool will mark areas requiring attention.
+### Regex limitations
+
+CloudFront path patterns only support `*` and `?` wildcards — no regex. When a Cloudflare rule uses a regex path expression that cannot be mapped to a wildcard pattern, the pipeline assigns it to the default `"*"` behavior and adds a `non_convertible` note.
+
+### What happens to non-convertible items
+
+Non-convertible items are **not silently dropped**. The pipeline:
+1. Records each one in the IR with a `reason` string
+2. Aggregates them in `conversion_report.md` (generated by the finalizer)
+3. The report groups items by domain and rule type for human review
+
+## WAF Pipeline — What Does NOT Get Converted
+
+| Item | Reason | Alternative |
+|------|--------|-------------|
+| Cloudflare Managed Rules (OWASP, etc.) | Use AWS WAF's own managed rule groups | AWS Managed Rules for WAF |
+| API Abuse Detection | Cloudflare-specific ML feature | AWS WAF Bot Control + custom rules |
+| SaaS / mTLS configurations | Fundamentally different architecture | Manual design required |
+
+## General Limitations
+
+### Manual review required
+
+AI-generated configurations require manual review before production deployment. Pay special attention to:
+- Complex conditional logic and regular expressions
+- Origin routing rules (verify correct backend mapping)
+- Cache TTL values (verify business requirements)
+- Security-sensitive headers
+
+### Large-scale configurations
+
+- **Token consumption** increases with rule count. Use `claude-sonnet-4.6-1m` for zones with many domains or large rule sets.
+- **API rate limits** may slow down parallel processing. See the README for guidance on adjusting batch size.
+
+### Features not configured by this tool
+
+- **CloudFront access logging** — involves decisions (S3 bucket, log format, shared vs per-domain) outside migration scope
+- **Lambda@Edge deployment** — the tool generates Lambda code but uses `REPLACE_WITH_DEPLOYED_LAMBDA_ARN` placeholders. You must deploy the Lambda functions and fill in the ARNs before `terraform apply`.
+- **DNS cutover** — the tool generates CloudFront distributions but does not modify DNS records. You must update DNS to point to CloudFront after verifying the configuration.

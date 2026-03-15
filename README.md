@@ -66,6 +66,8 @@ flowchart TD
 
 The CDN pipeline converts all Cloudflare CDN configurations (Cache Rules, Origin Rules, Redirect Rules, URL Rewrites, Header Transforms, Bulk Redirects, Compression Rules, Custom Error Rules, and more) into working Terraform for AWS CloudFront.
 
+**Scope:** Not all Cloudflare features have CloudFront equivalents. Items that cannot be converted (e.g., `serve_stale`, Page Rules, Snippets, certain match fields) are recorded in a `conversion_report.md` for manual review — they are never silently dropped. See [Limitations and Caveats](./docs/limitations.md) for the complete list.
+
 **One user interaction point:** After parsing DNS records, the tool generates a CSV template. You fill in two columns per domain — whether to apply Cloudflare's default 2-hour cache for 70+ file extensions, and optionally your ACM certificate ARN. Everything else is fully automated.
 
 **Output structure:**

@@ -66,6 +66,8 @@ flowchart TD
 
 CDN 流程将所有 Cloudflare CDN 配置（缓存规则、源站规则、重定向规则、URL 重写、请求头转换、批量重定向、压缩规则、自定义错误规则等）转换为可直接使用的 AWS CloudFront Terraform 文件。
 
+**转换范围：** 并非所有 Cloudflare 功能都有 CloudFront 等价物。无法转换的项目（如 `serve_stale`、Page Rules、Snippets、部分匹配字段）会记录在 `conversion_report.md` 中供人工审查——不会被静默丢弃。完整列表见 [限制与注意事项](./docs/limitations.md)。
+
 **唯一的用户交互点：** 解析 DNS 记录后，工具生成一个 CSV 模板。你只需填写两列内容——是否为每个域名应用 Cloudflare 默认的 70+ 文件类型 2 小时缓存策略，以及可选的 ACM 证书 ARN。其余步骤完全自动化。
 
 **输出目录结构：**
