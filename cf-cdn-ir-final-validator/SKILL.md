@@ -109,9 +109,9 @@ Before any validation logic, read the following documents in order:
    output schema (metadata and cache_behavior document field definitions).
 3. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` — V1 validation rules
    (to understand what was already checked and must not be re-checked here).
-3. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` — finalization logic, including
+4. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` — finalization logic, including
    the sorting algorithm, policy deduplication scheme, and shadowing detection.
-4. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-final-validator/SKILL.md` (this file) — V2 checks.
+5. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-final-validator/SKILL.md` (this file) — V2 checks.
 
 Do not proceed without reading these. The sorting algorithm and policy ID
 format defined in the finalizer SKILL.md are required to verify Check 7.
@@ -436,7 +436,7 @@ WARN: Policy "<policy_id>" in dedup_manifest.json is not referenced by any cache
 
 ### Step 6 — Write Validation Output
 
-After all 8 checks complete:
+After all 7 checks complete:
 
 1. Determine `status`:
    - `"FAIL"` if `errors` list is non-empty (including global file checks
@@ -514,7 +514,9 @@ Correct file order (ascending precedence):
   precedence=2   /api/v2/*        (specific prefix)
   precedence=3   /api/*           (broad prefix)
   precedence=4   /static/*        (different prefix)
-  precedence=5   /*               (near-default)
+  precedence=5   *.apk            (extension pattern, custom TTL)
+  precedence=6   *.jpg            (extension pattern, custom TTL)
+  precedence=7   /*               (near-default)
   precedence=999 *                (default, always last)
 ```
 
