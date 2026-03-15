@@ -37,7 +37,7 @@ kiro-cli chat
 - **Kiro CLI** >= 1.24 — [安装文档](https://kiro.dev/docs/getting-started/installation/)。⚠️ 不推荐使用 Kiro IDE（不支持 subagent 中的 `skill://` 资源绑定）。
 - **Terraform** >= 1.8.0，AWS Provider >= 6.x — [安装 Terraform](https://developer.hashicorp.com/terraform/install)
 - **模型**：最低 `claude-sonnet-4.6`。CDN 迁移推荐使用 `claude-sonnet-4.6-1m`（每域名处理和 Terraform 生成的 context 消耗较大，与域名数量无关）。在 Kiro 中通过 `/model` 切换。
-- **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。运行前申请，或在 CSV 中留空让 Terraform 自动查找已签发的证书。
+- **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。运行前申请通配符证书（如 `*.example.com`），或在 CSV 中留空让 Terraform 自动查找已签发的证书。
 - **输入格式**：仅支持 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 导出。不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)——详见 [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)
 
 ## 转换范围
