@@ -27,7 +27,8 @@ rm -rf \
   "$SKILLS_DIR/cf-cdn-tf-shared-policies" \
   "$SKILLS_DIR/cf-cdn-tf-domain" \
   "$SKILLS_DIR/cf-cdn-js-validator" \
-  "$SKILLS_DIR/SKILL.md"
+  "$SKILLS_DIR/SKILL.md" \
+  "$SKILLS_DIR/scripts"
 
 cp -r cf-waf-analyzer "$SKILLS_DIR/"
 cp -r cf-waf-analyzer-validator "$SKILLS_DIR/"
@@ -42,6 +43,7 @@ cp -r cf-cdn-tf-shared-policies "$SKILLS_DIR/"
 cp -r cf-cdn-tf-domain "$SKILLS_DIR/"
 cp -r cf-cdn-js-validator "$SKILLS_DIR/"
 cp cloudflare-aws-converter/SKILL.md "$SKILLS_DIR/"
+cp -r cloudflare-aws-converter/scripts "$SKILLS_DIR/"
 
 # Copy subagent configurations
 echo "Copying subagent configurations to $AGENTS_DIR..."
