@@ -107,19 +107,7 @@ cloudflare-to-aws-cdn/
 
 **并行批次大小：** Pipeline 在 5 个阶段（处理、V1 验证、V2 验证、Terraform 生成、JS 验证）并行处理多个域名。默认批次大小为 **每次 2 个域名**——足够保守以避免大多数平台的 LLM API 限速（Anthropic API Tier 1: 50 RPM，AWS Bedrock 默认配额：新账号可能低至 2-10 RPM）。如果你的 API 配额更高，可以编辑 `cloudflare-aws-converter/SKILL.md` 中的"Parallel batch size"规则来增加批次大小。Anthropic Tier 2+（1,000+ RPM）或 Bedrock 已申请提额（200+ RPM）可以安全使用批次大小 4（Kiro CLI 最大值）。
 
-**部署顺序：** 生成的 Terraform 使用独立的 root module。按以下顺序 apply：
-
-```bash
-# 1. 先部署共享策略（创建 CachePolicy、ORP、RHP 资源）
-cd cloudflare-to-aws-cdn/terraform/shared
-terraform init && terraform apply
-
-# 2. 再逐个部署各域名（通过 data source 按名称查找共享策略）
-cd cloudflare-to-aws-cdn/terraform/domains/cdn_example_com
-terraform init && terraform apply
-```
-
-各域名可以在共享策略部署完成后独立 plan/apply。这样做的好处是爆炸半径小——修改一个域名不会影响其他域名。
+**部署顺序：** 生成的 Terraform 使用独立的 root module——共享策略必须在任何域名之前部署。完整的输出结构、分步部署说明、Lambda@Edge 处理和 KVS 数据导入请参阅 [部署指南](./docs/deployment-guide.md)。
 
 ## 快速开始
 
@@ -223,6 +211,7 @@ cd cloudflare-aws-edge-config-converter
 ## 更多信息
 
 - [最佳实践](./docs/best-practices.md)
+- [部署指南](./docs/deployment-guide.md)
 - [限制与注意事项](./docs/limitations.md)
 - [故障排除](./docs/troubleshooting.md)
 - [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)

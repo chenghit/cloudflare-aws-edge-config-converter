@@ -107,19 +107,7 @@ cloudflare-to-aws-cdn/
 
 **Parallel batch size:** The pipeline processes multiple domains in parallel at 5 stages (processing, V1 validation, V2 validation, Terraform generation, JS validation). The default batch size is **2 domains at a time** — conservative enough to avoid LLM API rate limits on most platforms (Anthropic API Tier 1: 50 RPM, AWS Bedrock default: as low as 2-10 RPM for new accounts). If your API quota is higher, you can increase the batch size by editing the "Parallel batch size" rule in `cloudflare-aws-converter/SKILL.md`. Anthropic Tier 2+ (1,000+ RPM) or Bedrock with approved quota increase (200+ RPM) can safely use batch size 4 (the Kiro CLI maximum).
 
-**Deployment order:** The generated Terraform uses independent root modules. Apply in this order:
-
-```bash
-# 1. Shared policies first (creates CachePolicy, ORP, RHP resources)
-cd cloudflare-to-aws-cdn/terraform/shared
-terraform init && terraform apply
-
-# 2. Each domain independently (looks up shared policies by name via data sources)
-cd cloudflare-to-aws-cdn/terraform/domains/cdn_example_com
-terraform init && terraform apply
-```
-
-Each domain can be planned and applied independently after the shared policies exist. This keeps blast radius small — changing one domain doesn't affect others.
+**Deployment order:** The generated Terraform uses independent root modules — shared policies must be deployed before any domain. See [Deployment Guide](./docs/deployment-guide.md) for the complete output structure, step-by-step deployment instructions, Lambda@Edge handling, and KVS data seeding.
 
 ## Quick Start
 
@@ -223,6 +211,7 @@ Most subagents only have file I/O and search permissions (`fs_read`, `fs_write`,
 ## More Information
 
 - [Best Practices](./docs/best-practices.md)
+- [Deployment Guide](./docs/deployment-guide.md)
 - [Limitations and Caveats](./docs/limitations.md)
 - [Troubleshooting](./docs/troubleshooting.md)
 - [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md)
