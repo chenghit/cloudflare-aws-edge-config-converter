@@ -114,7 +114,6 @@ distribution_settings.geo_restriction_type      # "none" | "whitelist" | "blackl
 distribution_settings.geo_restriction_locations # list of country codes
 distribution_settings.price_class               # "PriceClass_All" | "PriceClass_100" | "PriceClass_200"
 distribution_settings.waf_acl_arn               # null if no WAF
-distribution_settings.default_root_object       # "" if not set
 ```
 
 Use the `distribution_settings` from the **default cache behavior** (`path_pattern: "*"`)
@@ -423,24 +422,17 @@ If the minified size is still > 10 KB:
 **Case B — no origin_override ops, OR Case A step 5**:
 1. Move ALL viewer_request logic (entire function body) to
    `lambda/viewer_request_handler.js` as Lambda@Edge
-2. Replace `functions/<sanitized_name>_viewer_request.js` with a minimal pass-through:
-   ```javascript
-   import cf from 'cloudfront';
-   async function handler(event) {
-     return event.request;
-   }
-   ```
-   (This minimal function still needs to exist because it may be associated in
-   main.tf; alternatively, omit the CloudFront Function association entirely and
-   use Lambda@Edge alone — prefer omitting the CFF association if Lambda@Edge
-   covers all behaviour.)
+2. Remove the CloudFront Function viewer-request association from `main.tf`
+   entirely. **CloudFront does not allow a CFF and Lambda@Edge on the same
+   event type (viewer-request) for the same cache behavior.** Do not generate
+   a pass-through CFF — omit the CFF association and use Lambda@Edge alone.
 
 **Target**: viewer_request.js ≤ 8 KB (leave 2 KB buffer from 10 KB hard limit).
 
 #### 2e. Lambda@Edge file format
 
-Lambda@Edge files use Node.js CommonJS or ESM syntax (NOT CloudFront Functions
-Runtime 2.0 syntax):
+Lambda@Edge files use Node.js **CommonJS** syntax (NOT CloudFront Functions
+Runtime 2.0 syntax, NOT ESM):
 
 ```javascript
 // origin_request_handler.js
@@ -742,8 +734,9 @@ module "cdn_<sanitized_name>" {
   hostname    = "<hostname>"
   aliases     = [<quoted list of aliases>]
   price_class = "<price_class>"
-  http_version        = "<http_version>"
-  is_ipv6_enabled     = <true|false>
+  http_version            = "<http_version>"
+  is_ipv6_enabled         = <true|false>
+  minimum_protocol_version = "<minimum_protocol_version>"
   wait_for_deployment = false
 
   # ACM certificate — Pattern A or B
@@ -844,8 +837,8 @@ module wraps the distribution, you must pass them as a variable. Add to the modu
   ]
 ```
 
-And add the corresponding variable to `references/modules/cloudfront_distribution/variables.tf`
-and a `dynamic "custom_error_response"` block to `references/modules/cloudfront_distribution/main.tf`.
+The module already supports `custom_error_responses` as a variable — do not
+modify the module's `variables.tf` or `main.tf`.
 
 **Important rules**:
 - Remove every comment line (lines starting with `#` that are instructions)
@@ -912,10 +905,10 @@ After writing all files:
 6. **viewer_request.js**: Scan for `?.` — FAIL and escalate if found.
 7. **viewer_request.js**: Scan for `const [` or `let [` or `const {` or `let {`
    — FAIL and escalate if found.
-7. **viewer_request.js**: Scan for `Promise.` — FAIL and escalate if found.
-8. **lambda/*.js** (if present): Verify `exports.handler` or `export const handler`
-   is present. Verify `import cf from 'cloudfront'` is ABSENT.
-9. **Policy refs**: Verify every `data.aws_cloudfront_*_policy` block in main.tf
+8. **viewer_request.js**: Scan for `Promise.` — FAIL and escalate if found.
+9. **lambda/*.js** (if present): Verify `exports.handler` is present (CommonJS
+   format). Verify `import cf from 'cloudfront'` is ABSENT.
+10. **Policy refs**: Verify every `data.aws_cloudfront_*_policy` block in main.tf
    has a matching policy ID in `dedup_manifest.json`, and the `name` attribute
    uses the correct prefix (`cfcdn-cache-policy-`, `cfcdn-cache-bypass-`,
    `cfcdn-orp-`, or `cfcdn-rhp-`). Report any unresolved hash.
