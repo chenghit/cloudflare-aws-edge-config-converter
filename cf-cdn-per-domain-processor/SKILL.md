@@ -451,7 +451,9 @@ Action type: `set_cache_settings`.
         type: "default_cache"
         custom_ttl_map: {}
     ```
-  - The Lambda handles all extensions NOT covered by cache behaviors.
+  - `custom_ttl_map` is empty because custom TTLs are already handled by the
+    independent cache behaviors above. The Lambda only needs the default 7200s
+    TTL for extensions not covered by cache behaviors.
 
   **If >20 custom-TTL extensions:**
   - Do NOT create per-extension cache behaviors (too many, wastes quota).

@@ -7,10 +7,11 @@
 //
 // TEMPLATE USAGE:
 // - tf-domain copies this file as-is when no custom TTL overrides exist
-// - When custom TTL overrides exist (>20 extensions), tf-domain injects
-//   a customTtl map before the default TTL assignment
+// - When custom TTL overrides exist (>20 extensions), tf-domain replaces
+//   the CUSTOM_TTL_PLACEHOLDER block with a customTtl map and changes
+//   the ttl assignment to: const ttl = customTtl[extension] || 7200;
 
-export const handler = (event, context, callback) => {
+exports.handler = (event, context, callback) => {
     const response = event.Records[0].cf.response;
     const request = event.Records[0].cf.request;
 
@@ -38,8 +39,9 @@ export const handler = (event, context, callback) => {
 
     if (cacheableExtensions.has(extension) || uri.endsWith('/robots.txt')) {
         // CUSTOM_TTL_PLACEHOLDER: tf-domain inserts custom TTL map here when needed
-        // Example: const customTtl = {"apk": 31536000, "iso": 604800};
-        // const ttl = customTtl[extension] || 7200;
+        // Example replacement for >20 custom-TTL extensions:
+        //   const customTtl = {"apk": 31536000, "iso": 604800};
+        //   const ttl = customTtl[extension] || 7200;
 
         const ttl = 7200;
         response.headers['cache-control'] = [{
