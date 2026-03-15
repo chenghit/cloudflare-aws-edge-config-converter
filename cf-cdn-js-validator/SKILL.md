@@ -338,13 +338,15 @@ only; if it would fail, LE-04 already caught it.)
 
 #### CHECK CROSS-02: KVS usage matches IR
 
-From the domain IR, check `kvs_requirements`:
-- If IR has non-empty `kvs_requirements`:
+From the domain IR, check `kvs_requirements` — this is a mapping with three
+boolean fields: `needs_redirects`, `needs_continent`, `needs_eu`.
+
+- If **at least one** field is `true`:
   - At least one CFF file must contain `cf.kvs()` — FAIL if not found.
   ```bash
   grep -rn 'cf\.kvs()' "<functions_dir>"
   ```
-- If IR has empty/null `kvs_requirements`:
+- If **all three** fields are `false` (or the mapping is absent):
   - No CFF file must contain `cf.kvs()` — FAIL if found (unexpected KVS usage).
   ```bash
   grep -rn 'cf\.kvs()' "<functions_dir>"
@@ -354,11 +356,14 @@ From the domain IR, check `kvs_requirements`:
 
 #### CHECK CROSS-03: Lambda@Edge expected vs present
 
-From the domain IR, check `lambda_edge` field:
-- If `lambda_edge` is non-null in IR:
+From the domain IR, check `lambda_edge` — this is a mapping with sub-fields:
+`origin_request`, `origin_response`, `viewer_request`. Each is either `null`
+or a non-null object.
+
+- If **at least one** sub-field is non-null:
   - `lambda/` directory must exist and contain at least one `.js` file.
   - FAIL if lambda dir is missing or empty.
-- If `lambda_edge` is null in IR:
+- If **all** sub-fields are `null`:
   - `lambda/` directory must be absent or empty.
   - FAIL if lambda dir contains `.js` files (unexpected Lambda generation).
 
