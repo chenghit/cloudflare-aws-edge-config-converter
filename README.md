@@ -103,6 +103,8 @@ cloudflare-to-aws-cdn/
 
 **Single zone per run:** This tool converts one Cloudflare zone at a time. If your backup directory contains multiple zones, the orchestrator will detect this and ask you to specify which zone to convert. Run the tool once per zone.
 
+**Parallel batch size:** The pipeline processes multiple domains in parallel at 5 stages (processing, V1 validation, V2 validation, Terraform generation, JS validation). The default batch size is **2 domains at a time** — conservative enough to avoid LLM API rate limits on most platforms (Anthropic API Tier 1: 50 RPM, AWS Bedrock default: as low as 2-10 RPM for new accounts). If your API quota is higher, you can increase the batch size by editing the "Parallel batch size" rule in `cloudflare-aws-converter/SKILL.md`. Anthropic Tier 2+ (1,000+ RPM) or Bedrock with approved quota increase (200+ RPM) can safely use batch size 4 (the Kiro CLI maximum).
+
 **Deployment order:** The generated Terraform uses independent root modules. Apply in this order:
 
 ```bash

@@ -103,6 +103,8 @@ cloudflare-to-aws-cdn/
 
 **单 zone 运行：** 本工具每次只转换一个 Cloudflare zone。如果备份目录包含多个 zone，编排器会检测到并要求你指定转换哪个 zone。每个 zone 需要单独运行一次。
 
+**并行批次大小：** Pipeline 在 5 个阶段（处理、V1 验证、V2 验证、Terraform 生成、JS 验证）并行处理多个域名。默认批次大小为 **每次 2 个域名**——足够保守以避免大多数平台的 LLM API 限速（Anthropic API Tier 1: 50 RPM，AWS Bedrock 默认配额：新账号可能低至 2-10 RPM）。如果你的 API 配额更高，可以编辑 `cloudflare-aws-converter/SKILL.md` 中的"Parallel batch size"规则来增加批次大小。Anthropic Tier 2+（1,000+ RPM）或 Bedrock 已申请提额（200+ RPM）可以安全使用批次大小 4（Kiro CLI 最大值）。
+
 **部署顺序：** 生成的 Terraform 使用独立的 root module。按以下顺序 apply：
 
 ```bash

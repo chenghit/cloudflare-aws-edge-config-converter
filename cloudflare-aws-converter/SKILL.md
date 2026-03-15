@@ -155,7 +155,7 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
 **Stage 3: Per-Domain Processing** (parallelizable — invoke once per domain)
 1. Read `cloudflare-to-aws-cdn/domain_scope.json` to get the list of domains (or extract from the Stage 2 response).
 2. For each domain `{domain}` in the list, invoke `cf-cdn-per-domain-processor` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Process domain {domain}. Read cloudflare-to-aws-cdn/domain_scope.json for this domain's settings. Write the IR accumulator to cloudflare-to-aws-cdn/ir/accumulator/ (the skill will derive the sanitized filename from the hostname). Generate output files in {user_language}."`
-3. If there are many domains (> 5), invoke subagents concurrently where the orchestration environment supports it. Otherwise invoke serially.
+3. Dispatch subagents using the parallel batch size defined in Important Rules above.
 4. Wait for all per-domain processors to complete before proceeding.
 
 **Stage 4: IR Chunk Validation** (parallelizable — invoke once per domain)
@@ -234,6 +234,7 @@ For "Everything" scope, report results for each pipeline separately.
 - **Never read config files yourself** — always delegate to subagents
 - **Pass the exact path** the user provided; do not modify or resolve it
 - **Serial execution** for pipeline stages within a domain group; **parallel execution** where the same stage runs across multiple domains (Stages 3, 4, 6, 8, 9 of the CDN full pipeline)
+- **Parallel batch size: 2** (default). For parallelizable stages, dispatch at most 2 subagents at a time. Wait for the batch to complete before dispatching the next. This avoids hitting LLM API rate limits on most platforms (Anthropic Tier 1, AWS Bedrock default quotas). Users with higher API quotas can increase this — see the project README.
 - If the user's request is ambiguous about which conversion is needed, infer from context rather than asking
 - **When re-invoking the same subagent**, always explicitly state what action to perform and what inputs to use. Never assume the subagent remembers a previous invocation. Each call is a fresh session with no context. A vague re-invoke query (e.g. "run again") may cause the subagent to skip all tool calls and return immediately.
 - **CDN full pipeline requires a user pause at Stage 1** — always wait for the user to fill in `user_input.csv` before invoking Stage 2. Do not attempt to auto-fill the CSV.
