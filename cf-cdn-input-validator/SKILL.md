@@ -439,12 +439,8 @@ from the IR, not from `domain_scope.json`.
 
 ## Reference Documents
 
-No reference files are strictly required for this skill's validation logic. However,
-the following provide context if edge cases arise:
-
-| File                                                              | Purpose                              |
-|-------------------------------------------------------------------|--------------------------------------|
-| `references/cloudflare-rule-execution-order.md`  | Background on what rules will follow |
+No reference files are required for this skill. All validation logic is
+self-contained in the workflow steps above.
 
 ---
 

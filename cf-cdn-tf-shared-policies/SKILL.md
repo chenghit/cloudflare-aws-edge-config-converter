@@ -42,17 +42,18 @@ Create the directory if it does not exist. Only write `policies.tf`.
 
 ## Workflow
 
-### Step 0 — Read reference documents first
+### Step 0 — Verify input exists
 
-Before generating any code, read the following file to understand the dedup
-manifest structure:
+Before generating any code, verify the dedup manifest exists:
 
-1. `cf-cdn-ir-finalizer/SKILL.md` — understand what fields the dedup manifest
-   contains and how policy IDs are derived.
-2. `cloudflare-to-aws-cdn/shared/dedup_manifest.json` — the actual input data
-   you will process.
+```
+cloudflare-to-aws-cdn/shared/dedup_manifest.json
+```
 
-If either file is missing, halt and report the missing path; do not proceed.
+If the file is missing, halt and report the missing path; do not proceed.
+
+The manifest structure is fully documented in Step 1 below with a complete
+JSON example covering all three policy types.
 
 ---
 
@@ -463,8 +464,7 @@ broken file on disk.
   - `aws_cloudfront_cache_policy`
   - `aws_cloudfront_origin_request_policy`
   - `aws_cloudfront_response_headers_policy`
-- Dedup manifest schema: `cf-cdn-ir-finalizer/SKILL.md` (Step 6 — Write Dedup Manifest)
-- Preceding skill output: `cloudflare-to-aws-cdn/shared/dedup_manifest.json`
+- Input: `cloudflare-to-aws-cdn/shared/dedup_manifest.json` (structure documented in Step 1)
 
 ## Naming Convention (Critical — Do Not Change)
 

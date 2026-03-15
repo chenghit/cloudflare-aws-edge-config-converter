@@ -57,23 +57,7 @@ operator.
 
 Follow every step in order. Do not skip steps or reorder them.
 
-### Step 1 — Read Reference Documentation
-
-Before touching any backup data, read the following reference document:
-
-```
-references/cloudflare-rule-execution-order.md
-```
-
-This document explains Cloudflare's rule execution model, which provides essential
-context for understanding how proxied records interact with downstream rules. Even
-though this skill only parses DNS records, understanding the execution model ensures
-you interpret record metadata (e.g., proxied vs. DNS-only) correctly.
-
-If the reference file does not exist, log a warning but continue — it is informational
-context for this step only.
-
-### Step 2 — Ask for Backup Path (if not provided)
+### Step 1 — Ask for Backup Path (if not provided)
 
 If the user has not specified the Cloudflare backup directory or `DNS.txt` path,
 ask for it now:
@@ -89,7 +73,7 @@ Verify the file exists. If it does not, abort with:
 ERROR: DNS.txt not found at <path>. Please check the backup directory.
 ```
 
-### Step 3 — Parse DNS.txt
+### Step 2 — Parse DNS.txt
 
 Cloudflare exports DNS records as a Cloudflare API response object inside `DNS.txt`.
 The file format is:
@@ -173,7 +157,7 @@ The file format is:
   ERROR: DNS.txt could not be parsed as JSON. File may be corrupted or in wrong format.
   ```
 
-### Step 4 — SaaS Detection Check
+### Step 3 — SaaS Detection Check
 
 **This is a hard safety gate. Abort the entire task if SaaS is detected.**
 
@@ -225,7 +209,7 @@ Please handle SaaS domain migration manually before using this toolchain.
 
 Do not write any output files. Do not proceed.
 
-### Step 5 — Group Hostnames by Apex Domain
+### Step 4 — Group Hostnames by Apex Domain
 
 For each proxied hostname, `apex_domain` = the `zone_name` derived from the directory
 path (as described in Step 3). All records in a single `DNS.txt` share the same apex.
@@ -240,7 +224,7 @@ Build `apex_groups`:
     - Otherwise → suggest `"*.<apex_domain>"` (wildcard covers all direct subdomains)
     - If any hostname has more labels than `<subdomain>.<apex_domain>` (i.e., deeper than one level below the zone) → add a `cert_note` field noting that a SAN cert covering deeper subdomains may be needed
 
-### Step 6 — Write dns_manifest.yaml
+### Step 5 — Write dns_manifest.yaml
 
 Create `OUTPUT_DIR` if it does not exist.
 
@@ -281,7 +265,7 @@ saas_detected: false
 - `saas_detected` must always be `false` at this point (if it were true, we would have
   aborted in Step 4).
 
-### Step 7 — Write user_input_template.csv
+### Step 6 — Write user_input_template.csv
 
 Write `user_input_template.csv` with the following structure:
 
@@ -313,7 +297,7 @@ Include a `## Instructions` comment block at the top of the CSV file? **No.** CS
 must not have comments. Instead, print instructions to stdout after writing the file
 (see Step 8).
 
-### Step 8 — Print Summary and Instructions
+### Step 7 — Print Summary and Instructions
 
 After successfully writing both files, print the following summary to the operator:
 
@@ -351,12 +335,8 @@ column definitions:
 
 ## Reference Documents
 
-The following reference files provide background context. Read them as specified in the
-Workflow steps above.
-
-| File                                               | When to Read     | Purpose                                              |
-|----------------------------------------------------|------------------|------------------------------------------------------|
-| `references/cloudflare-rule-execution-order.md` | Step 1 (required) | Cloudflare execution model context        |
+No reference files are required for this skill. All parsing logic is
+self-contained in the workflow steps above.
 
 ---
 
