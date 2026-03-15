@@ -273,7 +273,7 @@ Write `user_input_template.csv` with the following structure:
 hostname,apply_default_cache_behavior,cert_arn
 cdn.c.example.com,Y,
 www.c.example.com,Y,
-cors1.c.example.com,N,arn:aws:acm:us-east-1:123456789:certificate/abc123
+cors1.c.example.com,N,arn:aws:acm:us-east-1:<ACCOUNT_ID>:certificate/<CERTIFICATE_ID>
 ```
 
 **Column definitions:**

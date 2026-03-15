@@ -178,7 +178,7 @@ Regex for validation:
 VALIDATION ERROR [row <N>]: cert_arn for "<hostname>" does not match ACM ARN format.
   Provided: "<value>"
   Expected: arn:aws:acm:<region>:<12-digit-account-id>:certificate/<uuid>
-  Example:  arn:aws:acm:us-east-1:123456789012:certificate/abc12345-1234-1234-1234-abcdef123456
+  Example:  arn:aws:acm:us-east-1:<ACCOUNT_ID>:certificate/<CERTIFICATE_ID>
 ```
 
 **Important:** CloudFront requires ACM certificates to be in **us-east-1** regardless
@@ -317,7 +317,7 @@ Use 2-space JSON indentation. Do not minify.
       "apex_domain": "c.example.com",
       "apply_default_cache_behavior": true,
       "cert_arn_mode": "explicit",
-      "cert_arn": "arn:aws:acm:us-east-1:123456789012:certificate/abc12345-1234-1234-1234-abcdef123456",
+      "cert_arn": "arn:aws:acm:us-east-1:<ACCOUNT_ID>:certificate/<CERTIFICATE_ID>",
       "origin_content": "httpecho.a.letsmakeit.link",
       "origin_type": "server"
     },
