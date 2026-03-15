@@ -36,7 +36,7 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 
 - **Kiro CLI** >= 1.24 — [Installation guide](https://kiro.dev/docs/getting-started/installation/). ⚠️ Kiro IDE is not recommended (does not support `skill://` resource binding in subagents).
 - **Terraform** >= 1.8.0 with AWS Provider >= 6.x — [Install Terraform](https://developer.hashicorp.com/terraform/install)
-- **Model**: `claude-sonnet-4.6` minimum. Use `claude-sonnet-4.6-1m` for CDN migration with > 10 domains. Switch with `/model` in Kiro.
+- **Model**: `claude-sonnet-4.6` minimum. Use `claude-sonnet-4.6-1m` for CDN migration (per-domain processing and Terraform generation are context-heavy regardless of domain count). Switch with `/model` in Kiro.
 - **ACM certificates** (CDN only): CloudFront requires certs in us-east-1. Provision before running, or leave blank in the CSV to let Terraform auto-discover existing ISSUED certs.
 - **Input format**: Only works with [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) exports. NOT compatible with [cf-terraforming](https://github.com/cloudflare/cf-terraforming) — see [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md).
 
