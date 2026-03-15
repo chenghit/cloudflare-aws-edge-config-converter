@@ -557,6 +557,8 @@ lambda_edge:
 
 Action type: `rewrite` with `action_parameters.headers`.
 
+**Mapping table for `set` and `add` operations:**
+
 | Pattern | IR field |
 |---------|----------|
 | Static `set` with no condition | `response_headers_policy.custom_headers` |
@@ -564,6 +566,34 @@ Action type: `rewrite` with `action_parameters.headers`.
 | CORS headers (Access-Control-Allow-*) | `response_headers_policy.cors` |
 | Conditional headers (expression present) | `viewer_response_ops` as `type: set_header` / `add_header` |
 | Dynamic values (cf vars, concat) | `viewer_response_ops`; flag in `non_convertible` if CF Functions cannot evaluate |
+
+**Mapping for `remove` operation:**
+
+| Pattern | IR field |
+|---------|----------|
+| Static `remove` with no condition | `response_headers_policy.remove_headers` (list of header name strings) |
+| Conditional `remove` (expression present) | `viewer_response_ops` as `type: remove_header` |
+
+**CloudFront restricted headers — check before mapping any response header operation:**
+
+The following headers cannot be modified or removed by edge functions. If a
+Cloudflare rule targets one of these, add a `non_convertible` entry instead.
+
+- Disallowed (causes HTTP 502): `Connection`, `Expect`, `Keep-Alive`,
+  `Proxy-Authenticate`, `Proxy-Authorization`, `Proxy-Connection`, `Trailer`,
+  `Upgrade`, `X-Accel-Buffering`, `X-Accel-Charset`, `X-Accel-Limit-Rate`,
+  `X-Accel-Redirect`, `X-Amz-Cf-*`, `X-Amzn-*`, `X-Cache`, `X-Edge-*`,
+  `X-Forwarded-Proto`, `X-Real-IP`
+- Read-only in viewer response: `Via`, `Warning` (CFF + Lambda@Edge);
+  `Content-Length`, `Content-Encoding`, `Transfer-Encoding` (Lambda@Edge only)
+
+If the target header matches any disallowed or read-only header above, do NOT
+emit a `viewer_response_ops` or `response_headers_policy` entry. Instead add:
+```yaml
+non_convertible:
+  - rule_id: "<rule_id>"
+    reason: "Cannot remove/modify response header '<header>' — CloudFront treats it as disallowed/read-only"
+```
 
 **`response_headers_policy.security_headers` schema:**
 ```yaml

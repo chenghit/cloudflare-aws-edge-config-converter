@@ -156,6 +156,7 @@ response_headers_policy:
   security_headers: {}
   custom_headers: []
   cors: null
+  remove_headers: []              # list of header name strings to remove
 
 viewer_request_ops: []
 viewer_response_ops: []

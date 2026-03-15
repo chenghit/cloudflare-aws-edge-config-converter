@@ -363,12 +363,6 @@ resource "aws_cloudfront_response_headers_policy" "policy_<policy_id>" {
     }
     # one `items` block per entry
   }
-
-  # ── Server timing (only if server_timing_headers_config is non-null) ──
-  server_timing_headers_config {
-    enabled       = <bool>
-    sampling_rate = <float>
-  }
 }
 ```
 
