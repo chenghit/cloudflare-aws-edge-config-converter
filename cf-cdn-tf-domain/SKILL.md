@@ -250,17 +250,22 @@ request.uri = request.uri.replace(/<pattern>/, "<replacement>");
 
 **3. origin_override** — for each origin_override op:
 
+The `conditions` field is a list (ordered, first-match-wins). Generate one `if`
+block per condition entry, in list order. Do NOT merge conditions into a single
+`if` — each condition routes to a different origin.
+
 ```javascript
 // origin_override: <description>
-if (<condition>) {
+// condition 1
+if (<condition_from_conditions[0].match>) {
   cf.updateRequestOrigin({
-    domainName: "<new_origin>",
-    originPath: "<prefix_path_or_empty_string>",
-    customOriginConfig: {
-      port: <443|80>,
-      protocol: "<https|http>",
-      sslProtocols: ["TLSv1.2"]
-    }
+    domainName: "<conditions[0].origin.domain>",
+  });
+}
+// condition 2
+if (<condition_from_conditions[1].match>) {
+  cf.updateRequestOrigin({
+    domainName: "<conditions[1].origin.domain>",
   });
 }
 ```
@@ -520,9 +525,17 @@ async function handler(event) {
   const response = event.response;
 
   // --- viewer_response_ops (set_header / add_header / remove_header) ---
-  // (generated code here)
-  // Note: can modify/add/delete response headers and cookies
-  // Note: cannot read the original response body (can only replace it entirely)
+  // For each op:
+  //   If condition is null → unconditional (emit directly)
+  //   If condition is non-null → wrap in if (<condition>) { ... }
+  //
+  // remove_header:  delete response.headers["<header-name-lowercase>"];
+  // set_header:     response.headers["<header-name-lowercase>"] = { value: "<value>" };
+  // add_header:     if (!response.headers["<header-name-lowercase>"]) {
+  //                   response.headers["<header-name-lowercase>"] = { value: "<value>" };
+  //                 }
+  //
+  // Use the same condition codegen rules as viewer_request.js (Step 2a).
   // Note: this function does NOT execute when origin returns HTTP 400+
 
   return response;
@@ -772,7 +785,9 @@ After writing all files:
 7. **viewer_request.js**: Scan for `const [` or `let [` or `const {` or `let {`
    — FAIL and escalate if found.
 8. **viewer_request.js**: Scan for `Promise.` — FAIL and escalate if found.
-9. **lambda/*.js** (if present): Verify `exports.handler` is present (CommonJS
+9. **lambda/*.js** (if present — includes `origin_request_handler.js`,
+   `viewer_request_handler.js`, and `default_cache_origin_response.js`):
+   Verify `exports.handler` is present (CommonJS
    format). Verify `import cf from 'cloudfront'` is ABSENT.
 10. **Policy refs**: Verify every `data.aws_cloudfront_*_policy` block in main.tf
    has a matching policy ID in `dedup_manifest.json`, and the `name` attribute

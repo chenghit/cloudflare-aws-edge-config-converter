@@ -78,6 +78,12 @@ module "cdn_<sanitized_name>" {
       lambda_arn   = "REPLACE_WITH_DEPLOYED_LAMBDA_ARN"
       include_body = false
     },
+    # Include only if lambda_edge.origin_response is set in IR (e.g. default_cache)
+    {
+      event_type   = "origin-response"
+      lambda_arn   = "REPLACE_WITH_DEPLOYED_LAMBDA_ARN"
+      include_body = false
+    },
   ]
 
   # Ordered cache behaviors (one entry per path pattern, sorted by precedence)
