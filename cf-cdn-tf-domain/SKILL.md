@@ -838,19 +838,14 @@ and a `dynamic "custom_error_response"` block to `references/modules/cloudfront_
 ### Step 7 — Write all files
 
 Write files in this order:
-1. Copy the module to `cloudflare-to-aws-cdn/terraform/modules/cloudfront_distribution/`:
-   - Copy `references/modules/cloudfront_distribution/main.tf`
-   - Copy `references/modules/cloudfront_distribution/variables.tf`
-   - Copy `references/modules/cloudfront_distribution/outputs.tf`
-   - Skip if the files already exist (another domain invocation may have written them first)
-2. `functions/<sanitized_name>_viewer_request.js` (always, unless omitted per Step 2e)
-3. `functions/<sanitized_name>_viewer_response.js` (only if `viewer_response_ops` non-empty)
-4. `lambda/origin_request_handler.js` (if generated)
-5. `lambda/viewer_request_handler.js` (if generated)
-6. `kvs-data.json` (if kvs_requirements non-empty)
-7. `functions.tf`
-8. `kvs.tf` (if kvs_requirements non-empty)
-9. `outputs.tf` — always write with these outputs:
+1. `functions/<sanitized_name>_viewer_request.js` (always, unless omitted per Step 2e)
+2. `functions/<sanitized_name>_viewer_response.js` (only if `viewer_response_ops` non-empty)
+3. `lambda/origin_request_handler.js` (if generated)
+4. `lambda/viewer_request_handler.js` (if generated)
+5. `kvs-data.json` (if kvs_requirements non-empty)
+6. `functions.tf`
+7. `kvs.tf` (if kvs_requirements non-empty)
+8. `outputs.tf` — always write with these outputs:
    ```hcl
    output "distribution_id" {
      value = module.cdn_<sanitized_name>.distribution_id

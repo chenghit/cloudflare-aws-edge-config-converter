@@ -35,46 +35,47 @@ parameter. This skill must derive the sanitized filename from it.
 
 ---
 
-## Reference Documents — MUST Read ALL Before Processing
+## Reference Documents
 
-Read each file with the `read` tool before starting Step 1.
-Resolve paths relative to **this skill's directory** (i.e., `cf-cdn-per-domain-processor/`).
+Read references using the `read` tool. Resolve paths relative to **this skill's
+directory** (i.e., `cf-cdn-per-domain-processor/`).
+
+### Pre-read before Step 1 (required — read all 6 before processing any rules)
 
 | # | Relative path | Purpose |
 |---|---------------|---------|
 | 1 | `references/cloudflare-rule-execution-order.md` | Canonical execution order for all 11 rule types |
-| 2 | `references/cloudflare-default-cache-behavior.md` | ~70 cacheable file extensions with default 2 h TTL |
 | 3 | `references/cloudfront-cache-behavior-path-pattern.md` | CloudFront wildcard rules (`*`, `?`), regex limitations |
 | 4 | `references/convertible-rules.md` | Which Cloudflare rule actions can be expressed in CF Functions |
 | 5 | `references/field-mapping.md` | Cloudflare field names → CloudFront / CF Functions equivalents |
 | 6 | `references/cloudfront-function-limits.md` | JS 10 KB size cap, forbidden syntax, runtime constraints |
-| 7 | `references/cloudfront-origin-request-policy.md` | ORP allExcept/allViewerAndWhitelistCloudFront — Terraform syntax and available CF-generated headers |
-| 8 | `references/bulk-redirects-handling.md` | Bulk redirect KVS key format, include_subdomains handling, value format |
 | 9 | `references/non-convertible-rules.md` | Rules that cannot be converted and why — mark as non_convertible |
-| 10 | `references/cloudfront-viewer-headers.md` | CloudFront viewer headers, Cloudflare→CloudFront header mapping |
-| 11 | `references/kvs-usage-and-limits.md` | KVS limits: 5 MB store, 512 char key, 1 KB value, 1 KVS per function |
 
-**Deferred reference (read on demand, NOT in Step 0):**
+### On-demand references (read only when triggered — do NOT pre-read)
 
 | # | Relative path | When to read |
 |---|---------------|--------------|
-| 12 | `references/continent-countries.md` | Only when `ip.src.continent` or `ip.src.is_in_european_union` appears in any rule expression. Contains 239 country→continent mappings needed for KVS data generation. |
-
-**Do not skip any of #1–#11.** Processing without these references risks incorrect field mapping,
-missed non-convertibles, or invalid path patterns.
+| 2 | `references/cloudflare-default-cache-behavior.md` | ⚠️ Step 3g, only when `apply_default_cache_behavior: true` |
+| 7 | `references/cloudfront-origin-request-policy.md` | ⚠️ Step 3d (Origin Rules) or Step 3f (Request Header Transform) |
+| 8 | `references/bulk-redirects-handling.md` | ⚠️ Step 3e, only when Bulk-Redirect-Rules.txt exists |
+| 10 | `references/cloudfront-viewer-headers.md` | ⚠️ Step 3f (Request Header Transform) |
+| 11 | `references/kvs-usage-and-limits.md` | ⚠️ Step 3e (Bulk Redirects) or when continent/EU matching needed |
+| 12 | `references/continent-countries.md` | ⚠️ Only when `ip.src.continent` or `ip.src.is_in_european_union` appears |
+| — | `references/bulk-redirect-processing.md` | ⚠️ Step 3e, only when Bulk-Redirect-Rules.txt exists |
+| — | `references/behavior-assembly.md` | ⚠️ After ALL Step 3 rule processing is complete (Step 4-6) |
 
 ---
 
-## Step 0 — Read Reference Documents
+## Step 0 — Pre-read Reference Documents
 
-Use the `read` tool on references #1–#11 listed above, in order.
-Store key facts mentally (execution order, extension list, field mappings, limits, ORP behavior values, bulk redirect KVS format, non-convertible rules, viewer headers, KVS limits).
+Use the `read` tool on the 6 pre-read references listed above (#1, #3, #4, #5, #6, #9).
+Store key facts mentally (execution order, field mappings, path pattern rules, function
+limits, convertible/non-convertible rules).
 
-Do **not** read #12 (`continent-countries.md`) now — it is 447 lines of country mappings
-that are only needed when processing `ip.src.continent` or `ip.src.is_in_european_union`
-expressions. You will be reminded to read it at that point.
+Do **not** read on-demand references now. Each has a ⚠️ trigger point in the workflow
+where you will be reminded to read it.
 
-Only proceed to Step 1 after all eleven files have been read.
+Only proceed to Step 1 after all six pre-read files have been read.
 
 ---
 
@@ -248,6 +249,8 @@ propagate to all Cache Behaviors during Step 4.
 
 ### 3d — Origin Rules (`Origin-Rules.txt`)
 
+**⚠️ READ NOW:** `references/cloudfront-origin-request-policy.md` — ORP behavior values and Terraform syntax.
+
 Action type: `route` with `action_parameters.origin` containing override fields.
 
 - Add a single `type: origin_override` entry to `viewer_request_ops`.
@@ -282,83 +285,24 @@ custom header injection.
 
 ### 3e — Bulk Redirects
 
-**Phase 1:** Read `Bulk-Redirect-Rules.txt` (check both `<backup_path>/` and
-`<backup_path>/account/`). Identify which redirect lists are referenced.
+**⚠️ READ NOW:** If `Bulk-Redirect-Rules.txt` exists in the backup directory, read
+these references before proceeding:
+- `references/bulk-redirect-processing.md` — complete processing logic for this step
+- `references/bulk-redirects-handling.md` — KVS key format, validation checklist
+- `references/kvs-usage-and-limits.md` — KVS size and key constraints
 
-**Phase 2:** For each referenced list name `<name>`, read
-`<backup_path>/account/List-Items-redirect-<name>.txt`.
-If not found there, also check `<backup_root>/account/<timestamp>/` (CloudflareBackup
-stores account-level files separately from zone-level files).
+If `Bulk-Redirect-Rules.txt` does not exist, skip this step entirely.
 
-The file is a JSON API response: `{"result": [...]}`. Each item has:
-```json
-{
-  "id": "...",
-  "redirect": {
-    "source_url": "cdn.c.example.com/old-path",
-    "target_url": "https://cdn.c.example.com/new-path",
-    "status_code": 301,
-    "preserve_query_string": false,
-    "include_subdomains": false
-  }
-}
-```
-
-The redirect fields are inside `.result[].redirect`. Note that `include_subdomains`
-and `preserve_query_string` may be absent (default to `false`).
-
-**IR output:**
-- Add `type: bulk_redirect` to `viewer_request_ops`:
-  ```yaml
-  - type: bulk_redirect
-    cf_source_rule: "<rule_id>"
-    condition: null
-    params:
-      kvs_prefix: "redirect:"
-  ```
-- Set `kvs_requirements.needs_redirects: true`.
-- For each redirect item, generate `kvs_data` entries. The KVS key format is
-  `redirect:{host}{path}` — the host is included in the key so the CF Function
-  can match by both host and path.
-
-  **`include_subdomains: false` (default)** — generate ONE entry:
-  ```yaml
-  - key: "redirect:example.com/old/path"
-    value: "301|0|https://example.com/new/path"   # status|preserve_qs(1/0)|target
-  ```
-
-  **`include_subdomains: true`** — generate TWO entries:
-  ```yaml
-  - key: "redirect:example.com/old/path"
-    value: "301|0|https://example.com/new/path"
-  - key: "redirect:.example.com/old/path"
-    value: "301|0|https://example.com/new/path"
-  ```
-  The `.example.com` key (leading dot before the full hostname) enables
-  subdomain matching. The lookup function prepends a dot to the request's
-  Host header value and checks for a match. For example, a request to
-  `cdn.example.com` generates lookup key `redirect:.cdn.example.com/old/path`,
-  which does NOT match `redirect:.example.com/old/path`. This is correct —
-  `include_subdomains` in Cloudflare bulk redirects means the redirect applies
-  to the source domain AND its subdomains, so the wildcard key uses the
-  source domain from the redirect entry (not the hostname being processed).
-
-  **Exception — subdomain wildcard key derivation:**
-  When the `source_url` domain matches the hostname being processed, use the
-  hostname. When they differ, use the domain from `source_url`. See the
-  "Bulk redirect subdomain wildcard key derivation" constraint below for details.
-
-- **Value format**: `{status_code}|{preserve_qs}|{target_url}`
-  - `preserve_qs`: use `1` (true) or `0` (false) — NOT `true`/`false` strings
-  - `target_url`: full URL with protocol
-  - `status_code`: 301 or 302 (default 301)
-
-- See `references/bulk-redirects-handling.md` for the
-  complete specification including validation checklist.
+Follow the workflow in `references/bulk-redirect-processing.md` for Phase 1 (discover
+lists), Phase 2 (read list items), and Phase 3 (generate IR output).
 
 ---
 
 ### 3f — Request Header Transform (`Request-Header-Transform.txt`)
+
+**⚠️ READ NOW:** Read these references if not already loaded:
+- `references/cloudfront-origin-request-policy.md` — ORP behavior values (if not read in 3d)
+- `references/cloudfront-viewer-headers.md` — CloudFront viewer headers and Cloudflare→CloudFront mapping
 
 Action type: `rewrite` with `action_parameters.headers` list.
 
@@ -419,7 +363,9 @@ Action type: `set_cache_settings`.
   (Cloudflare evaluates all rules and the last one wins).
 
 **Default cache behavior extension list:**
-- If `apply_default_cache_behavior: true`, read the extension list from reference #2.
+- If `apply_default_cache_behavior: true`:
+  **⚠️ READ NOW:** `references/cloudflare-default-cache-behavior.md` — the ~70 cacheable file extensions.
+  Read the extension list from that reference.
 - For each extension (e.g. `.jpg`, `.css`, `.js`), add a Cache Behavior:
   - `path_pattern`: `"*.<ext>"`
   - `cache_policy.ttl.default`: `7200` (2 h)
@@ -559,212 +505,11 @@ Mapping rules based on Cloudflare `algorithms`:
 
 ---
 
-## Step 4 — Build Cache Behaviors
+## Steps 4–6 — Build Cache Behaviors, Write IR, Print Summary
 
-### 4a. Collect all distinct path_patterns
-
-From all rules processed in Step 3, gather every unique `path_pattern` value.
-Each becomes one Cache Behavior document.
-
-### 4b. Assign precedence
-
-Use these initial values; re-sort all behaviors after collection:
-
-| Pattern type | Precedence formula |
-|---|---|
-| Exact path (no wildcards) | `10` |
-| `/prefix/path/*` (depth ≥ 3) | `20 + len(prefix)` |
-| `/prefix/*` (depth 2) | `20 + len(prefix)` |
-| `*.ext` (extension match) | `100–169` (from 3g) |
-| `/*` | `990` |
-| `*` (default) | `999` |
-
-Lower precedence number = higher CloudFront priority (evaluated first).
-
-### 4c. Warn on high Cache Behavior count
-
-CloudFront's default quota is **75** cache behaviors per distribution (including the
-default). This is a soft limit — users can request an increase via AWS Support.
-
-If the collected set exceeds 75 non-default cache behaviors, do **not** merge them.
-Instead, add a warning entry to `non_convertible`:
-```yaml
-- cf_source_rule: "system"
-  rule_type: "system_limit"
-  reason: "Cache behavior count (N) exceeds CloudFront default quota of 75; request a quota increase via AWS Support before deploying"
-  shadowed: false
-```
-
-### 4d. Populate distribution_settings on all behaviors
-
-Copy `distribution_settings` values derived from Configuration Rules (3c) to every
-Cache Behavior document. Each document is self-contained for the Terraform generator.
-
-### 4e. Set default origin
-
-For every Cache Behavior, set:
-```yaml
-origin:
-  id: "origin_<sanitized_hostname>"
-  domain: "<origin_content from domain_scope.json>"
-  protocol: "https"
-  port: 443
-  custom_origin_headers: []
-```
-Unless overridden by an Origin Rule for that specific path.
-
----
-
-## Step 5 — Write IR Accumulator File
-
-### Output path
-
-```
-cloudflare-to-aws-cdn/ir/accumulator/<sanitized_hostname>.yaml
-```
-
-Create the directory if it does not exist.
-
-### File format
-
-The output is a **multi-document YAML file** separated by `---`.
-
-**Document 1 (metadata):** Always present, always first.
-**Documents 2…N (cache_behavior):** One per Cache Behavior, sorted by ascending precedence.
-**Last cache_behavior document:** Default Cache Behavior (`path_pattern: "*"`, `precedence: 999`).
-
-### Metadata document schema
-
-```yaml
-document_type: metadata
-hostname: "cdn.c.example.com"
-sanitized_name: "cdn_c_example_com"
-apex_domain: "c.example.com"
-origin_type: "server"              # "s3" | "object_storage" | "server" — from domain_scope.json
-cert_arn_mode: "explicit"        # or "data_source"
-cert_arn: "arn:aws:acm:..."      # null if cert_arn_mode == "data_source"
-kvs_requirements:
-  needs_redirects: false
-  needs_continent: false
-  needs_eu: false
-kvs_data: []                     # populated by Step 3e if bulk redirects exist
-custom_error_responses: []       # populated by Step 3i; distribution-level setting
-lambda_edge:                     # populated by Step 3i if advanced error handling needed
-  origin_request: null
-  origin_response: null
-```
-
-### Required schema per cache_behavior document
-
-```yaml
-document_type: cache_behavior
-hostname: "cdn.c.example.com"
-path_pattern: "/api/*"
-precedence: 20
-
-distribution_settings:
-  viewer_protocol_policy: "redirect-to-https"   # "allow-all" | "redirect-to-https" | "https-only"
-  minimum_protocol_version: "TLSv1.2_2021"
-  http_version: "http2and3"                      # "http1.1" | "http2" | "http2and3"
-  is_ipv6_enabled: true
-  cert_arn_mode: "explicit"                      # from domain_scope.json ("explicit" | "data_source")
-  price_class: "PriceClass_All"                  # always PriceClass_All (Cloudflare has no equivalent)
-  waf_acl_arn: null                              # always null (WAF is separate; user adds post-migration)
-  geo_restriction_type: "none"                   # always "none" (geo-blocking is in WAF, not CDN rules)
-  geo_restriction_locations: []
-
-origin:
-  id: "origin_cdn_c_example_com"
-  domain: "httpecho.a.letsmakeit.link"           # from origin_content (CNAME target)
-  protocol: "https"
-  port: 443
-  custom_origin_headers: []
-  s3_origin: false                               # true for S3 REST origins (Cloud Connector)
-
-cache_policy:
-  bypass: false
-  ttl:
-    min: 0
-    default: 300
-    max: 3600
-  cache_key:
-    headers: []
-    cookies: []
-    query_strings: "none"                        # "none" | "all" | ["param1", "param2"]
-  enable_gzip: true                              # from Compression Rules algorithms; default true
-  enable_brotli: true                            # from Compression Rules algorithms; default true
-  ttl_sources: []                                # [{cf_source_rule, ttl}]
-  resolved_ttl: 300
-
-origin_request_policy:
-  forward:
-    headers: "none"                              # "none" | "whitelist" | "allViewer" | "allViewerAndWhitelistCloudFront" | "allExcept"
-    headers_list: []                             # items to INCLUDE (whitelist/allViewerAndWhitelistCloudFront) or EXCLUDE (allExcept)
-    cookies: "none"                              # "none" | "whitelist" | "allExcept" | "all"
-    cookies_list: []                             # items to INCLUDE (whitelist) or EXCLUDE (allExcept)
-    query_strings: "none"                        # "none" | "whitelist" | "allExcept" | "all"
-    query_strings_list: []                       # items to INCLUDE (whitelist) or EXCLUDE (allExcept)
-
-response_headers_policy:
-  security_headers: {}
-  custom_headers: []
-  cors: null
-
-viewer_request_ops: []
-viewer_response_ops: []
-
-lambda_edge:
-  origin_request: null
-  origin_response: null
-  viewer_request: null
-
-non_convertible: []
-```
-
-### Defaults when source data is absent or ambiguous
-
-| Field | Default | Rationale |
-|-------|---------|-----------|
-| `viewer_protocol_policy` | `"redirect-to-https"` | Security best practice |
-| `minimum_protocol_version` | `"TLSv1.2_2021"` | AWS recommended |
-| `http_version` | `"http2and3"` | Enables QUIC/HTTP3 |
-| `is_ipv6_enabled` | `true` | No cost; broad compatibility |
-| `cache_policy.ttl.min` | `0` | Allows origin to override |
-| `cache_policy.ttl.default` | `300` | 5-minute safe default |
-| `cache_policy.ttl.max` | `3600` | 1-hour cap |
-| `cache_policy.enable_gzip` | `true` | Default: enable both encodings |
-| `cache_policy.enable_brotli` | `true` | Default: enable both encodings |
-| `origin.protocol` | `"https"` | Encrypted in transit |
-| `origin.port` | `443` | Matches https default |
-
-If a value is missing **and** there is no safe default, do **not** guess.
-Leave the field as `null` and add a `non_convertible` entry with reason:
-`"Unable to determine <field> from source data; manual review required"`.
-
----
-
-## Step 6 — Print Summary
-
-After writing the file, output a plain-text summary to stdout:
-
-```
-=== cf-cdn-per-domain-processor summary ===
-Hostname:            cdn.c.example.com
-Output file:         cloudflare-to-aws-cdn/ir/accumulator/cdn_c_example_com.yaml
-Cache behaviors:     8  (7 path-specific + 1 default)
-Non-convertible:     3 rules flagged
-KVS requirements:    needs_redirects=true, needs_continent=false, needs_eu=false
-KVS entries:         42
-
-Warnings:
-  - [WARN] Cache behavior count (82) exceeds CloudFront default quota of 75; request a quota increase before deploying
-  - [WARN] Rule cf-rule-abc123: regex expression not representable as CloudFront wildcard; moved to default behavior
-
-Non-convertible rules:
-  - cf-rule-xyz789 [configuration_rule]: Browser Integrity Check has no CloudFront equivalent
-  - cf-rule-def456 [cache_rule]: serve_stale has no direct CloudFront cache policy equivalent
-  - cf-rule-ghi012 [request_header]: Device detection headers should use CloudFront native device detection
-```
+**⚠️ READ NOW:** `references/behavior-assembly.md` — contains the complete workflow
+for Step 4 (Build Cache Behaviors), Step 5 (Write IR Accumulator File), and
+Step 6 (Print Summary). Read it now and follow its instructions.
 
 ---
 

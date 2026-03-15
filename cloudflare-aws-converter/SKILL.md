@@ -86,6 +86,21 @@ If the user requests CDN full pipeline (Terraform generation), also check for:
 - `cloudflare-to-aws-cdn/user_input.csv` — if it exists, CDN pipeline can start from Stage 2
 - `cloudflare-to-aws-cdn/domain_scope.json` — if it exists, pipeline can start from Stage 3
 
+### Step 2b: Initialize CDN output directory (CDN pipeline only)
+
+Before dispatching any CDN subagent, run the initialization script to create the
+output directory structure and copy static Terraform modules:
+
+```bash
+bash ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-init.sh "{config_path}"
+```
+
+This creates `cloudflare-to-aws-cdn/` with all subdirectories and copies the
+CloudFront distribution Terraform module. Subagents can then write directly to
+their output paths without needing to create directories.
+
+Skip this step if `cloudflare-to-aws-cdn/` already exists (resuming a previous run).
+
 ### Step 3: Invoke subagents
 
 **CRITICAL: Every subagent query MUST start with a skill-loading instruction.** Subagents may not automatically load their skill file when invoked via `use_subagent`. Prefix every query with:
