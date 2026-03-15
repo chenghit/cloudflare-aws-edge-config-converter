@@ -193,21 +193,21 @@ resource "aws_cloudfront_cache_policy" "policy_<policy_id>" {
   parameters_in_cache_key_and_forwarded_to_origin {
     cookies_config {
       cookie_behavior = "<behavior>"
-      # Only include the `cookies` block when behavior == "whitelist" AND items is non-empty
+      # Include cookies block ONLY when behavior is "whitelist" or "allExcept" AND items non-empty
       cookies {
         items = [<quoted, comma-separated items>]
       }
     }
     headers_config {
       header_behavior = "<behavior>"
-      # Only include the `headers` block when behavior == "whitelist" AND items is non-empty
+      # Include headers block ONLY when behavior is "whitelist" AND items non-empty
       headers {
         items = [<quoted, comma-separated items>]
       }
     }
     query_strings_config {
       query_string_behavior = "<behavior>"
-      # Only include the `query_strings` block when behavior == "whitelist" AND items is non-empty
+      # Include query_strings block ONLY when behavior is "whitelist" or "allExcept" AND items non-empty
       query_strings {
         items = [<quoted, comma-separated items>]
       }
@@ -220,21 +220,25 @@ resource "aws_cloudfront_cache_policy" "policy_<policy_id>" {
 ```
 
 **Cache key field mapping** from `config.cache_key`:
-- `config.cache_key.cookies` → cookie items list (behavior derived from type: string = `"none"`/`"all"`, list = `"whitelist"`)
-- `config.cache_key.headers` → header items list
-- `config.cache_key.query_strings` → `"none"` | `"all"` | list of param names
 
-**Behavior mapping** (IR value → AWS):
+| IR field | Terraform behavior | Terraform items |
+|----------|-------------------|-----------------|
+| `config.cache_key.headers` (always a list) | empty list → `"none"` (omit `headers {}` block); non-empty list → `"whitelist"` | `items = [<sorted list>]` |
+| `config.cache_key.cookies` (always a list) | empty list → `"none"` (omit `cookies {}` block); non-empty list → `"whitelist"` | `items = [<sorted list>]` |
+| `config.cache_key.query_strings` | string `"none"` → `"none"` (omit `query_strings {}` block); string `"all"` → `"all"` (omit `query_strings {}` block); list → `"whitelist"` | `items = [<sorted list>]` |
 
-| IR value | `cookie_behavior` / `query_string_behavior` | `header_behavior` (cache policy only) |
-|---|---|---|
-| `none` | `"none"` | `"none"` |
-| `whitelist` | `"whitelist"` | `"whitelist"` |
-| `all` | `"all"` | ⚠️ Not valid — use `"whitelist"` with all needed headers |
-| `allExcept` | `"allExcept"` | ⚠️ Not valid — use `"whitelist"` with the headers you DO want |
-| _(unrecognized)_ | `"none"` + `# WARNING` comment | `"none"` + `# WARNING` comment |
+**Valid behaviors per config type (cache policy only):**
 
-**Important:** Cache Policy `header_behavior` only supports `"none"` and `"whitelist"`. The `allExcept` and `all` values are only valid for cookies and query strings in cache policies.
+| Config | `none` | `whitelist` | `allExcept` | `all` |
+|--------|--------|-------------|-------------|-------|
+| `cookies_config` | ✅ (no items block) | ✅ (items required, non-empty) | ✅ (items required, non-empty) | ✅ (no items block) |
+| `headers_config` | ✅ (no items block) | ✅ (items required, non-empty) | ❌ NOT VALID | ❌ NOT VALID |
+| `query_strings_config` | ✅ (no items block) | ✅ (items required, non-empty) | ✅ (items required, non-empty) | ✅ (no items block) |
+
+**Critical rules:**
+- Include the items sub-block (`cookies {}`, `headers {}`, `query_strings {}`) ONLY when behavior is `"whitelist"` or `"allExcept"` AND items is non-empty.
+- Omit the items sub-block entirely when behavior is `"none"` or `"all"`.
+- `whitelist` or `allExcept` with an empty items list is an API error — if the IR has an empty list, fall back to `"none"` and add a `# WARNING: empty whitelist converted to none` comment.
 
 **Item list formatting**: always emit as a Terraform list literal with double-quoted
 strings, sorted lexicographically. Example: `items = ["foo", "bar", "baz"]` →
