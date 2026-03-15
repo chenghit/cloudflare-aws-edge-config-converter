@@ -80,18 +80,32 @@ Proceeding without reading these documents may produce incorrect finalized IR.
 
 ### Step 1 — Verify Prerequisites
 
-**1a. Confirm all domains passed V1 validation:**
+**1a. Confirm all accumulator files have passed V1 validation:**
 
-Read all JSON files in `cloudflare-to-aws-cdn/ir/validation/chunk/`.
+List all `*.yaml` files in `cloudflare-to-aws-cdn/ir/accumulator/`. For each
+accumulator file, check that a corresponding V1 validation report exists in
+`cloudflare-to-aws-cdn/ir/validation/chunk/` with `status: "PASS"`.
 
-For each file, check `status`. If any file has `status: "FAIL"`:
+Note: Some domains from `domain_scope.json` may have been SKIPPED by the
+orchestrator (failed processing after retry). These domains will NOT have
+accumulator files — this is expected. Only validate accumulator files that
+actually exist.
+
+If any existing accumulator file has a V1 report with `status: "FAIL"`:
 - Output an error:
   ```
-  PREREQUISITE_FAILED: Domain <hostname> has not passed V1 validation.
+  PREREQUISITE_FAILED: Domain <hostname> has an accumulator file but has not passed V1 validation.
   Validation report: cloudflare-to-aws-cdn/ir/validation/chunk/<hostname>-v1.json
-  Run cf-cdn-ir-chunk-validator for this domain and resolve all errors before running the finalizer.
   ```
 - **Stop. Do not proceed.**
+
+If an accumulator file exists but has NO corresponding V1 report:
+- Output an error:
+  ```
+  PREREQUISITE_MISSING: Domain <hostname> has an accumulator file but no V1 validation report.
+  Run cf-cdn-ir-chunk-validator for this domain before running the finalizer.
+  ```
+- **Stop.**
 
 If no V1 validation files exist at all:
 - Output:
@@ -479,6 +493,12 @@ _If no S3 origins: omit this entire section._
 | Domain | Cache Behaviors | Shadowed | Non-Convertible | Status |
 |--------|----------------|----------|-----------------|--------|
 | ... | ... | ... | ... | Finalized |
+| ... | — | — | — | SKIPPED: {reason} |
+
+Include SKIPPED domains (passed by the orchestrator in the query) with status
+`SKIPPED: {reason}`. These domains have no accumulator files and were not
+processed — list them for completeness so the user knows which domains need
+manual attention.
 ```
 
 Write this file even if it contains only empty sections. An absent
