@@ -67,11 +67,9 @@ cloudflare-to-aws-cdn/conversion_report.md
 
 Before executing any logic, read the following reference documents in order:
 
-1. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` — IR processing
-   logic, viewer_request_ops type definitions, and constraints.
-2. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/references/behavior-assembly.md` —
+1. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/references/behavior-assembly.md` —
    IR output schema. Know what fields exist in cache_behavior and metadata documents.
-3. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` — understand what
+2. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` — understand what
    validations have already passed. Do not re-validate; trust the V1 pass.
 4. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` (this file) — finalization
    logic and algorithms.
@@ -554,7 +552,6 @@ Next step: run cf-cdn-ir-final-validator for each domain.
 
 | Document | Purpose |
 |---|---|
-| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` | IR processing logic, type definitions, and constraints |
 | `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/references/behavior-assembly.md` | IR output schema — metadata and cache_behavior document field definitions |
 | `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` | V1 validation rules — understand what has already been checked |
 | `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` | This file — sorting, dedup, and finalization algorithms |
