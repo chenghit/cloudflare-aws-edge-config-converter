@@ -105,7 +105,9 @@ Rules:
 Before any validation logic, read the following documents in order:
 
 1. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` — IR schema reference.
-2. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` — V1 validation rules
+2. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/references/behavior-assembly.md` — IR
+   output schema (metadata and cache_behavior document field definitions).
+3. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` — V1 validation rules
    (to understand what was already checked and must not be re-checked here).
 3. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` — finalization logic, including
    the sorting algorithm, policy deduplication scheme, and shadowing detection.
@@ -520,7 +522,8 @@ Correct file order (ascending precedence):
 
 | Document | Purpose |
 |---|---|
-| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` | IR schema reference |
+| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` | IR processing logic and constraints |
+| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/references/behavior-assembly.md` | IR output schema — metadata and cache_behavior document field definitions |
 | `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` | V1 checks — do not re-run these |
 | `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` | Sorting algorithm, dedup logic, output format |
 | `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-final-validator/SKILL.md` | This file — V2 checks |

@@ -121,7 +121,9 @@ Before beginning any validation, read the following reference files in order:
 
 1. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` — understand the IR
    schema produced by the upstream processor.
-2. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` (this file) — confirm
+2. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/references/behavior-assembly.md` — the
+   IR output schema (metadata document and cache_behavior document field definitions).
+3. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` (this file) — confirm
    the checks to perform.
 
 Do not skip this step. The IR schema definition is authoritative; if the
@@ -504,7 +506,8 @@ Before executing this skill, read the following documents:
 
 | Document | Purpose |
 |---|---|
-| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` | IR schema definition — authoritative source for what fields are expected in cache_behavior and metadata documents |
+| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md` | IR processing logic — field definitions for viewer_request_ops, non_convertible, and constraints |
+| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/references/behavior-assembly.md` | IR output schema — metadata and cache_behavior document field definitions |
 | `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` | This file — defines all validation rules |
 
 If any reference document is missing or unreadable, FAIL with:

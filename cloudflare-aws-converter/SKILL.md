@@ -92,12 +92,12 @@ Before dispatching any CDN subagent, run the initialization script to create the
 output directory structure and copy static Terraform modules:
 
 ```bash
-bash ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-init.sh "{config_path}"
+bash ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-init.sh "$(pwd)"
 ```
 
-This creates `cloudflare-to-aws-cdn/` with all subdirectories and copies the
-CloudFront distribution Terraform module. Subagents can then write directly to
-their output paths without needing to create directories.
+This creates `cloudflare-to-aws-cdn/` under the current working directory (where all
+skills expect it) and copies the CloudFront distribution Terraform module. Subagents
+can then write directly to their output paths without needing to create directories.
 
 Skip this step if `cloudflare-to-aws-cdn/` already exists (resuming a previous run).
 
