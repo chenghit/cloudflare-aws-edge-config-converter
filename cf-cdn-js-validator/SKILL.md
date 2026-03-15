@@ -230,16 +230,17 @@ grep -n 'async function handler(event)' "<file_path>"
 
 #### CHECK CFF-09: Return statement
 
-Run all three greps:
+Run all four greps:
 ```bash
 grep -n 'return req' "<file_path>"
 grep -n 'return request' "<file_path>"
+grep -n 'return response' "<file_path>"
 grep -n 'return {statusCode' "<file_path>"
 ```
 
-- `status`: `FAIL` if ALL THREE greps return no output (none found).
+- `status`: `FAIL` if ALL FOUR greps return no output (none found).
 - A file with no return is an invalid handler.
-- `detail`: `"No valid return statement found (checked: 'return req', 'return request', 'return {statusCode')"` on FAIL.
+- `detail`: `"No valid return statement found (checked: 'return req', 'return request', 'return response', 'return {statusCode')"` on FAIL.
 
 #### CHECK CFF-10: No `.then` / `.catch` chains
 
@@ -254,8 +255,6 @@ grep -n '\.catch(' "<file_path>"
 - `detail`: include all matching lines on WARN, with note: "Promise chain methods
   are syntactically valid but AWS warns they may exceed function memory quota.
   Use sequential await instead."
-
-#### CHECK CFF-11: No `.then` / `.catch` chains (moved — see CFF-10)
 
 ---
 
@@ -276,12 +275,11 @@ node --check "<file_path>"
 
 ```bash
 grep -n 'exports\.handler' "<file_path>"
-grep -n 'export const handler' "<file_path>"
 ```
 
-- `status`: `FAIL` if BOTH greps return no output.
-- At least one of the two patterns must be present.
-- `detail`: `"No valid handler export found (checked: 'exports.handler', 'export const handler')"` on FAIL.
+- `status`: `FAIL` if grep returns no output.
+- Lambda@Edge must use CommonJS format (`exports.handler`).
+- `detail`: `"No valid handler export found (checked: 'exports.handler')"` on FAIL.
 
 #### CHECK LE-03: File size limit
 
@@ -432,9 +430,8 @@ NOT suggest what the fix should be. Report and stop.
 | `CFF-08` | cloudfront_function | Contains `async function handler(event)` |
 | `CFF-09` | cloudfront_function | Contains a valid return statement |
 | `CFF-10` | cloudfront_function | No `.then()` / `.catch()` chains (WARN — valid but risks memory quota) |
-| `CFF-11` | cloudfront_function | (removed) |
 | `LE-01`  | lambda_edge | Node.js syntax check |
-| `LE-02`  | lambda_edge | Valid handler export pattern |
+| `LE-02`  | lambda_edge | Valid handler export (`exports.handler` — CommonJS only) |
 | `LE-03`  | lambda_edge | File size ≤ 1 MB |
 | `LE-04`  | lambda_edge | Does not import `cloudfront` module |
 | `LE-05`  | lambda_edge | Uses `event.Records[0].cf` event shape |

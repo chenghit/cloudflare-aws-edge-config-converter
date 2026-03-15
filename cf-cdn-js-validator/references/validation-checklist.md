@@ -1,291 +1,54 @@
-# CloudFront Function Code Validation Checklist
+# V3 Validation Checklist — Supplementary Notes
 
-This checklist must be completed before generating the deployment guide. It ensures the generated CloudFront Function code is correct, performant, and will not cause runtime errors.
+This document supplements the checks defined in SKILL.md. It provides
+additional context for specific checks where grep-based detection has
+known edge cases. **The authoritative check definitions are in SKILL.md.**
 
-## 1. Syntax Validation
+## CFF-02: Optional chaining false positives
 
-Verify NO forbidden ES6+ features are used (see `unsupported-syntax.md` for details):
+`grep -n '\?\.' "<file>"` may match:
+- Ternary expressions followed by property access: `x ? obj.prop : default`
+- Regex patterns containing `?.`
+- String literals containing `?.`
 
-- [ ] No optional chaining (`?.`) - causes FunctionExecutionError
-- [ ] No nullish coalescing (`??`) - causes FunctionExecutionError
-- [ ] No array destructuring (`const [a,b] = arr`) - causes FunctionExecutionError
-- [ ] No object destructuring (`const {prop} = obj`) - causes FunctionExecutionError
-- [ ] No spread in object literals (`{...obj}`) - likely causes FunctionExecutionError
-- [ ] Arrays accessed by index: `parts[0]`, `parts[1]`, not `[a,b] = parts`
-- [ ] Objects accessed directly: `obj.prop`, not `{prop} = obj`
-- [ ] Use conditional checks: `obj ? obj.prop : default`, not `obj?.prop ?? default`
+These are false positives. Under adversarial posture, flag them anyway —
+false positive is acceptable, false negative is not.
 
-## 2. Async Operations Validation
+## CFF-05 / CFF-10: Promise and .then/.catch — WARN not FAIL
 
-- [ ] No `Promise.all()` used - should use sequential `await` (AWS warns of memory quota risk)
-- [ ] No `Promise.any()` used - should use sequential `await`
-- [ ] No promise chain methods (`.then()`, `.catch()`) - should use `await` (AWS warns of memory quota risk)
-- [ ] All KVS lookups wrapped in `try...catch` blocks
-- [ ] KVS lookups use sequential `await`, not parallel
+These are warnings, not failures. Promise methods and chain syntax are
+syntactically valid in CloudFront Functions Runtime 2.0. AWS documentation
+warns they "can require high function memory usage" and recommends sequential
+`await` instead. A WARN does not set `overall_status` to FAIL.
 
-Note: `Promise.all()`, `.then()`, and `.catch()` are syntactically valid in Runtime 2.0
-but AWS documentation warns they "can require high function memory usage" and recommends
-using `await` instead. The validator flags these as warnings, not errors.
+## CFF-09: Return statement patterns
 
-## 3. Rule Execution Order Validation
+The check looks for `return req`, `return request`, or `return {statusCode`.
+For **viewer_response** functions, the return is `return response` — add this
+pattern to the grep list for viewer_response files.
 
-Verify code follows Cloudflare execution order (see `cloudflare-rule-execution-order.md`):
+## LE-02: Handler export — CommonJS only
 
-- [ ] **Step 1**: Redirect Rules (if any) - execute first
-- [ ] **Step 2**: URL Rewrites (if any) - modify `request.uri`
-- [ ] **Step 3**: Bulk Redirects (if any) - check KVS with potentially rewritten URI
-- [ ] **Step 4**: Request Header Transforms (if any) - modify headers last
+Lambda@Edge files must use CommonJS format: `exports.handler`.
+ESM syntax (`export const handler`) is not valid for Lambda@Edge deployed
+via CloudFront. Only check for `exports.handler`.
 
-Within each rule type:
+## LE-05: default_cache_origin_response.js
 
-- [ ] Rules processed in numerical order (Rule 1, Rule 2, Rule 3...)
-- [ ] Order matches summary file (which matches Cloudflare JSON array order)
-- [ ] First matching redirect rule returns immediately (early return)
+The default cache Lambda uses `event.Records[0].cf.response` (not
+`event.Records[0].cf.request`). The LE-05 grep for `event.Records[0].cf`
+covers both patterns — no special handling needed.
 
-## 4. Continent Logic Validation
+## CROSS-02: KVS usage — what counts
 
-- [ ] All `ip.src.continent` rules use KVS lookup with prefix `continent:`
-- [ ] No direct comparison of country code to continent code (e.g., `country === 'AS'` is WRONG)
-- [ ] Continent codes (AS, EU, AF, NA, SA, OC, AN) are NOT used as country codes
-- [ ] KVS keys use format `continent:{countryCode}`, values are continent codes
-- [ ] Complete country-to-continent mapping included (see `continent-countries.md` for all 239 countries)
-
-**Why this matters**: Cloudflare `ip.src.continent` returns continent codes (AS, EU, etc.), but CloudFront `cloudfront-viewer-country` returns country codes (CN, US, GB, etc.). You must map country → continent.
-
-## 5. EU Country Check Validation
+`cf.kvs()` in CFF files indicates KVS usage. The check compares presence
+of `cf.kvs()` against IR `kvs_requirements`. Note that continent and EU
+lookups also use KVS (not just bulk redirects), so `kvs_requirements` may
+be non-empty even without bulk redirects.
 
-- [ ] EU country list stored in KVS with prefix `eu:`
-- [ ] All 27 EU countries included: AT, BE, BG, CY, CZ, DE, DK, EE, ES, FI, FR, GR, HR, HU, IE, IT, LT, LU, LV, MT, NL, PL, PT, RO, SE, SI, SK
-- [ ] KVS keys use format `eu:{countryCode}`, value is `1`
-- [ ] Function uses existence check (try/catch pattern)
-- [ ] Logic handles both EU and non-EU cases correctly
-
-## 6. Bulk Redirects Validation
+## CROSS-03: Lambda@Edge — what counts
 
-For each bulk redirect entry (see `bulk-redirects-handling.md`):
-
-- [ ] Entries with `include_subdomains: false` generate exactly 1 KVS entry
-- [ ] Entries with `include_subdomains: true` generate exactly 2 KVS entries
-- [ ] Subdomain wildcard key format: `redirect:.{domain}{path}` (note leading dot)
-- [ ] Subdomain wildcard uses domain from summary header, NOT extracted from source URL
-- [ ] KVS value format: `{status}|{preserve_qs}|{target_url}`
-- [ ] `preserve_qs` stored as `1` (true) or `0` (false), not "true"/"false"
-- [ ] Status code stored (default 301 if not specified)
-- [ ] Target URL includes protocol (https://)
-- [ ] Source URL does NOT include protocol
-
-Function lookup logic:
-
-- [ ] Tries exact host match first: `redirect:{host}{uri}`
-- [ ] Tries subdomain match if exact fails: `redirect:.{domain}{uri}`
-- [ ] Subdomain extraction logic correct (handles multi-level domains)
-
-## 7. Query String Handling Validation
-
-For redirects with `preserve_query_string`:
-
-- [ ] Checks if query string exists before appending
-- [ ] Uses correct separator: `?` if target has no query, `&` if target already has query
-- [ ] Uses `request.rawQueryString()` for simple preservation
-- [ ] Handles multiValue parameters if using parsed `request.querystring`
-
-For URL rewrites:
-
-- [ ] Query string preserved or modified as specified in Cloudflare rule
-- [ ] No accidental query string loss
-
-## 8. Header Handling Validation
-
-- [ ] All header names are lowercase (CloudFront requirement)
-- [ ] CloudFront viewer headers accessed correctly:
-  - `cloudfront-viewer-country` (not `CloudFront-Viewer-Country`)
-  - `cloudfront-viewer-asn`
-  - `cloudfront-viewer-city`, etc.
-- [ ] "Cloudflare" replaced with "CloudFront" in header values (e.g., `X-From-CDN: CloudFront`)
-- [ ] True-Client-IP uses `event.viewer.ip`, not `cloudfront-viewer-address` (which includes port)
-- [ ] Header modifications happen AFTER all redirect logic (not wasted if redirecting)
-
-## 9. KVS Usage Validation
-
-- [ ] Bulk redirects stored in KVS (if any)
-- [ ] Continent mappings stored in KVS with prefix `continent:` (if any `ip.src.continent` rules)
-- [ ] EU countries stored in KVS with prefix `eu:` (if any `ip.src.is_in_european_union` rules)
-- [ ] All KVS entries use correct key prefixes
-- [ ] KVS JSON format valid
-- [ ] No duplicate keys in KVS file
-
-## 10. Size Validation
-
-- [ ] Function size calculated and reported to user
-- [ ] If >6KB: Minified version generated
-- [ ] If >10KB: Error reported OR data moved to KVS
-- [ ] Minified version removes comments and whitespace
-- [ ] Minified version shortens variable names if needed
-- [ ] Size optimization techniques applied:
-  - Large data moved to KVS
-  - Redundant code eliminated
-  - Ternary operators used where appropriate
-
-## 11. Performance Optimization Validation
-
-- [ ] Simple patterns converted to string methods:
-  - `eq "value"` → `===`
-  - `ne "value"` → `!==`
-  - `contains "substring"` → `includes()`
-  - `wildcard r"*.domain"` → `endsWith('.domain')`
-  - `wildcard r"/prefix/*"` → `startsWith('/prefix/')`
-  - `starts_with(field, "prefix")` → `startsWith()`
-  - `ends_with(field, "suffix")` → `endsWith()`
-  - `in { ... }` → `[...].includes()`
-- [ ] Regex from `matches` operator preserved unchanged
-- [ ] Rule execution order preserved from Cloudflare configuration
-- [ ] No redundant checks after early returns
-
-## 12. Code Structure Validation
-
-- [ ] Starts with: `import cf from 'cloudfront';`
-- [ ] KVS initialized if needed: `const kvsHandle = cf.kvs();`
-- [ ] Function signature: `async function handler(event)`
-- [ ] Returns `request` object (or redirect response)
-- [ ] Inline comments explain each section
-- [ ] Code is readable and maintainable
-
-## 13. Output Files Validation
-
-- [ ] `viewer-request-function.js` generated with comments
-- [ ] `viewer-request-function.min.js` generated if size >6KB
-- [ ] `key-value-store.json` generated if KVS used
-- [ ] KVS JSON format valid (array of objects with `key` and `value` fields)
-- [ ] All KVS keys follow naming conventions (e.g., `redirect:`, `continent:`, `eu:`)
-
-## Validation Report Template
-
-After completing all checks and fixing any issues, generate and present this summary report to the user:
-
-```
-## Code Generation Summary
-
-### Rules Converted
-- Total rules: X
-  - Redirect Rules: X
-  - URL Rewrites: X
-  - Bulk Redirects: X entries
-  - Request Header Transforms: X
-
-### Function Size
-- Unminified: X KB
-- Minified: Y KB (if applicable)
-- Status: ✅ Within limits / ⚠️ Approaching limit (but functional)
-
-### KVS Usage
-- Total entries: X
-- Entry types:
-  - Bulk redirects: X (if applicable)
-  - Continent mapping: X countries (if applicable)
-  - EU countries: 27 (if applicable)
-
-### Non-Convertible Rules
-- Total: X
-- List:
-  1. [Rule name] - [Reason] - [CloudFront alternative]
-  2. ...
-
-### Validation Status
-✅ All validation checks passed. Code is ready for deployment.
-```
-
-**Do not show validation issues to the user.** If issues are found during validation, fix them automatically and re-validate until all checks pass. Only present the final summary after successful validation.
-
-## Common Validation Failures
-
-### Failure 1: Optional Chaining Used
-
-**Symptom**: Code contains `?.` operator
-
-**Impact**: FunctionExecutionError at runtime (passes validation during deployment)
-
-**Fix**: Replace with conditional checks
-```javascript
-// ❌ WRONG
-const country = request.headers['cloudfront-viewer-country']?.value;
-
-// ✅ CORRECT
-const country = request.headers['cloudfront-viewer-country'] 
-    ? request.headers['cloudfront-viewer-country'].value 
-    : undefined;
-```
-
-### Failure 2: Array Destructuring Used
-
-**Symptom**: Code contains `const [a, b] = array`
-
-**Impact**: FunctionExecutionError at runtime
-
-**Fix**: Use array indexing
-```javascript
-// ❌ WRONG
-const [status, preserveQs, target] = redirectData.split('|');
-
-// ✅ CORRECT
-const parts = redirectData.split('|');
-const status = parts[0];
-const preserveQs = parts[1];
-const target = parts[2];
-```
-
-### Failure 3: Country Code Used as Continent Code
-
-**Symptom**: Code compares `country === 'AS'` or `country === 'EU'`
-
-**Impact**: Logic never matches (AS/EU are continent codes, not country codes)
-
-**Fix**: Use KVS to derive continent from country
-```javascript
-// ❌ WRONG
-if (country === 'AS') { ... }
-
-// ✅ CORRECT
-try {
-    const continent = await kvsHandle.get(`continent:${country}`);
-    if (continent === 'AS') { ... }
-} catch (err) {
-    // Country not in mapping
-}
-```
-
-### Failure 4: Bulk Redirect Missing Subdomain Entry
-
-**Symptom**: `include_subdomains: true` but only 1 KVS entry generated
-
-**Impact**: Subdomain requests won't match redirect
-
-**Fix**: Generate 2 entries
-```json
-// ✅ CORRECT
-{"key": "redirect:example.com/path", "value": "301|1|https://..."},
-{"key": "redirect:.example.com/path", "value": "301|1|https://..."}
-```
-
-### Failure 5: Wrong Rule Execution Order
-
-**Symptom**: Header transforms before redirects, or bulk redirects before URL rewrites
-
-**Impact**: Wasted CPU, incorrect behavior
-
-**Fix**: Follow execution order
-1. Redirect Rules
-2. URL Rewrites
-3. Bulk Redirects
-4. Request Header Transforms
-
-### Failure 6: Function Size Exceeds 10KB
-
-**Symptom**: Function size >10KB
-
-**Impact**: Cannot deploy
-
-**Fix**: 
-1. Generate minified version
-2. Move large data to KVS
-3. Remove redundant code
-4. Shorten variable names
+The IR `lambda_edge` field has sub-fields: `origin_request`,
+`origin_response`, `viewer_request`. Any non-null sub-field means Lambda
+files should exist. The `origin_response` sub-field is used for the
+default cache behavior Lambda (type: `default_cache`).
