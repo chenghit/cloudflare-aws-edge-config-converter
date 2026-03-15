@@ -94,7 +94,7 @@ Parse `dns_manifest.yaml`. Extract:
          Please re-run cf-cdn-dns-parser to verify.
   ```
 
-Build a lookup map: `{ hostname → {apex_domain, record_type, origin_content} }` for
+Build a lookup map: `{ hostname → {apex_domain, record_type, origin_content, origin_type} }` for
 quick access during validation.
 
 Also record the expected set of hostnames: every `hostname` in `proxied_domains`.
@@ -102,6 +102,9 @@ Also record the expected set of hostnames: every `hostname` in `proxied_domains`
 ### Step 3 — Read and Parse user_input.csv
 
 Parse `user_input.csv` as a CSV file.
+
+**Encoding:** Strip UTF-8 BOM (`\xEF\xBB\xBF`) from the beginning of the file if
+present — Excel and some editors add this when saving CSV files.
 
 **Expected columns (exact header names, case-sensitive):**
 ```
@@ -116,6 +119,7 @@ ERROR: user_input.csv has unexpected column headers.
 ```
 
 Parse every data row, trimming whitespace from all field values.
+Skip empty rows (rows where all fields are empty or whitespace-only).
 
 Build a list of parsed input entries:
 ```
@@ -267,7 +271,8 @@ manifest — sort alphabetically by hostname):
   "apply_default_cache_behavior": <true if Y, false if N>,
   "cert_arn_mode": "<explicit | data_source>",
   "cert_arn": "<ARN string or null>",
-  "origin_content": "<from manifest lookup>"
+  "origin_content": "<from manifest lookup>",
+  "origin_type": "<from manifest lookup: s3 | object_storage | server>"
 }
 ```
 
@@ -305,7 +310,7 @@ Use 2-space JSON indentation. Do not minify.
 ```json
 {
   "zone_name": "c.example.com",
-  "backup_path": "/home/operator/cloudflare-backups/c.example.com",
+  "backup_path": "/home/operator/cloudflare-backups/c.example.com/2026-02-05 12-09-04",
   "domains": [
     {
       "hostname": "cdn.c.example.com",
@@ -313,7 +318,8 @@ Use 2-space JSON indentation. Do not minify.
       "apply_default_cache_behavior": true,
       "cert_arn_mode": "explicit",
       "cert_arn": "arn:aws:acm:us-east-1:123456789012:certificate/abc12345-1234-1234-1234-abcdef123456",
-      "origin_content": "httpecho.a.letsmakeit.link"
+      "origin_content": "httpecho.a.letsmakeit.link",
+      "origin_type": "server"
     },
     {
       "hostname": "www.c.example.com",
@@ -321,7 +327,8 @@ Use 2-space JSON indentation. Do not minify.
       "apply_default_cache_behavior": true,
       "cert_arn_mode": "data_source",
       "cert_arn": null,
-      "origin_content": "httpecho.a.letsmakeit.link"
+      "origin_content": "httpecho.a.letsmakeit.link",
+      "origin_type": "server"
     },
     {
       "hostname": "cors1.c.example.com",
@@ -329,7 +336,8 @@ Use 2-space JSON indentation. Do not minify.
       "apply_default_cache_behavior": false,
       "cert_arn_mode": "data_source",
       "cert_arn": null,
-      "origin_content": "httpecho.a.letsmakeit.link"
+      "origin_content": "httpecho.a.letsmakeit.link",
+      "origin_type": "server"
     }
   ],
   "apex_cert_groups": {
@@ -409,6 +417,7 @@ Next steps:
     cert_arn_mode: "explicit" | "data_source"
     cert_arn: string | null
     origin_content: string (IP or hostname)
+    origin_type: "s3" | "object_storage" | "server"
   }>
   apex_cert_groups: {
     [apex_domain: string]: {

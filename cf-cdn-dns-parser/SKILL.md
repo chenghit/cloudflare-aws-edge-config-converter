@@ -91,36 +91,48 @@ ERROR: DNS.txt not found at <path>. Please check the backup directory.
 
 ### Step 3 — Parse DNS.txt
 
-Cloudflare exports DNS records as a JSON array inside `DNS.txt`. The file format is:
+Cloudflare exports DNS records as a Cloudflare API response object inside `DNS.txt`.
+The file format is:
 
 ```json
-[
-  {
-    "id": "...",
-    "zone_id": "...",
-    "zone_name": "c.example.com",
-    "name": "cdn.c.example.com",
-    "type": "CNAME",
-    "content": "httpecho.a.letsmakeit.link",
-    "proxiable": true,
-    "proxied": true,
-    "ttl": 1,
-    "locked": false,
-    "meta": { ... },
-    "created_on": "...",
-    "modified_on": "..."
-  },
-  ...
-]
+{
+  "result": [
+    {
+      "id": "...",
+      "name": "cdn.c.example.com",
+      "type": "CNAME",
+      "content": "httpecho.a.letsmakeit.link",
+      "proxiable": true,
+      "proxied": true,
+      "ttl": 1,
+      "settings": { ... },
+      "meta": { ... },
+      "comment": "...",
+      "tags": [],
+      "created_on": "...",
+      "modified_on": "..."
+    },
+    ...
+  ],
+  "success": true,
+  "errors": [],
+  "messages": [],
+  "result_info": { ... }
+}
 ```
 
 **Parsing rules:**
 
 - Read the entire file and parse as JSON.
-- Extract `zone_name` from the first record's `zone_name` field.
-- Extract `backup_timestamp` from the filename or directory name if available (e.g.,
-  a directory named `2026-02-05 12-09-04` → use that string). If not determinable,
-  use the file's modification time in `YYYY-MM-DD HH-mm-ss` format.
+- The DNS records are in the `.result` array (not the top-level object).
+- Derive `zone_name` from the **backup directory path**, NOT from the DNS records
+  (records do not contain a `zone_name` field). The CloudflareBackup tool creates
+  directories as `<zone_name>/<timestamp>/DNS.txt`, so `zone_name` is the grandparent
+  directory name of `DNS.txt`. For example, if `DNS.txt` is at
+  `/path/to/c.example.com/2026-02-05 12-09-04/DNS.txt`, then `zone_name = "c.example.com"`.
+- Extract `backup_timestamp` from the parent directory name of `DNS.txt` (e.g.,
+  `2026-02-05 12-09-04`). If the directory name does not look like a timestamp,
+  fall back to the file's modification time in `YYYY-MM-DD HH-mm-ss` format.
 - Filter records where `proxied: true` — these are the orange-cloud records that are
   routed through Cloudflare and will become CloudFront distributions.
 - Ignore records where `proxied: false` or `proxiable: false` — these are DNS-only
@@ -130,10 +142,25 @@ Cloudflare exports DNS records as a JSON array inside `DNS.txt`. The file format
   - `hostname` = `name` field (fully qualified hostname)
   - `record_type` = `type` field (A, CNAME, AAAA, etc.)
   - `origin_content` = `content` field (the actual origin: IP address or hostname)
-  - `apex_domain` = the `zone_name` field from the DNS record (e.g., `cdn.c.example.com`
-    with `zone_name: "c.example.com"` → `apex_domain = "c.example.com"`). This correctly
-    handles zones at any label depth — `example.com`, `c.example.com`, `sub.c.example.com`
-    — without assuming a fixed number of labels.
+  - `is_wildcard` = `true` if `hostname` starts with `*.` (e.g., `*.c.example.com`)
+  - `origin_type` = classify `origin_content` by matching against known object storage
+    hostname patterns (case-insensitive):
+    - `"s3"` — AWS S3 REST API endpoint (supports OAC): matches
+      `*.s3.amazonaws.com`, `*.s3.<region>.amazonaws.com`,
+      `s3.amazonaws.com`, `s3.<region>.amazonaws.com`.
+      Does NOT include S3 website endpoints (`*s3-website*`) — those are `"object_storage"`.
+    - `"object_storage"` — cloud object storage that does NOT support CloudFront OAC:
+      - AWS S3 website endpoints: `*.s3-website.<region>.amazonaws.com`,
+        `*.s3-website-<region>.amazonaws.com`
+      - GCP GCS: `*.storage.googleapis.com`, `storage.googleapis.com`
+      - Azure Blob: `*.blob.core.windows.net`, `*.web.core.windows.net`
+      - Alibaba OSS: `*.oss*.aliyuncs.com`
+      - Tencent COS: `*.cos.*.myqcloud.com`
+      - Huawei OBS: `*.obs.*.myhuaweicloud.com`
+      - CTYun OOS: `*.oos*.ctyunapi.cn`
+    - `"server"` — anything else (IP address, custom hostname, etc.)
+  - `apex_domain` = the `zone_name` derived from the directory path (Step 3 parsing
+    rules above). All records in the same `DNS.txt` file share the same `apex_domain`.
 
 **Edge cases:**
 
@@ -152,23 +179,37 @@ Cloudflare exports DNS records as a JSON array inside `DNS.txt`. The file format
 
 Perform both checks:
 
-#### Check A: SaaS subdomain pattern in proxied records
+#### Check A: SaaS-related patterns in proxied records
 
-Scan all proxied DNS records for SaaS-related patterns:
+Scan all **proxied** DNS records for SaaS-related patterns:
 
 - Any record whose `name` matches `saas.*` (e.g., `saas.c.example.com`)
-- Any CNAME record whose `content` contains `cloudfront.net` (a common pattern when
-  Cloudflare is acting as a SaaS provider sitting in front of a CloudFront origin —
-  migrating this would create a loop)
 - Any record tagged with `"type": "CNAME"` pointing to a domain ending in
   `.cloudflaressl.com`, `.cloudflare.com`, or similar Cloudflare SaaS endpoints
 
+#### Check C: CloudFront origin loop detection
+
+Separately, scan all **proxied** CNAME records whose `content` contains `cloudfront.net`.
+
+These hostnames are already pointing to CloudFront as their origin — migrating them
+would create a routing loop. **Exclude** them from `proxied_domains` and the CSV
+template, and print a warning in the Step 8 summary:
+
+```
+⚠️  Excluded: The following proxied hostnames already point to CloudFront origins
+   and were excluded from migration (routing loop risk):
+  - <hostname> → <content>
+```
+
 #### Check B: SaaS-Fallback-Origin.txt
 
-Look for `SaaS-Fallback-Origin.txt` in the same directory as `DNS.txt`. If the file:
+Look for `SaaS-Fallback-Origin.txt` in the same directory as `DNS.txt`. This file
+contains a raw Cloudflare API response (same `{"result":...,"success":...}` envelope
+as DNS.txt). Parse it as JSON and check:
 - Does not exist → no SaaS fallback configured (pass)
-- Exists and is empty (0 bytes or only whitespace) → no SaaS (pass)
-- Exists and contains any non-whitespace content → SaaS is configured (fail)
+- Exists but `success` is `false` (e.g., error code 1551 "Resource not found") → no SaaS (pass)
+- Exists, `success` is `true`, and `result.origin` is a non-empty string → SaaS fallback
+  origin is configured (fail)
 
 **If either check fails, abort immediately with this exact message:**
 
@@ -176,7 +217,7 @@ Look for `SaaS-Fallback-Origin.txt` in the same directory as `DNS.txt`. If the f
 ABORT: SaaS configuration detected. This tool does not support SaaS migration. Aborting.
 
 Details:
-- SaaS-Fallback-Origin.txt: <exists and non-empty / not found>
+- SaaS-Fallback-Origin.txt: <origin hostname from result.origin / not configured / not found>
 - SaaS subdomain records: <list any matching hostnames, or "none">
 
 Please handle SaaS domain migration manually before using this toolchain.
@@ -186,7 +227,8 @@ Do not write any output files. Do not proceed.
 
 ### Step 5 — Group Hostnames by Apex Domain
 
-For each proxied hostname, `apex_domain` = the `zone_name` from its DNS record (Step 3 logic applies).
+For each proxied hostname, `apex_domain` = the `zone_name` derived from the directory
+path (as described in Step 3). All records in a single `DNS.txt` share the same apex.
 
 Build `apex_groups`:
 
@@ -212,10 +254,14 @@ proxied_domains:
     apex_domain: "c.example.com"
     record_type: "CNAME"
     origin_content: "httpecho.a.letsmakeit.link"
+    is_wildcard: false
+    origin_type: "server"
   - hostname: "www.c.example.com"
     apex_domain: "c.example.com"
     record_type: "CNAME"
     origin_content: "httpecho.a.letsmakeit.link"
+    is_wildcard: false
+    origin_type: "server"
 apex_groups:
   "c.example.com":
     hostnames:
@@ -338,9 +384,12 @@ saas_detected: boolean      # always false if we reach this point
 
 proxied_domains:            # list, sorted by hostname
   - hostname: string        # FQDN
-    apex_domain: string     # zone_name from the DNS record (e.g. "c.example.com" or "example.com")
+    apex_domain: string     # derived from directory path (e.g. "c.example.com" or "example.com")
     record_type: string     # A | CNAME | AAAA | etc.
     origin_content: string  # IP or hostname of actual origin
+    is_wildcard: boolean    # true if hostname starts with "*."
+    origin_type: string     # "s3" | "object_storage" | "server"
+    is_wildcard: boolean    # true if hostname starts with "*."
 
 apex_groups:                # map keyed by apex domain
   "<apex>":
@@ -360,6 +409,11 @@ hostname,apply_default_cache_behavior,cert_arn
 
 ## Notes and Constraints
 
+- **Single-zone only**: This skill processes exactly one zone's DNS backup. The
+  orchestrator is responsible for ensuring the provided path points to a single
+  zone's backup directory (the directory containing `DNS.txt`). If `DNS.txt` is
+  not found at the expected path, abort — do not search parent or sibling
+  directories for other zones.
 - This skill does **not** read any rule files (Cache-Rules.txt, etc.). Rule processing
   is handled by cf-cdn-per-domain-processor.
 - This skill does **not** validate ACM certificate ARNs — that is cf-cdn-input-validator's

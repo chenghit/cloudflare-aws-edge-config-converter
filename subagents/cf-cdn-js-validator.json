@@ -4,6 +4,6 @@
   "resources": [
     "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-js-validator/SKILL.md"
   ],
-  "tools": ["fs_read", "fs_write", "glob", "grep"],
-  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
+  "tools": ["fs_read", "fs_write", "glob", "grep", "execute_bash"],
+  "allowedTools": ["fs_read", "fs_write", "glob", "grep", "execute_bash"]
 }

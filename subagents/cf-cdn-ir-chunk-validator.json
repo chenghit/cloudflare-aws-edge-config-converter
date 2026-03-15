@@ -1,6 +1,6 @@
 {
   "name": "cf-cdn-ir-chunk-validator",
-  "description": "Validates a single domain's accumulator IR YAML file at ir/accumulator/{hostname}.yaml for structural correctness and semantic consistency before the finalization phase. Checks that all required fields are present and correctly typed, cache behavior paths are non-overlapping, origin protocol settings are compatible with the specified ports, CloudFront Function code snippets are syntactically valid ES2022 JavaScript, and policy references match supported AWS managed policy names or are marked as custom. Outputs a per-domain validation report and either approves the chunk for finalization or annotates issues inline in the YAML for re-processing. Must be invoked once per domain (parallelizable). Accepts a --domain argument.",
+  "description": "Validates a single domain's accumulator IR YAML file at ir/accumulator/{hostname}.yaml for structural correctness. Performs 8 checks: path_pattern and precedence field presence/types, origin.domain validity, viewer_request_ops entry integrity, non_convertible reason strings, duplicate precedence detection, viewer_request_ops type ordering, hostname-filename consistency, and KVS redirect requirement cross-check. Outputs a per-domain JSON validation report. Must be invoked once per domain (parallelizable).",
   "resources": [
     "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md"
   ],

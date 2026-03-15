@@ -17,11 +17,15 @@ Verify NO forbidden ES6+ features are used (see `unsupported-syntax.md` for deta
 
 ## 2. Async Operations Validation
 
-- [ ] No `Promise.all()` used - must use sequential `await`
-- [ ] No `Promise.any()` used
-- [ ] No promise chain methods (`.then()`, `.catch()`)
+- [ ] No `Promise.all()` used - should use sequential `await` (AWS warns of memory quota risk)
+- [ ] No `Promise.any()` used - should use sequential `await`
+- [ ] No promise chain methods (`.then()`, `.catch()`) - should use `await` (AWS warns of memory quota risk)
 - [ ] All KVS lookups wrapped in `try...catch` blocks
 - [ ] KVS lookups use sequential `await`, not parallel
+
+Note: `Promise.all()`, `.then()`, and `.catch()` are syntactically valid in Runtime 2.0
+but AWS documentation warns they "can require high function memory usage" and recommends
+using `await` instead. The validator flags these as warnings, not errors.
 
 ## 3. Rule Execution Order Validation
 

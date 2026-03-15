@@ -206,7 +206,12 @@ For each pair of behaviors `(A, B)` where `precedence(A) < precedence(B)`:
   `origin_override`:
   - Evaluate whether the condition of A is a **strict superset** of B's
     condition, meaning every request matching B also matches A.
-  - A condition is a strict superset of B if:
+  - **Path-pattern-only shadowing**: Only check `path_pattern` coverage.
+    Do NOT evaluate `condition` fields within `viewer_request_ops` entries —
+    conditions may narrow the match (e.g., country-specific redirects) and
+    prevent actual shadowing. Path-pattern shadowing is a conservative
+    heuristic that may produce false positives.
+  - A's path_pattern is a strict superset of B's path_pattern if:
     - A's `path_pattern` is a prefix wildcard that covers B's `path_pattern`
       (e.g., A=`/api/*` covers B=`/api/v2/*`)
     - OR A's `path_pattern` is `*` or `/*` (covers everything)
@@ -216,10 +221,10 @@ For each pair of behaviors `(A, B)` where `precedence(A) < precedence(B)`:
   - Add an entry to B's `non_convertible` list (append, do not replace):
     ```yaml
     - type: shadowed_rule
-      reason: "Rule shadowed by cache_behavior with path_pattern='<A.path_pattern>' (precedence=<A.precedence>). This rule will never be evaluated in CloudFront."
+      reason: "Rule potentially shadowed by cache_behavior with path_pattern='<A.path_pattern>' (precedence=<A.precedence>). This rule may never be evaluated in CloudFront. Review manually — if the higher-priority rule has a narrower condition (e.g., country-specific), this rule may still execute for non-matching requests."
       original_rule_type: "<type>"
     ```
-  - Record a warning for the conversion report.
+  - Record a warning (not an error) for the conversion report.
 
 ---
 
@@ -241,8 +246,13 @@ For each policy object found:
 
 1. **Normalize** the policy object:
    - Serialize to JSON with **sorted keys** and no extra whitespace.
+   - **Numeric type normalization**: Before serialization, ensure all numeric
+     values are integers where the schema expects integers (e.g., TTL values).
+     YAML parsers may produce `300.0` (float) instead of `300` (int), which
+     would produce different JSON strings and different hashes for semantically
+     identical policies. Convert `300.0` → `300` before serialization.
    - This ensures structurally identical objects produce identical hashes
-     regardless of key ordering.
+     regardless of key ordering or numeric representation.
 
 2. **Hash** the normalized JSON string using SHA256.
 
@@ -303,7 +313,7 @@ For each domain in `domain_map`:
 1. Reconstruct a multi-document YAML with:
    - First document: the metadata document — pass through **all** fields
      verbatim (`document_type`, `hostname`, `sanitized_name`, `apex_domain`,
-     `cert_arn_mode`, `cert_arn`, `kvs_requirements`, `kvs_data`,
+     `origin_type`, `cert_arn_mode`, `cert_arn`, `kvs_requirements`, `kvs_data`,
      `custom_error_responses`, `lambda_edge`, and any other fields present).
      Update `finalized_at` timestamp if that field exists, or add it.
    - Subsequent documents: the sorted, deduplicated cache_behavior documents,
@@ -428,6 +438,40 @@ _If none: "No warnings."_
 
 ---
 
+## Post-Deployment: S3 Bucket Policy
+
+_Only include this section if any domain has `origin_type: "s3"` in its metadata._
+
+After deploying the CloudFront distributions, update each S3 bucket policy to
+allow access via Origin Access Control (OAC). Replace `<DISTRIBUTION_ARN>` and
+`<BUCKET_ARN>` with actual values from `terraform output`.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "AllowCloudFrontOAC",
+    "Effect": "Allow",
+    "Principal": {"Service": "cloudfront.amazonaws.com"},
+    "Action": "s3:GetObject",
+    "Resource": "<BUCKET_ARN>/*",
+    "Condition": {
+      "StringEquals": {
+        "AWS:SourceArn": "<DISTRIBUTION_ARN>"
+      }
+    }
+  }]
+}
+```
+
+| Domain | S3 Bucket | Bucket ARN |
+|--------|-----------|------------|
+| <list each domain with origin_type s3 and its origin_content> |
+
+_If no S3 origins: omit this entire section._
+
+---
+
 ## Domain Summary
 
 | Domain | Cache Behaviors | Shadowed | Non-Convertible | Status |
@@ -508,10 +552,16 @@ policy_id = "policy-" + sha256_hex[0:8]
 
 ### Shadowing Detection Criteria
 
-A rule B is shadowed by rule A when all of the following are true:
+A rule B is **potentially** shadowed by rule A when all of the following are true:
 - `precedence(A) < precedence(B)` (A evaluated first)
 - Both involve a first-match-wins rule type (`redirect` or `origin_override`)
 - A's `path_pattern` is a strict superset of B's `path_pattern`
+
+**Note**: This is a conservative heuristic based on path patterns only. It does
+NOT evaluate `condition` fields within `viewer_request_ops` entries. A rule with
+a narrower condition (e.g., country-specific redirect) at a broader path pattern
+does not truly shadow a rule at a narrower path pattern. False positives are
+expected — the conversion report marks these as warnings for manual review.
 
 Superset examples:
 - `/*` shadows `/api/*` ✓

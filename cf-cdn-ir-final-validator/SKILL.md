@@ -315,16 +315,16 @@ Pattern A is a superset of pattern B if:
 
 ---
 
-#### Check 3 — Total Cache Behavior count ≤ 25
+#### Check 3 — Total Cache Behavior count ≤ 75
 
 Count the total number of documents in `cache_behavior_docs`.
 
-If count > 25:
+If count > 75:
 ```
-CB_COUNT_EXCEEDS_LIMIT: Domain "<hostname>" has <count> cache_behavior documents. CloudFront hard limit is 25 cache behaviors per distribution. This domain cannot be deployed as-is.
+CB_COUNT_EXCEEDS_LIMIT: Domain "<hostname>" has <count> cache_behavior documents. CloudFront default quota is 75 cache behaviors per distribution (soft limit). Request a quota increase via AWS Support before deploying.
 ```
 
-This is a hard CloudFront limit. No exceptions. FAIL.
+This is a CloudFront soft limit. FAIL to prevent deployment errors.
 
 ---
 
@@ -533,7 +533,7 @@ Correct file order (ascending precedence):
 |-------|-----------|-------------|
 | 1 | `PRECEDENCE_` | Strictly ascending, no duplicates, positive integers |
 | 2 | `DEFAULT_PATTERN_`, `SPECIFICITY_ORDER_` | Sort order correctness, default pattern placement |
-| 3 | `CB_COUNT_EXCEEDS_LIMIT` | ≤ 25 behaviors per domain (CloudFront hard limit) |
+| 3 | `CB_COUNT_EXCEEDS_LIMIT` | ≤ 75 behaviors per domain (CloudFront default quota, soft limit) |
 | 4 | `FIN_ORIGIN_DOMAIN_` | Origin hostname validity |
 | 5 | `DUPLICATE_PATH_PATTERN` | Unique path patterns within domain |
 | 6 | `MANIFEST_` | dedup_manifest.json structure validity |

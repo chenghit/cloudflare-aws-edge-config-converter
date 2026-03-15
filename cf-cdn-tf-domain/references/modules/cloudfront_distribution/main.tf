@@ -13,18 +13,22 @@ resource "aws_cloudfront_distribution" "this" {
   dynamic "origin" {
     for_each = var.origins
     content {
-      origin_id   = origin.value.origin_id
-      domain_name = origin.value.domain_name
+      origin_id                = origin.value.origin_id
+      domain_name              = origin.value.domain_name
+      origin_access_control_id = origin.value.s3_origin ? origin.value.origin_access_control_id : null
 
-      custom_origin_config {
-        origin_protocol_policy = origin.value.protocol_policy
-        http_port              = origin.value.http_port
-        https_port             = origin.value.https_port
-        origin_ssl_protocols   = ["TLSv1.2"]
+      dynamic "custom_origin_config" {
+        for_each = origin.value.s3_origin ? [] : [1]
+        content {
+          origin_protocol_policy = origin.value.protocol_policy
+          http_port              = origin.value.http_port
+          https_port             = origin.value.https_port
+          origin_ssl_protocols   = ["TLSv1.2"]
+        }
       }
 
       dynamic "custom_header" {
-        for_each = origin.value.custom_origin_headers
+        for_each = origin.value.s3_origin ? [] : origin.value.custom_origin_headers
         content {
           name  = custom_header.value.name
           value = custom_header.value.value

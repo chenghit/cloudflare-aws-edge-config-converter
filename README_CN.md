@@ -99,7 +99,9 @@ cloudflare-to-aws-cdn/
 
 **日志：** 本工具不配置 CloudFront 访问日志——这涉及 S3 桶 region、日志格式、共用桶还是每域名独立桶等与配置迁移无关的决策。如有需要，自行在生成的 `main.tf` 中添加 `logging_config` 块。
 
-**设计目标：** 最多支持 50 个代理域名（对应 CloudFront KVS 默认配额 50 个/账号）。每个域名一个独立 KVS，不跨域共享。
+**设计目标：** 已测试最多 50 个代理域名。更大的 zone 也应该可以工作——每个 subagent 独立处理一个域名，orchestrator 的 context 消耗随域名数线性增长。主要约束是 CloudFront KVS 配额（默认 50 个/账号，软限制——如果你有超过 50 个使用 bulk redirect 的域名，请提前[申请提升配额](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html)）。每个域名一个独立 KVS，不跨域共享。
+
+**单 zone 运行：** 本工具每次只转换一个 Cloudflare zone。如果备份目录包含多个 zone，编排器会检测到并要求你指定转换哪个 zone。每个 zone 需要单独运行一次。
 
 **部署顺序：** 生成的 Terraform 使用独立的 root module。按以下顺序 apply：
 
@@ -201,6 +203,19 @@ cd cloudflare-aws-edge-config-converter
 
 可用 subagent：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-per-domain-processor`、`cf-cdn-ir-chunk-validator`、`cf-cdn-ir-finalizer`、`cf-cdn-ir-final-validator`、`cf-cdn-tf-shared-policies`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。
 
+## Subagent 权限与安全
+
+大多数 subagent 只有文件读写和搜索权限（`fs_read`、`fs_write`、`glob`、`grep`）。只有一个 subagent 需要 shell 执行权限：
+
+| Subagent | 有 `execute_bash` | 原因 |
+|----------|-------------------|------|
+| `cf-cdn-js-validator` | ✅ 有 | 运行 `node --check <file>` 做 JavaScript 语法检查，以及 `wc -c` 做文件大小检查。这是它唯一需要的两个命令——仅靠文件读写工具无法完成 JS 语法校验和精确的字节大小测量。 |
+| 其他所有 subagent | ❌ 无 | 只需要读写文件和搜索文本。 |
+
+**如果你的安全策略对 `execute_bash` 有告警：** 你可以查看该 validator 的 SKILL.md 确认它只运行 `node --check` 和 `wc -c`。从 `cf-cdn-js-validator.json` 中移除 `execute_bash` 会导致 JS 语法检查（CFF-01、LE-01）和精确文件大小校验（CFF-06、LE-03）被禁用——validator 会跳过这些检查并在输出 JSON 中标记为 `SKIP`。
+
+**不要尝试用手动审批来替代。** Subagent 运行在编排器的上下文中——当主 agent 将任务分派给 subagent 时，你在聊天界面中看不到该 subagent 的具体工具调用。对 subagent 的工具调用无法逐个手动审批，因此移除权限后依赖交互式审批并不可行。
+
 ## 更多信息
 
 - [最佳实践](./docs/best-practices.md)
@@ -208,7 +223,6 @@ cd cloudflare-aws-edge-config-converter
 - [故障排除](./docs/troubleshooting.md)
 - [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)
 - [路线图](./docs/roadmap.md)
-- [架构设计](./docs/architecture/)
 
 ## 相关资源
 

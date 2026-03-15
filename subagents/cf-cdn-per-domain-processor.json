@@ -1,6 +1,6 @@
 {
   "name": "cf-cdn-per-domain-processor",
-  "description": "Processes a single domain's full Cloudflare CDN configuration into an intermediate representation (IR) accumulator YAML file. Reads the domain entry from domain_scope.json and the source Cloudflare config to translate: page rules and cache rules → CloudFront cache behaviors; origin rules and load balancing → CloudFront origins; redirect rules → CloudFront Function snippets; response header rules → CloudFront response headers policy entries; transform rules → CloudFront Function snippets. Outputs ir/accumulator/{hostname}.yaml with all behaviors, origins, function code blocks, and policy settings. Must be invoked once per domain (parallelizable). Accepts a --domain argument to identify which domain to process.",
+  "description": "Processes a single domain's full Cloudflare CDN configuration into an intermediate representation (IR) accumulator YAML file. Reads the domain entry from domain_scope.json and all 11 Cloudflare rule types (Redirect, URL Rewrite, Configuration, Origin, Bulk Redirect, Request Header Transform, Cache, Cloud Connector, Custom Error, Response Header Transform, Compression) to produce CloudFront-native IR with cache behaviors, origin settings, policy configurations, and viewer request/response operation lists. Outputs ir/accumulator/{hostname}.yaml. Must be invoked once per domain (parallelizable).",
   "resources": [
     "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md"
   ],

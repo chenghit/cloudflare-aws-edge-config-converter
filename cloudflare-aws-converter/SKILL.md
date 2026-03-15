@@ -19,7 +19,7 @@ Orchestrate conversion of Cloudflare configurations to AWS by delegating to spec
 | `cf-waf-analyzer-validator` | Validates WAF analysis summary | (invoked automatically after cf-waf-analyzer) |
 | `cf-waf-terraform-generator` | Validated summary → AWS WAF Terraform | (invoked automatically after validator passes) |
 
-### CDN Pipeline (New)
+### CDN Pipeline
 
 | Subagent | Handles | Trigger when user mentions |
 |----------|---------|---------------------------|
@@ -32,17 +32,6 @@ Orchestrate conversion of Cloudflare configurations to AWS by delegating to spec
 | `cf-cdn-tf-shared-policies` | Final IR → shared Terraform policies | (invoked after all final IRs validated) |
 | `cf-cdn-tf-domain` | Per-domain final IR → Terraform distribution config | (invoked once per domain, parallelizable) |
 | `cf-cdn-js-validator` | Validates each domain's CloudFront Function JS | (invoked once per domain, parallelizable) |
-
-### Functions Pipeline
-
-| Subagent | Handles | Trigger when user mentions |
-|----------|---------|---------------------------|
-
-### Shared CDN Analysis
-
-| Subagent | Handles | Trigger when user mentions |
-|----------|---------|---------------------------|
-| `cf-cdn-dns-parser` | CDN DNS → domain manifest + CSV template | CDN, cache, origin, full migration, all configs |
 
 ## Workflow
 
@@ -74,9 +63,24 @@ Determine what the user wants from their message. There are two dimensions:
 
 This order matters because WAF and CDN analysis are independent, but running WAF first avoids context confusion.
 
-### Step 2: Extract config path
+### Step 2: Extract config path and validate single-zone
 
 Extract the Cloudflare config directory path from the user's message. This is the path to pass to each subagent. Do not read or analyze the files yourself.
+
+**Multi-zone detection (CRITICAL — must check before invoking any subagent):**
+
+This tool only supports converting ONE zone at a time. The CloudflareBackup tool creates directories as `<zone_name>/<timestamp>/`, so a backup directory containing multiple zones will have multiple zone subdirectories.
+
+Before proceeding, check the structure of the provided path:
+1. Use `glob` or `fs_read` (directory mode) to list the contents of the provided path.
+2. Look for `DNS.txt` files. The expected layout is `<config_path>/DNS.txt` (single zone) or `<config_path>/<zone_name>/<timestamp>/DNS.txt` (CloudflareBackup structure).
+3. If the path directly contains `DNS.txt`, it is a single zone — proceed normally.
+4. If the path contains multiple subdirectories that each contain timestamped subdirectories with `DNS.txt`, this is a multi-zone backup. **Abort immediately** with:
+   > "This backup directory contains multiple zones: [list zone names]. This tool can only convert one zone at a time. Please specify which zone to convert by providing the path to a specific zone's backup directory (e.g., `{config_path}/<zone_name>/<timestamp>/`)."
+5. If the path contains exactly one zone subdirectory, auto-resolve to that zone's latest timestamped backup and inform the user:
+   > "Detected single zone: {zone_name}. Using backup at {resolved_path}."
+
+**When passing the resolved path to subagents**, always pass the directory that directly contains `DNS.txt` and the rule files (e.g., `Cache-Rules.txt`). This ensures every subagent reads files from the correct zone.
 
 If the user requests CDN full pipeline (Terraform generation), also check for:
 - `cloudflare-to-aws-cdn/user_input.csv` — if it exists, CDN pipeline can start from Stage 2
@@ -140,7 +144,7 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
 4. Wait for all per-domain processors to complete before proceeding.
 
 **Stage 4: IR Chunk Validation** (parallelizable — invoke once per domain)
-1. For each domain `{domain}`, invoke `cf-cdn-ir-chunk-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md and follow its workflow. Validate the IR accumulator for domain {domain} (sanitized filename: replace dots and dashes with underscores) in cloudflare-to-aws-cdn/ir/accumulator/. Output a validation report to cloudflare-to-aws-cdn/ir/validation/chunk/. Generate output files in {user_language}."`
+1. For each domain `{domain}`, invoke `cf-cdn-ir-chunk-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md and follow its workflow. Validate the IR accumulator for domain {domain} in cloudflare-to-aws-cdn/ir/accumulator/. Output a validation report to cloudflare-to-aws-cdn/ir/validation/chunk/. Generate output files in {user_language}."`
 2. Check the `status` field in the written JSON report:
    - `"PASS"` → domain is ready for finalization
    - `"FAIL"` → report the errors to the user and ask whether to skip that domain or pause the entire pipeline. Do NOT proceed to Stage 5 until all domains are PASS.

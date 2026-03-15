@@ -189,10 +189,13 @@ grep -n 'let {' "<file_path>"
 grep -n 'Promise\.' "<file_path>"
 ```
 
-- `status`: `FAIL` if grep returns any output.
-- `detail`: include all matching lines on FAIL.
+- `status`: `WARN` if grep returns any output (not FAIL — Promise methods are
+  syntactically valid in Runtime 2.0 but risk exceeding memory quota per AWS docs).
+- `detail`: include all matching lines on WARN, with note: "Promise combinators
+  are syntactically valid but AWS warns they may exceed function memory quota.
+  Use sequential await instead."
 - This catches `Promise.all`, `Promise.any`, `Promise.race`, `Promise.resolve`,
-  `Promise.reject` — all forbidden.
+  `Promise.reject`.
 
 #### CHECK CFF-06: File size limit
 
@@ -245,8 +248,12 @@ grep -n '\.then(' "<file_path>"
 grep -n '\.catch(' "<file_path>"
 ```
 
-- `status`: `FAIL` if either grep returns any output.
-- `detail`: include all matching lines on FAIL.
+- `status`: `WARN` if either grep returns any output (not FAIL — `.then()` and
+  `.catch()` are syntactically valid in Runtime 2.0 but risk exceeding memory
+  quota per AWS docs).
+- `detail`: include all matching lines on WARN, with note: "Promise chain methods
+  are syntactically valid but AWS warns they may exceed function memory quota.
+  Use sequential await instead."
 
 #### CHECK CFF-11: No `.then` / `.catch` chains (moved — see CFF-10)
 
@@ -419,12 +426,12 @@ NOT suggest what the fix should be. Report and stop.
 | `CFF-02` | cloudfront_function | No optional chaining (`?.`) |
 | `CFF-03` | cloudfront_function | No array destructuring |
 | `CFF-04` | cloudfront_function | No object destructuring |
-| `CFF-05` | cloudfront_function | No `Promise.` usage |
+| `CFF-05` | cloudfront_function | No `Promise.` usage (WARN — valid but risks memory quota) |
 | `CFF-06` | cloudfront_function | File size ≤ 8192 bytes |
 | `CFF-07` | cloudfront_function | `import cf from 'cloudfront'` required only when `cf.*` API is used |
 | `CFF-08` | cloudfront_function | Contains `async function handler(event)` |
 | `CFF-09` | cloudfront_function | Contains a valid return statement |
-| `CFF-10` | cloudfront_function | No `.then()` / `.catch()` chains |
+| `CFF-10` | cloudfront_function | No `.then()` / `.catch()` chains (WARN — valid but risks memory quota) |
 | `CFF-11` | cloudfront_function | (removed) |
 | `LE-01`  | lambda_edge | Node.js syntax check |
 | `LE-02`  | lambda_edge | Valid handler export pattern |

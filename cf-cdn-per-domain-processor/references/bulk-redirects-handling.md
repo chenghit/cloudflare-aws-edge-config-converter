@@ -79,11 +79,11 @@ try {
     return redirect(dest);
 } catch (err) {}
 
-// Try subdomain match (replace first segment with dot)
+// Try subdomain match (prepend dot to full host)
 if (host.includes('.')) {
-    const subdomain = '.' + host.substring(host.indexOf('.') + 1);
+    const dotHost = '.' + host;
     try {
-        const dest = await kvsHandle.get(`redirect:${subdomain}${uri}`);
+        const dest = await kvsHandle.get(`redirect:${dotHost}${uri}`);
         return redirect(dest);
     } catch (err) {}
 }
@@ -177,8 +177,8 @@ async function handler(event) {
     
     // Try subdomain match if exact match failed
     if (!redirectData && host.includes('.')) {
-        const subdomain = '.' + host.substring(host.indexOf('.') + 1);
-        redirectData = await tryRedirect(`redirect:${subdomain}${uri}`);
+        const dotHost = '.' + host;
+        redirectData = await tryRedirect(`redirect:${dotHost}${uri}`);
     }
     
     if (redirectData) {

@@ -99,7 +99,9 @@ cloudflare-to-aws-cdn/
 
 **Logging:** CloudFront access logging is not configured by this tool — it involves decisions (S3 bucket region, log format, shared vs. per-domain buckets) that are outside the scope of config migration. Add a `logging_config` block to the generated `main.tf` if needed.
 
-**Design target:** Up to 50 proxied domains (matching the default CloudFront KVS quota of 50 per account). One KVS per domain, no cross-domain sharing.
+**Design target:** Tested with up to 50 proxied domains per zone. Larger zones should work — each subagent processes one domain in isolation, so the orchestrator's context usage scales linearly. The main constraint is CloudFront KVS quota (default 50 per account, soft limit — [request an increase](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html) before running if you have more than 50 domains that use bulk redirects). One KVS per domain, no cross-domain sharing.
+
+**Single zone per run:** This tool converts one Cloudflare zone at a time. If your backup directory contains multiple zones, the orchestrator will detect this and ask you to specify which zone to convert. Run the tool once per zone.
 
 **Deployment order:** The generated Terraform uses independent root modules. Apply in this order:
 
@@ -201,6 +203,19 @@ For advanced users: `/agent swap <subagent-name>` to run individual pipeline sta
 
 Available subagents: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-terraform-generator`, `cf-cdn-dns-parser`, `cf-cdn-input-validator`, `cf-cdn-per-domain-processor`, `cf-cdn-ir-chunk-validator`, `cf-cdn-ir-finalizer`, `cf-cdn-ir-final-validator`, `cf-cdn-tf-shared-policies`, `cf-cdn-tf-domain`, `cf-cdn-js-validator`.
 
+## Subagent Permissions and Security
+
+Most subagents only have file I/O and search permissions (`fs_read`, `fs_write`, `glob`, `grep`). One subagent requires shell execution:
+
+| Subagent | Has `execute_bash` | Why |
+|----------|-------------------|-----|
+| `cf-cdn-js-validator` | ✅ Yes | Runs `node --check <file>` for JavaScript syntax validation and `wc -c` for file size checks. These are the only two commands it needs — there is no way to validate JS syntax or measure byte-accurate file size with file I/O tools alone. |
+| All other subagents | ❌ No | Only need to read/write files and search text. |
+
+**If your security policy flags `execute_bash`:** You can review the validator's SKILL.md to confirm it only runs `node --check` and `wc -c`. Removing `execute_bash` from `cf-cdn-js-validator.json` will disable JS syntax checking (CFF-01, LE-01) and byte-accurate size validation (CFF-06, LE-03) — the validator will skip these checks and report them as `SKIP` in the output JSON.
+
+**Do not use manual approval as a workaround.** Subagents run inside the orchestrator's context — when the main agent dispatches a task to a subagent, you do not see individual tool calls from that subagent in your chat. Manual approval per-call is not possible for subagent tool invocations, so removing the permission and relying on interactive approval is not a viable alternative.
+
 ## More Information
 
 - [Best Practices](./docs/best-practices.md)
@@ -208,7 +223,6 @@ Available subagents: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-ter
 - [Troubleshooting](./docs/troubleshooting.md)
 - [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md)
 - [Roadmap](./docs/roadmap.md)
-- [Architecture Design](./docs/architecture/)
 
 ## Related Resources
 

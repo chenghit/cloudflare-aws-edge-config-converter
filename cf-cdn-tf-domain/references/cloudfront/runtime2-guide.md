@@ -46,10 +46,11 @@ function handler(event) {
     const request = event.request;
     const qs = request.rawQueryString();
     // Returns: "name=John&age=25"  (no leading '?')
-    // Returns: ""                  (URL has '?' but no params)
-    // Returns: undefined           (URL has no '?' at all)
+    // Returns: ""                  (URL has '?' but no params — falsy, safe to skip)
+    // Returns: undefined           (URL has no '?' at all — falsy, safe to skip)
 
-    // Safe usage in redirects:
+    // Safe usage in redirects — both "" and undefined are falsy,
+    // so neither case appends a trailing '?' to the target URL:
     const queryPart = qs ? '?' + qs : '';
     return {
         statusCode: 301,
@@ -231,9 +232,22 @@ function handler(event) {
 - `for...of` loops
 - `try...catch`
 - `Promise.all()`, `Promise.allSettled()`, `Promise.any()`, `Promise.race()`
+- `Promise.prototype.then()`, `Promise.prototype.catch()`, `Promise.prototype.finally()`
 - `Buffer`, `TextEncoder`, `TextDecoder`
 - `atob()`, `btoa()`
 - `String.prototype.replaceAll()`
+
+**⚠️ MEMORY WARNING for Promise combinators and chain methods:**
+AWS documentation explicitly warns: "Using promise combinators (for example, Promise.all,
+Promise.any) and promise chain methods (for example, then and catch) can require high
+function memory usage. If your function exceeds the maximum function memory quota, it
+will fail to execute." AWS recommends using sequential `await` instead.
+
+**For this pipeline: ALWAYS use sequential `await` instead of Promise combinators.**
+While `Promise.all()` and `.then()/.catch()` are technically valid syntax, they risk
+exceeding memory limits in functions that perform multiple KVS lookups. The js-validator
+will flag `Promise.all` usage as a warning (not an error) since it is syntactically
+valid but operationally risky.
 
 **FORBIDDEN in Runtime 2.0 (will cause runtime error):**
 - Optional chaining: `obj?.prop` ❌
@@ -244,6 +258,10 @@ function handler(event) {
 - Network calls (XHR, fetch, HTTP) ❌
 - File system access ❌
 - `require()` (use `import` instead) ❌
+
+**DISCOURAGED (syntactically valid but operationally risky — avoid in this pipeline):**
+- `Promise.all()`, `Promise.any()`, `Promise.race()` — risk exceeding memory quota
+- `.then()`, `.catch()` chains — risk exceeding memory quota; use `await` instead
 
 **Use these patterns instead:**
 
@@ -301,9 +319,9 @@ async function handler(event) {
 
     // Try subdomain match if exact match failed
     if (kvsValue === null && host.includes('.')) {
-        const dotDomain = '.' + host.substring(host.indexOf('.'));
+        const dotHost = '.' + host;
         try {
-            kvsValue = await kvsHandle.get('redirect:' + dotDomain + uri);
+            kvsValue = await kvsHandle.get('redirect:' + dotHost + uri);
         } catch (e) {}
     }
 

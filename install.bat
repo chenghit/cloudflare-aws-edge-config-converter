@@ -55,7 +55,6 @@ echo Installed subagents:
 echo   - cf-waf-analyzer
 echo   - cf-waf-analyzer-validator
 echo   - cf-waf-terraform-generator
-echo   -
 echo   - cf-cdn-dns-parser
 echo   - cf-cdn-input-validator
 echo   - cf-cdn-per-domain-processor

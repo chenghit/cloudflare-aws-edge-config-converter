@@ -14,13 +14,17 @@ variable "origins" {
   type = list(object({
     origin_id   = string
     domain_name = string
-    protocol_policy = string
-    http_port   = number
-    https_port  = number
-    custom_origin_headers = list(object({
+    # Custom origin fields (ignored when s3_origin == true)
+    protocol_policy       = optional(string, "https-only")
+    http_port             = optional(number, 80)
+    https_port            = optional(number, 443)
+    custom_origin_headers = optional(list(object({
       name  = string
       value = string
-    }))
+    })), [])
+    # S3 origin fields
+    s3_origin                = optional(bool, false)
+    origin_access_control_id = optional(string)
   }))
 }
 
