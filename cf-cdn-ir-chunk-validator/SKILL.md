@@ -520,6 +520,10 @@ If `metadata_doc` exists, check the following fields:
   ```
   META_SANITIZED_NAME_MISSING: metadata document is missing the sanitized_name field.
   ```
+- `apex_domain` must be a non-empty string:
+  ```
+  META_APEX_DOMAIN_MISSING: metadata document is missing the apex_domain field.
+  ```
 - `kvs_requirements` must be present and be a mapping (dict):
   ```
   META_KVS_REQUIREMENTS_MISSING: metadata document is missing the kvs_requirements field. An empty mapping {} is required at minimum.

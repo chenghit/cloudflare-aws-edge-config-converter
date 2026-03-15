@@ -164,7 +164,7 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
    - `"PASS"` → domain is ready for finalization
    - `"FAIL"` → **auto-retry once** with the following procedure:
      a. Use `fs_read` to read `cloudflare-to-aws-cdn/ir/validation/chunk/{hostname}-v1.json` and extract the `errors` array.
-     b. Use `execute_bash` to delete the old files: `rm -f cloudflare-to-aws-cdn/ir/accumulator/{sanitized}.yaml cloudflare-to-aws-cdn/ir/validation/chunk/{hostname}-v1.json`
+     b. Use `execute_bash` to delete the old files: `rm -f cloudflare-to-aws-cdn/ir/accumulator/{sanitized}.yaml cloudflare-to-aws-cdn/ir/validation/chunk/{hostname}-v1.json` (where `{sanitized}` = hostname with every `.` and `-` replaced by `_`, e.g., `cdn.c.example.com` → `cdn_c_example_com`)
      c. Re-invoke `cf-cdn-per-domain-processor` with the error hint: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Process domain {domain}. Read cloudflare-to-aws-cdn/domain_scope.json for this domain's settings. IMPORTANT: A previous processing attempt for this domain produced validation errors. Pay special attention to these issues: {errors}. Generate a fresh IR accumulator from the source Cloudflare files — do NOT attempt to read or modify any existing IR file. Generate output files in {user_language}."`
      d. Re-invoke `cf-cdn-ir-chunk-validator` for this domain.
      e. If the second attempt also FAILs → mark this domain as `SKIPPED` (record the errors), continue processing other domains. Do NOT block the pipeline.
@@ -203,7 +203,7 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
    - `"PASS"` → domain JS is valid
    - `"FAIL"` → **auto-retry once** with the following procedure:
      a. Use `fs_read` to read `cloudflare-to-aws-cdn/ir/validation/js/{hostname}-v3.json` and extract the failed checks (entries where `status == "FAIL"`).
-     b. Derive the sanitized hostname (replace `.` and `-` with `_`). Use `execute_bash` to delete the old output: `rm -rf cloudflare-to-aws-cdn/terraform/domains/{sanitized}/`
+     b. Derive the sanitized hostname (replace every `.` and `-` with `_`, e.g., `cdn.c.example.com` → `cdn_c_example_com`). Use `execute_bash` to delete the old output: `rm -rf cloudflare-to-aws-cdn/terraform/domains/{sanitized}/`
      c. Re-invoke `cf-cdn-tf-domain` with the error hint: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Generate Terraform configuration for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.yaml and the shared policy manifest at cloudflare-to-aws-cdn/shared/dedup_manifest.json. IMPORTANT: A previous generation attempt produced JavaScript validation errors. Pay special attention to these issues: {failed_checks}. Generate all files from scratch — do NOT read any existing files in terraform/domains/. Generate output files in {user_language}."`
      d. Re-invoke `cf-cdn-js-validator` for this domain.
      e. If the second attempt also FAILs → mark this domain as `JS_VALIDATION_FAILED` (record the errors), continue processing other domains.

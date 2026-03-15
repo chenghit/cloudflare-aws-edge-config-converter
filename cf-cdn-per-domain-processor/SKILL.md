@@ -233,17 +233,31 @@ These rules apply at **distribution level**, not per Cache Behavior. Write resul
 `distribution_settings` on the **Default Cache Behavior** (`path_pattern: "*"`), and
 propagate to all Cache Behaviors during Step 4.
 
+**Convertible settings:**
+
 | Cloudflare parameter | CloudFront field | Notes |
 |----------------------|------------------|-------|
 | `tls_client_auth.min_tls_version` | `minimum_protocol_version` | Map: "1.2" → `TLSv1.2_2021`, "1.3" → `TLSv1.2_2021` (CF has no TLS 1.3-only mode) |
 | `http2` enabled | `http_version: "http2"` | |
 | `http3` / `0rtt` enabled | `http_version: "http2and3"` | |
-| `ssl` mode `"strict"` | `viewer_protocol_policy: "https-only"` | |
-| `ssl` mode `"flexible"` | `viewer_protocol_policy: "allow-all"` | |
-| `browser_check` | `non_convertible` | Reason: `"Browser Integrity Check has no CloudFront equivalent"` |
-| `minify` | `non_convertible` | Reason: `"HTML/CSS/JS minification not supported natively in CloudFront"` |
-| `rocket_loader` | `non_convertible` | Reason: `"Rocket Loader is a Cloudflare-specific JS optimization"` |
-| `hotlink_protection` | `non_convertible` | Reason: `"Hotlink protection requires Lambda@Edge custom logic"` |
+
+**Hardcoded best-practice defaults (do NOT derive from Cloudflare config):**
+
+- `viewer_protocol_policy`: always `"redirect-to-https"`. Do NOT read Cloudflare's
+  `ssl` mode setting — CloudFront best practice is always HTTPS redirect regardless
+  of what Cloudflare was configured to do. The `ssl: flexible` (allow HTTP) and
+  `ssl: strict` (HTTPS only) settings are Cloudflare-specific and should not influence
+  the CloudFront configuration.
+
+**Non-convertible settings (mark in `non_convertible`, do not convert):**
+
+| Cloudflare parameter | Reason |
+|----------------------|--------|
+| `ssl` mode | Ignored — CloudFront always uses `redirect-to-https` (best practice) |
+| `browser_check` | `"Browser Integrity Check has no CloudFront equivalent"` |
+| `minify` | `"HTML/CSS/JS minification not supported natively in CloudFront"` |
+| `rocket_loader` | `"Rocket Loader is a Cloudflare-specific JS optimization"` |
+| `hotlink_protection` | `"Hotlink protection requires Lambda@Edge custom logic"` |
 
 ---
 
@@ -264,12 +278,18 @@ regex/other fields), create an independent cache behavior:
 - Extract the path pattern from the expression (e.g., `http.request.uri.path wildcard "/api/*"` → `/api/*`)
 - Create a new cache behavior with that `path_pattern`
 - Set its `origin` to the target origin from `action_parameters.origin`:
+  - The origin hostname comes from `action_parameters.origin.host` (the DNS name
+    of the target server). Do NOT use `host_header` for the origin domain —
+    `host_header` is the Host header value sent to the origin, which may differ.
+  - `origin.id`: sanitize the origin hostname (replace every `.` and `-` with `_`)
+    and prefix with `origin_`. Example: `api-backend.example.com` → `origin_api_backend_example_com`
   ```yaml
   origin:
-    id: "origin_<sanitized_target_domain>"
-    domain: "<action_parameters.origin.host_header or origin hostname>"
+    id: "origin_<sanitized_origin_hostname>"
+    domain: "<action_parameters.origin.host>"
     protocol: "https"
     port: 443
+    host_header: "<action_parameters.origin.host_header or null>"
     custom_origin_headers: []
     s3_origin: false
   ```
