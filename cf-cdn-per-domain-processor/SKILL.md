@@ -419,7 +419,11 @@ Action type: `set_cache_settings`.
 - If `apply_default_cache_behavior: true`:
   **⚠️ READ NOW:** `references/cloudflare-default-cache-behavior.md` — the ~70 cacheable file extensions.
   Read the extension list from that reference.
-- For each extension (e.g. `.jpg`, `.css`, `.js`), add a Cache Behavior:
+- **Before generating default behaviors**, collect all `path_pattern` values already
+  created by Cache Rules above. If a Cache Rule already created a behavior for a
+  specific extension pattern (e.g., `*.apk` with custom TTL), do NOT generate a
+  default behavior for that extension — the Cache Rule's settings take precedence.
+- For each extension NOT already covered by a Cache Rule, add a Cache Behavior:
   - `path_pattern`: `"*.<ext>"`
   - `cache_policy.ttl.default`: `7200` (2 h)
   - `cache_policy.ttl.max`: `7200`
