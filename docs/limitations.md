@@ -25,7 +25,7 @@ The CDN pipeline converts these Cloudflare rule types to CloudFront equivalents:
 | Item | Reason | Alternative |
 |------|--------|-------------|
 | Page Rules (legacy) | Deprecated by Cloudflare. Migrate to modern rule types first, then use this tool. | Cloudflare migration guide |
-| Snippets / Workers | Arbitrary code, not declarative config. | Manual rewrite as CloudFront Functions or Lambda@Edge |
+| Snippets / Workers | Arbitrary JavaScript/TypeScript code running on Cloudflare's V8 runtime, not declarative config. May use Cloudflare-specific APIs (KV, Durable Objects, R2, D1) that have no CloudFront equivalent. Requires understanding business logic to rewrite. | Manual rewrite as CloudFront Functions or Lambda@Edge. Complex Workers may need Lambda@Edge or standalone Lambda behind CloudFront. |
 | URL Normalization | CloudFront normalizes URIs per RFC 3986 by default. No conversion needed. | N/A |
 | Managed Transforms (except True-Client-IP) | Cloudflare-specific features. | CloudFront native equivalents where available |
 | Trace | Cloudflare-specific testing feature. | CloudWatch Logs, CloudFront real-time logs |
