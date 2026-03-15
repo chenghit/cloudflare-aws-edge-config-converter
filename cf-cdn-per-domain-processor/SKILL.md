@@ -415,20 +415,58 @@ Action type: `set_cache_settings`.
 - Set `cache_policy.resolved_ttl` = the TTL from the **last** matching rule
   (Cloudflare evaluates all rules and the last one wins).
 
-**Default cache behavior extension list:**
+**Default cache behavior — Lambda@Edge + selective cache behaviors:**
 - If `apply_default_cache_behavior: true`:
   **⚠️ READ NOW:** `references/cloudflare-default-cache-behavior.md` — the ~70 cacheable file extensions.
   Read the extension list from that reference.
-- **Before generating default behaviors**, collect all `path_pattern` values already
-  created by Cache Rules above. If a Cache Rule already created a behavior for a
-  specific extension pattern (e.g., `*.apk` with custom TTL), do NOT generate a
-  default behavior for that extension — the Cache Rule's settings take precedence.
-- For each extension NOT already covered by a Cache Rule, add a Cache Behavior:
-  - `path_pattern`: `"*.<ext>"`
-  - `cache_policy.ttl.default`: `7200` (2 h)
-  - `cache_policy.ttl.max`: `7200`
-  - `cache_policy.bypass: false`
-  - Assign precedence starting at 100, incrementing by 1 per extension.
+
+  **Step A — Count custom-TTL extensions from Cache Rules:**
+  Collect all Cache Rules processed above that target a specific file extension
+  pattern (e.g., `*.apk`, `*.iso`). Count how many unique extensions have custom TTLs.
+
+  **Step B — Choose implementation path based on count:**
+
+  **If 0 custom-TTL extensions:**
+  - Set `lambda_edge.origin_response` in the metadata document:
+    ```yaml
+    lambda_edge:
+      origin_response:
+        type: "default_cache"
+        custom_ttl_map: {}
+    ```
+  - Do NOT create any per-extension cache behaviors.
+
+  **If ≤20 custom-TTL extensions:**
+  - For each custom-TTL extension, create an independent cache behavior:
+    - `path_pattern`: `"*.<ext>"`
+    - `cache_policy.ttl.default`: the custom TTL value from the Cache Rule
+    - `cache_policy.ttl.max`: `31536000` (1 year — respect origin Cache-Control)
+    - `cache_policy.ttl.min`: `0`
+    - `cache_policy.bypass: false`
+  - Set `lambda_edge.origin_response` in the metadata document to handle the
+    remaining ~50+ extensions:
+    ```yaml
+    lambda_edge:
+      origin_response:
+        type: "default_cache"
+        custom_ttl_map: {}
+    ```
+  - The Lambda handles all extensions NOT covered by cache behaviors.
+
+  **If >20 custom-TTL extensions:**
+  - Do NOT create per-extension cache behaviors (too many, wastes quota).
+  - Set `lambda_edge.origin_response` with the full custom TTL map:
+    ```yaml
+    lambda_edge:
+      origin_response:
+        type: "default_cache"
+        custom_ttl_map:
+          apk: 31536000
+          iso: 604800
+          # ... all custom TTLs
+    ```
+  - The Lambda uses the map to apply custom TTLs, falling back to 7200 for
+    extensions not in the map.
 
 ---
 

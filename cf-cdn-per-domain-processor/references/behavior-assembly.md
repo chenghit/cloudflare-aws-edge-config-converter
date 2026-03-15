@@ -22,7 +22,7 @@ Use these initial values; re-sort all behaviors after collection:
 | Exact path (no wildcards) | `10` |
 | `/prefix/path/*` (depth ≥ 3) | `20 + len(prefix)` |
 | `/prefix/*` (depth 2) | `20 + len(prefix)` |
-| `*.ext` (extension match) | `100–169` (from 3g) |
+| `*.ext` (custom-TTL extension, ≤20 only) | `100 + index` |
 | `/*` | `990` |
 | `*` (default) | `999` |
 
@@ -97,8 +97,8 @@ kvs_requirements:
 kvs_data: []                     # populated by Step 3e if bulk redirects exist
 custom_error_responses: []       # populated by Step 3i; distribution-level setting
 lambda_edge:                     # populated by Step 3i if advanced error handling needed
-  origin_request: null
-  origin_response: null
+  origin_request: null           #   OR by Step 3d Path B (complex origin override)
+  origin_response: null          #   OR by Step 3g (default cache: type + custom_ttl_map)
 ```
 
 ### Required schema per cache_behavior document

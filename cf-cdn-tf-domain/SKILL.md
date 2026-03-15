@@ -82,6 +82,7 @@ Additional references to consult as needed during codegen:
 - `references/cloudfront/conversion-examples.md` — URL field mapping and wildcard patterns
 - `references/cloudfront/cloudfront-viewer-headers.md` — header mapping table
 - `references/cloudfront/kvs-usage-and-limits.md` — KVS constraints
+- `references/lambda/default-cache-origin-response.js` — Lambda@Edge template for default cache (read only when IR has `lambda_edge.origin_response.type == "default_cache"`)
 
 ---
 
@@ -463,6 +464,24 @@ Lambda@Edge constraints:
 - Optional chaining (`?.`) IS allowed (Node.js runtime)
 - Destructuring IS allowed
 - Max file size: 1 MB (hard limit)
+
+#### 2f. Lambda@Edge for default cache behavior
+
+If the IR metadata has `lambda_edge.origin_response.type == "default_cache"`:
+
+1. Read the template at `references/lambda/default-cache-origin-response.js`.
+2. If `custom_ttl_map` is non-empty (>20 custom-TTL extensions were consolidated
+   into Lambda), replace the `CUSTOM_TTL_PLACEHOLDER` comment block with:
+   ```javascript
+   const customTtl = {"apk": 31536000, "iso": 604800};
+   const ttl = customTtl[extension] || 7200;
+   ```
+   And remove the `const ttl = 7200;` line below it.
+3. If `custom_ttl_map` is empty, use the template as-is (remove the placeholder
+   comment, keep `const ttl = 7200;`).
+4. Write to `lambda/default_cache_origin_response.js`.
+5. Generate a Lambda@Edge Terraform resource in `main.tf` and associate it with
+   the default cache behavior as `event_type = "origin-response"`.
 
 ---
 

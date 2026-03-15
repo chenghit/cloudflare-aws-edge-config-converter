@@ -45,7 +45,9 @@ Cloudflare caches `robots.txt` by default.
 
 ## Default Edge TTL
 
-When no `Cache-Control` or `Expires` header is present, Cloudflare uses these default TTLs:
+Cloudflare **respects origin `Cache-Control` headers** when present. The default
+TTLs below apply only when the origin response has **no** `Cache-Control` or
+`Expires` header:
 
 | HTTP Status Code | Default TTL |
 |------------------|-------------|
@@ -54,6 +56,10 @@ When no `Cache-Control` or `Expires` header is present, Cloudflare uses these de
 | 404, 410 | 3 minutes |
 
 All other status codes are not cached by default.
+
+**Key behavior**: If the origin returns `Cache-Control: public, max-age=86400`,
+Cloudflare caches for 86400 seconds (1 day), NOT 2 hours. The 2-hour default
+only applies when the origin is silent about caching.
 
 ## Cache Behavior Rules
 
