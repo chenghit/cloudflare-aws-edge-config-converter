@@ -16,6 +16,7 @@ for %%D in (cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator
     if exist "%SKILLS_DIR%\%%D" rmdir /s /q "%SKILLS_DIR%\%%D"
 )
 if exist "%SKILLS_DIR%\SKILL.md" del /q "%SKILLS_DIR%\SKILL.md"
+if exist "%SKILLS_DIR%\scripts" rmdir /s /q "%SKILLS_DIR%\scripts"
 
 :: Remove deprecated subagent
 if exist "%AGENTS_DIR%\cf-waf-converter.json" del /q "%AGENTS_DIR%\cf-waf-converter.json"
@@ -26,6 +27,7 @@ for %%D in (cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator
     xcopy /e /i /q "%%D" "%SKILLS_DIR%\%%D"
 )
 copy /y "cloudflare-aws-converter\SKILL.md" "%SKILLS_DIR%\SKILL.md"
+xcopy /e /i /q "cloudflare-aws-converter\scripts" "%SKILLS_DIR%\scripts"
 
 :: Copy subagent configurations
 echo Copying subagent configurations to %AGENTS_DIR%...
