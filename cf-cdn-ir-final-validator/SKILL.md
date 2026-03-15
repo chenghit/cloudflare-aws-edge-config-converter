@@ -104,13 +104,18 @@ Rules:
 
 Before any validation logic, read the following documents in order:
 
-1. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/references/behavior-assembly.md` — IR
+1. `references/behavior-assembly.md` — IR
    output schema (metadata and cache_behavior document field definitions).
-2. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` — V1 validation rules
-   (to understand what was already checked and must not be re-checked here).
-3. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` — finalization logic, including
-   the sorting algorithm, policy deduplication scheme, and shadowing detection.
-4. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-final-validator/SKILL.md` (this file) — V2 checks.
+2. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-final-validator/SKILL.md` (this file) — V2 checks.
+
+**V1 checks already performed (do NOT re-run):** path_pattern/precedence presence,
+origin.domain validity, viewer_request_ops integrity, non_convertible reasons,
+duplicate precedence, viewer_request_ops ordering, hostname-filename match, KVS
+consistency, metadata document existence.
+
+**Finalizer operations already performed:** specificity-based sorting (the scoring
+function is reproduced in Check 2b below), policy deduplication (policy_id references
+replace inline policies), shadowed rule detection.
 
 Do not proceed without reading these. The sorting algorithm and policy ID
 format defined in the finalizer SKILL.md are required to verify Check 7.
@@ -525,9 +530,7 @@ Correct file order (ascending precedence):
 
 | Document | Purpose |
 |---|---|
-| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/references/behavior-assembly.md` | IR output schema — metadata and cache_behavior document field definitions |
-| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` | V1 checks — do not re-run these |
-| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md` | Sorting algorithm, dedup logic, output format |
+| `references/behavior-assembly.md` | IR output schema — metadata and cache_behavior document field definitions |
 | `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-final-validator/SKILL.md` | This file — V2 checks |
 
 ---

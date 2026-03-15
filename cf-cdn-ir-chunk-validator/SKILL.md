@@ -119,7 +119,7 @@ Rules:
 
 Before beginning any validation, read the following reference files in order:
 
-1. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/references/behavior-assembly.md` — the
+1. `references/behavior-assembly.md` — the
    IR output schema (metadata document and cache_behavior document field definitions).
 2. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` (this file) — confirm
    the checks to perform.
@@ -596,7 +596,7 @@ Before executing this skill, read the following documents:
 
 | Document | Purpose |
 |---|---|
-| `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/references/behavior-assembly.md` | IR output schema — metadata and cache_behavior document field definitions |
+| `references/behavior-assembly.md` | IR output schema — metadata and cache_behavior document field definitions |
 | `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md` | This file — defines all validation rules |
 
 If any reference document is missing or unreadable, FAIL with:
