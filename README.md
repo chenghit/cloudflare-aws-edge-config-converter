@@ -200,7 +200,6 @@ Most subagents only have file I/O and search permissions (`fs_read`, `fs_write`,
 - [Limitations and Caveats](./docs/limitations.md)
 - [Troubleshooting](./docs/troubleshooting.md)
 - [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md)
-- [Roadmap](./docs/roadmap.md)
 
 ## Related Resources
 
