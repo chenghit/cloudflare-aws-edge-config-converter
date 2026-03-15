@@ -253,7 +253,34 @@ propagate to all Cache Behaviors during Step 4.
 
 Action type: `route` with `action_parameters.origin` containing override fields.
 
-- Add a single `type: origin_override` entry to `viewer_request_ops`.
+**Two implementation paths — choose based on expression complexity:**
+
+**Path A — Simple URI path → independent cache behavior (no CF Function needed):**
+
+If the Origin Rule's expression is a **pure URI path condition** that can be expressed
+as a CloudFront cache behavior path pattern (only `*` and `?` wildcards, no header/geo/
+regex/other fields), create an independent cache behavior:
+
+- Extract the path pattern from the expression (e.g., `http.request.uri.path wildcard "/api/*"` → `/api/*`)
+- Create a new cache behavior with that `path_pattern`
+- Set its `origin` to the target origin from `action_parameters.origin`:
+  ```yaml
+  origin:
+    id: "origin_<sanitized_target_domain>"
+    domain: "<action_parameters.origin.host_header or origin hostname>"
+    protocol: "https"
+    port: 443
+    custom_origin_headers: []
+    s3_origin: false
+  ```
+- Do NOT add anything to `viewer_request_ops` — the cache behavior handles routing.
+
+**Path B — Complex condition → `origin_override` in viewer_request_ops (CF Function):**
+
+If the expression contains header conditions, geo conditions, regex, multiple fields
+combined with AND/OR, or a URI path that cannot be expressed as a CloudFront path
+pattern, add to the **default behavior's** `viewer_request_ops`:
+
 - Structure: `conditions` list (ordered, first-match-wins) + `default_origin_id`.
 - Each condition entry:
   ```yaml
@@ -265,21 +292,27 @@ Action type: `route` with `action_parameters.origin` containing override fields.
     domain: "api-backend.example.com"
     protocol: "https"
     port: 443
-    host_header: null    # null = use domain; explicit value overrides Host header
+    host_header: null
     strip_path_prefix: null
     custom_headers: []
   ```
 - `default_origin_id`: `"origin_<sanitized_hostname>"` using the same sanitization
   rule as the filename.
-- If `action_parameters.origin.port` is absent, default to 443 for https, 80 for http.
 
-**S3 origin handling:** When `origin_type == "s3"` (from domain_scope.json), Origin Rules
-that only override host header and/or switch protocol to HTTP for S3 website endpoint
-access are **redundant** after migration — CloudFront uses OAC with the S3 REST API
-endpoint directly. Skip these rules silently (do not add to `viewer_request_ops` or
-`non_convertible`). Only convert Origin Rules that perform **business-logic changes**
-such as URI path prefix insertion, conditional origin routing to non-S3 backends, or
-custom header injection.
+**Boundary case:** If an Origin Rule has a URI path condition AND other conditions
+(e.g., `http.request.uri.path wildcard "/api/*" AND http.request.headers["X-Internal"] eq "1"`),
+this cannot be expressed as a pure path pattern → use Path B. Add a `non_convertible`
+note: `"Origin Rule condition combines URI path with non-path fields; converted to CF Function origin override instead of cache behavior"`.
+
+**Common rules for both paths:**
+- If `action_parameters.origin.port` is absent, default to 443 for https, 80 for http.
+- **S3 origin handling:** When `origin_type == "s3"` (from domain_scope.json), Origin Rules
+  that only override host header and/or switch protocol to HTTP for S3 website endpoint
+  access are **redundant** after migration — CloudFront uses OAC with the S3 REST API
+  endpoint directly. Skip these rules silently (do not add to `viewer_request_ops` or
+  `non_convertible`). Only convert Origin Rules that perform **business-logic changes**
+  such as URI path prefix insertion, conditional origin routing to non-S3 backends, or
+  custom header injection.
 
 ---
 

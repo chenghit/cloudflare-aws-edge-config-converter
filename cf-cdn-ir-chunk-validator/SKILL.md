@@ -292,7 +292,20 @@ sub-index `j` (0-based):
   VRO_TYPE_NULL[<i>][<j>]: viewer_request_ops[<j>] in cache_behavior[<i>] has type=null.
   ```
 
-**3b. `params` must be present (not absent, not null):**
+**3b. `params` must be present (not absent, not null) — except for `origin_override`:**
+
+For entries where `type == "origin_override"`, skip the `params` check and instead
+verify `conditions`:
+- If `conditions` key is absent: append error
+  ```
+  VRO_CONDITIONS_MISSING[<i>][<j>]: viewer_request_ops[<j>] in cache_behavior[<i>] has type="origin_override" but is missing the conditions field.
+  ```
+- If `conditions` is null or empty list: append error
+  ```
+  VRO_CONDITIONS_EMPTY[<i>][<j>]: viewer_request_ops[<j>] in cache_behavior[<i>] has type="origin_override" but conditions is null or empty. At least one condition entry is required.
+  ```
+
+For all other types:
 - If `params` key is absent: append error
   ```
   VRO_PARAMS_MISSING[<i>][<j>]: viewer_request_ops[<j>] in cache_behavior[<i>] is missing the params field.
@@ -425,14 +438,14 @@ HOSTNAME_MISMATCH: hostname field in YAML is "<yaml_value>" but expected "<raw_h
 
 ---
 
-#### Check 8 — KVS redirect requirement
+#### Check 8 — KVS requirements consistency
 
-Locate the `kvs_requirements` field. This may be:
-- A top-level key in the metadata document
-- A top-level key in the first document
+Locate the `kvs_requirements` and `kvs_data` fields in the metadata document
+(or the first document as fallback).
 
-If `kvs_requirements` is present and `kvs_requirements.needs_redirects` is
-exactly `true` (boolean):
+**8a. needs_redirects consistency:**
+
+If `kvs_requirements.needs_redirects` is exactly `true` (boolean):
 
 Scan ALL `cache_behavior_docs` for any `viewer_request_ops` entry with
 `type == "bulk_redirect"`.
@@ -442,14 +455,89 @@ If no such entry is found:
 KVS_REDIRECT_MISSING: kvs_requirements.needs_redirects=true but no viewer_request_ops entry with type="bulk_redirect" was found in any cache_behavior document. At least one bulk_redirect op is required.
 ```
 
-If `kvs_requirements` is absent or `needs_redirects` is not `true`, skip
-this check entirely (do not fail on absence of `kvs_requirements`).
+**8b. needs_continent consistency:**
+
+If `kvs_requirements.needs_continent` is exactly `true` (boolean):
+
+Check that `kvs_data` contains at least one entry whose `key` starts with `continent:`.
+
+If no such entry is found:
+```
+KVS_CONTINENT_MISSING: kvs_requirements.needs_continent=true but no kvs_data entry with key prefix "continent:" was found. Continent-to-country mappings are required for CF Function KVS lookup.
+```
+
+**8c. needs_eu consistency:**
+
+If `kvs_requirements.needs_eu` is exactly `true` (boolean):
+
+Check that `kvs_data` contains at least one entry whose `key` starts with `eu:`.
+
+If no such entry is found:
+```
+KVS_EU_MISSING: kvs_requirements.needs_eu=true but no kvs_data entry with key prefix "eu:" was found. EU country entries are required for CF Function KVS lookup.
+```
+
+**8d. Reverse consistency (WARN, not FAIL):**
+
+If `kvs_data` contains entries with `continent:` prefix but `needs_continent` is not `true`:
+```
+WARN: kvs_data contains continent: entries but kvs_requirements.needs_continent is not true. The data will not be used.
+```
+
+If `kvs_data` contains entries with `eu:` prefix but `needs_eu` is not `true`:
+```
+WARN: kvs_data contains eu: entries but kvs_requirements.needs_eu is not true. The data will not be used.
+```
+
+If `kvs_requirements` is absent or all flags are `false`/absent, and `kvs_data`
+is empty or absent, skip this check entirely.
+
+---
+
+#### Check 9 — Metadata document existence and required fields
+
+**9a. Exactly one metadata document must exist:**
+
+If `metadata_doc` is `null` (no document with `document_type: metadata` was found):
+```
+META_MISSING: No document with document_type="metadata" found in the YAML file. The metadata document is required by downstream skills (finalizer, tf-domain).
+```
+
+If more than one document has `document_type: metadata`:
+```
+META_DUPLICATE: Found <N> documents with document_type="metadata". Exactly one is expected.
+```
+
+**9b. Required fields in metadata document:**
+
+If `metadata_doc` exists, check the following fields:
+
+- `hostname` must be a non-empty string:
+  ```
+  META_HOSTNAME_MISSING: metadata document is missing the hostname field.
+  ```
+- `sanitized_name` must be a non-empty string:
+  ```
+  META_SANITIZED_NAME_MISSING: metadata document is missing the sanitized_name field.
+  ```
+- `kvs_requirements` must be present and be a mapping (dict):
+  ```
+  META_KVS_REQUIREMENTS_MISSING: metadata document is missing the kvs_requirements field. An empty mapping {} is required at minimum.
+  ```
+- `cert_arn_mode` must be present and equal `"explicit"` or `"data_source"`:
+  ```
+  META_CERT_ARN_MODE_INVALID: metadata document has cert_arn_mode="<value>". Must be "explicit" or "data_source".
+  ```
+- `origin_type` must be present and equal `"s3"`, `"object_storage"`, or `"server"`:
+  ```
+  META_ORIGIN_TYPE_INVALID: metadata document has origin_type="<value>". Must be "s3", "object_storage", or "server".
+  ```
 
 ---
 
 ### Step 5 — Write Validation Output
 
-After all 8 checks complete:
+After all 9 checks complete:
 
 1. Determine `status`:
    - `"FAIL"` if `errors` list is non-empty
@@ -534,3 +622,6 @@ SETUP_ERROR: Required reference document not found: <path>. Cannot proceed with 
   origins unless they fail the character-set check.
 - **Precedence 999 is a valid integer.** Do not flag it as an error in Check 1.
   Do not assign special meaning to it in V1 validation (V2 handles ordering).
+- **Check 9 runs even if no cache_behavior documents exist.** A file with only
+  a metadata document and no cache behaviors is structurally valid (though
+  unusual). A file with only cache behaviors and no metadata is invalid.
