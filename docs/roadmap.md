@@ -1,3 +1,5 @@
+[中文](./roadmap_CN.md)
+
 # Roadmap
 
 ## 🚧 Skills 3-11: Complete CDN Configuration Migration Solution

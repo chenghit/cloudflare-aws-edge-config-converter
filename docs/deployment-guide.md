@@ -1,3 +1,5 @@
+[中文](./deployment-guide_CN.md)
+
 # Deployment Guide
 
 This guide explains the output structure and deployment steps for each pipeline.

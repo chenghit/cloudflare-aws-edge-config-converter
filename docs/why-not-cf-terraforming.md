@@ -1,3 +1,5 @@
+[中文](./why-not-cf-terraforming_CN.md)
+
 # Why Not cf-terraforming?
 
 [cf-terraforming](https://github.com/cloudflare/cf-terraforming) is Cloudflare's official tool for exporting configurations to Terraform. While it's excellent for Terraform-based infrastructure management, it's fundamentally incompatible with this migration tool.

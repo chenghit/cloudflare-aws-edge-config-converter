@@ -1,3 +1,5 @@
+[中文](./limitations_CN.md)
+
 # Limitations and Caveats
 
 ## CDN Pipeline — What Gets Converted

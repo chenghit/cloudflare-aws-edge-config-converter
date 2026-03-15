@@ -1,3 +1,5 @@
+[中文](./best-practices_CN.md)
+
 # Best Practices
 
 ## ✅ Recommended

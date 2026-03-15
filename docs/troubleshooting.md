@@ -1,3 +1,5 @@
+[中文](./troubleshooting_CN.md)
+
 # Troubleshooting
 
 ## Subagent Not Activating Properly
