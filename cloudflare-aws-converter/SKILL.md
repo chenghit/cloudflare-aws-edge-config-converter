@@ -81,11 +81,9 @@ Before proceeding, check the structure of the provided path:
 5. If the path contains exactly one zone subdirectory, auto-resolve to that zone's latest timestamped backup and inform the user:
    > "Detected single zone: {zone_name}. Using backup at {resolved_path}."
 
-**When passing the resolved path to subagents**, use two different paths:
-- **WAF subagents**: Pass the original `{config_path}` (backup root) — WAF rules reference account-level IP lists in `account/` which is a sibling of the zone directory.
-- **CDN subagents**: Pass the resolved zone directory that directly contains `DNS.txt` and the rule files (e.g., `Cache-Rules.txt`).
+**When passing the path to subagents**, always pass the original `{config_path}` (backup root). Both WAF and CDN subagents use recursive glob to find files — WAF needs `account/IP-Lists.txt`, CDN needs `account/List-Items-redirect-*.txt` for bulk redirects. Do NOT resolve to the zone subdirectory before passing to subagents.
 
-**Account directory check**: After resolving the zone path, verify that `{config_path}` (the original user-provided path or its parent) contains an `account/` subdirectory. If not found, warn the user: "No `account/` directory found under the provided path. WAF IP lists and bulk redirect lists may not be found. CloudflareBackup always creates an `account/` directory — make sure you provided the backup root directory, not a zone subdirectory."
+**Account directory check**: Verify that `{config_path}` contains an `account/` subdirectory. If not found, warn the user: "No `account/` directory found under the provided path. IP lists and bulk redirect lists may not be found. CloudflareBackup always creates an `account/` directory — make sure you provided the backup root directory, not a zone subdirectory."
 
 If the user requests CDN full pipeline (Terraform generation), also check for:
 - `cloudflare-to-aws-cdn/user_input.csv` — if it exists, CDN pipeline can start from Stage 2
