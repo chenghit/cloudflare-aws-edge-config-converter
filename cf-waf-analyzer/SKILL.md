@@ -32,7 +32,7 @@ cloudflare-to-aws-waf/
 └── cloudflare-security-rules-summary.md    # Step 4: Rule summary
 ```
 
-**CRITICAL**: Create the output directory at the start of workflow. All file write operations use this directory as base path.
+**CRITICAL**: The output directory `cloudflare-to-aws-waf/` is pre-created by the orchestrator (waf-init.sh). Do NOT create it yourself. All file write operations use this directory as base path.
 
 ## Scope
 
@@ -129,7 +129,7 @@ Please provide the correct CloudflareBackup output directory.
 
 ### 3. Parse Cloudflare Configuration
 
-Parse JSON to Cloudflare rule expressions. Ignore managed rules and DDoS protection.
+Parse JSON to Cloudflare rule expressions. Process ALL rules in the file — `managed_challenge` is a valid action to convert (→ AWS WAF `challenge {}`), not a managed ruleset. Cloudflare Managed Rulesets (OWASP etc.) are in a separate phase and not present in WAF-Custom-Rules.txt.
 
 **Non-convertible fields** (require manual intervention): Client Certificate Verified, MIME Type, European Union, bot fields (`cf.verified_bot_category`, `cf.bot_management.*`), fraud fields (`cf.waf.credential_check.*`), attack score fields (`cf.waf.score*`)
 

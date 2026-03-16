@@ -37,11 +37,6 @@ if custom_path:
         rules = data["result"]
     else:
         rules = []
-    # Exclude managed/ddos rules (out of scope)
-    source["custom"] = len([r for r in rules
-                            if r.get("action") not in ("managed_challenge",)
-                            or "action_parameters" in r])
-    # Actually, just count all rules — analyzer handles filtering
     source["custom"] = len(rules)
 else:
     source["custom"] = 0

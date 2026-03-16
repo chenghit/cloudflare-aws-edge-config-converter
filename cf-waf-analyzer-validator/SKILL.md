@@ -70,7 +70,7 @@ Read the references relevant to your mode:
 1. Identify your mode from the query (V1, V2, V3, or V4).
 2. Read `cloudflare-to-aws-waf/rule_index.yaml`.
 3. Read the reference documents listed for your mode above.
-4. Read the summary file.
+4. Read the summary file. **For V1/V2/V3**: you will read the full summary but only validate rules in your assigned scope — ignore rules outside your range.
 5. Read the mode-specific input files:
    - **V1**: Use glob to find IP-Access-Rules.txt, IP-Lists.txt, List-Items-*.txt under the config path.
    - **V2**: Read the chunk file specified in the query (bare JSON array). Also find IP-Lists.txt, List-Items-*.txt if rules in this chunk reference IP lists.

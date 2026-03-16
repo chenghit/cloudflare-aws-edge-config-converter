@@ -33,15 +33,15 @@ Reference files in `references/` directory. Summary file in `cloudflare-to-aws-w
 ```
 cloudflare-to-aws-waf/
 ├── cloudflare-security-rules-summary.md    # INPUT (already exists, do not modify)
-├── versions.tf                              # Root: provider version
-├── ip_sets.tf                               # Root: shared IP sets
-├── main.tf                                  # Root: locals + two module calls
+├── versions.tf                              # PRE-WRITTEN by waf-init.sh (do not modify)
+├── ip_sets.tf                               # Root: shared IP sets (YOU generate this)
+├── main.tf                                  # Root: locals + two module calls (YOU generate this)
 ├── modules/
 │   └── waf/
-│       ├── main.tf                          # Module: Web ACL resource
-│       ├── variables.tf                     # Module: input variables
-│       └── outputs.tf                       # Module: outputs
-└── README_aws-waf-terraform-deployment.md   # Deployment guide
+│       ├── main.tf                          # Module: Web ACL resource (YOU generate this)
+│       ├── variables.tf                     # PRE-WRITTEN by waf-init.sh (do not modify)
+│       └── outputs.tf                       # PRE-WRITTEN by waf-init.sh (do not modify)
+└── README_aws-waf-terraform-deployment.md   # Deployment guide (YOU generate this)
 ```
 
 **⚠️ CRITICAL: You MUST create the `modules/waf/` subdirectory and place module files there. The root `main.tf` calls the module twice (website + api-and-file). Do NOT put all files flat in one directory.**

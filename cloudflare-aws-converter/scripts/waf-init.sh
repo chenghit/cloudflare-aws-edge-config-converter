@@ -21,6 +21,7 @@ echo "Initializing WAF output directory at $WAF_DIR ..."
 
 mkdir -p "$MOD_DIR"
 mkdir -p "$CHUNKS_DIR"
+mkdir -p "$WAF_DIR/validation"
 
 # versions.tf — fixed
 cat > "$WAF_DIR/versions.tf" << 'EOF'
