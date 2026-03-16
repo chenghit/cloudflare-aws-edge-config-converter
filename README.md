@@ -30,7 +30,7 @@ Convert CDN configuration in /path/to/cloudflare-backup to CloudFront Terraform
 Convert all Cloudflare configuration in /path/to/cloudflare-backup to AWS
 ```
 
-Always provide the CloudflareBackup root directory (the one containing `account/` and zone subdirectories like `example.com/`). Do not provide a subdirectory — WAF rules reference account-level IP lists that live outside the zone directory.
+Always provide the **CloudflareBackup root directory** (the one containing `account/` and zone subdirectories like `example.com/`). Do **not** provide a subdirectory — both WAF and CDN pipelines need files from the `account/` directory (IP lists for WAF, bulk redirect lists for CDN) that live outside the zone directory.
 
 For testing without your own config, use `examples/cloudflare-configs/`.
 
