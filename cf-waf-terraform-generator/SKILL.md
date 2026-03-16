@@ -44,7 +44,7 @@ cloudflare-to-aws-waf/
 └── README_aws-waf-terraform-deployment.md   # Deployment guide (YOU generate this)
 ```
 
-**⚠️ CRITICAL: You MUST create the `modules/waf/` subdirectory and place module files there. The root `main.tf` calls the module twice (website + api-and-file). Do NOT put all files flat in one directory.**
+**⚠️ CRITICAL: The `modules/waf/` subdirectory is pre-created by waf-init.sh. Place module files there. The root `main.tf` calls the module twice (website + api-and-file). Do NOT put all files flat in one directory.**
 
 ## How to Read the Summary File
 

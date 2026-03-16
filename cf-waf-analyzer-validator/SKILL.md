@@ -60,7 +60,7 @@ Read the references relevant to your mode:
 
 - **V1**: `references/field-conversions.md`, `references/non-convertible-rules.md`
 - **V2**: `references/action-conversions.md`, `references/field-conversions.md`, `references/non-convertible-rules.md`, `references/nesting-and-splitting.md`
-- **V3**: `references/action-conversions.md`
+- **V3**: `references/action-conversions.md`, `references/common-mistakes.md`
 - **V4**: No references needed
 
 ## Workflow
@@ -214,12 +214,27 @@ For non-skip custom rules: use rule_index.yaml to determine if this rule is posi
 ### 2. Determine Status
 
 - **PASS**: All checks passed.
-- **FIXED**: Issues found and fixed in the summary.
+- **FIXED**: Issues found that can be fixed.
 - **CANNOT_FIX**: Issues that cannot be resolved by editing.
 
 ### 3. Fix Issues (if FIXED)
 
-Fix errors directly in `cloudflare-security-rules-summary.md` using `fs_write` str_replace. After fixing, verify the fixes are correct.
+**V4 mode only:** V4 is responsible for applying all fixes. Read the `details` array from each V1/V2/V3 report, and for each issue with `"action": "fixed"`, apply the fix to `cloudflare-security-rules-summary.md` using `fs_write` str_replace. Apply fixes serially to avoid race conditions.
+
+**V1/V2/V3 modes:** Do NOT fix the summary yourself. Record each issue in the JSON report with the `action` field set to `"fixed"` (if fixable) or `"cannot_fix"`. Include enough detail in the `issue` and `fix` fields for V4 to apply the fix. For example:
+
+```json
+{
+  "check": "Check 3",
+  "rule": "rate-limit-api",
+  "issue": "Convertibility marked as 'no' but should be 'partial' (rate-based rules are always convertible)",
+  "action": "fixed",
+  "fix": {
+    "old_text": "- **Convertible**: ❌ No",
+    "new_text": "- **Convertible**: ⚠️ Partial"
+  }
+}
+```
 
 ### 4. Write Validation Report
 
@@ -227,8 +242,10 @@ Fix errors directly in `cloudflare-security-rules-summary.md` using `fs_write` s
 
 **V4**: Read all V1/V2/V3 reports from `cloudflare-to-aws-waf/validation/`. Determine global status:
 - All PASS → global PASS
-- Any FIXED, no CANNOT_FIX → global FIXED
+- Any FIXED, no CANNOT_FIX → global FIXED (apply all fixes serially to the summary)
 - Any CANNOT_FIX → global CANNOT_FIX
+
+**Apply fixes (V4 only):** For each report with status FIXED, iterate through the `details` array. For each entry with `"action": "fixed"`, use `fs_write` str_replace with the `old_text` and `new_text` from the `fix` field. Apply fixes one at a time, serially.
 
 Also verify:
 - Check 4A (section order)
