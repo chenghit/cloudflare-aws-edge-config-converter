@@ -1,11 +1,11 @@
 ---
 name: cf-waf-analyzer-validator
-description: Validates WAF analysis summary against original Cloudflare configuration files, fixes errors in-place. Operates in batch mode — each invocation validates a specific rule type or chunk. Use after cf-waf-analyzer has generated its summary and cf-waf-summary-scanner has produced rule_index.yaml.
+description: Validates WAF analysis summary against original Cloudflare configuration files. Operates in batch mode — each invocation validates a specific rule type or chunk. V1/V2/V3 modes report issues; V4 mode applies fixes and writes the final report. Use after cf-waf-analyzer has generated its summary and cf-waf-summary-scanner has produced rule_index.yaml.
 ---
 
 # Cloudflare WAF Analyzer Validator
 
-Validate `cloudflare-to-aws-waf/cloudflare-security-rules-summary.md` by cross-checking it against the original Cloudflare configuration files. Fix errors directly in the summary. Do NOT re-run the full analysis workflow.
+Validate `cloudflare-to-aws-waf/cloudflare-security-rules-summary.md` by cross-checking it against the original Cloudflare configuration files. V1/V2/V3 modes only report issues (do NOT modify the summary). V4 mode applies all fixes serially and writes the final report.
 
 **Language Adaptation**: Write output files in the language specified in the query. Default to English.
 

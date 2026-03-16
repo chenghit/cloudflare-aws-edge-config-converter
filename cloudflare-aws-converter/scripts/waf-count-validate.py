@@ -28,6 +28,8 @@ for root, dirs, files in os.walk(config_path):
         if f == "WAF-Custom-Rules.txt":
             custom_path = os.path.join(root, f)
             break
+    if custom_path:
+        break
 if custom_path:
     data = json.load(open(custom_path))
     # CloudflareBackup format: {"result": {"rules": [...]}, "success": true}
@@ -48,6 +50,8 @@ for root, dirs, files in os.walk(config_path):
         if f == "Rate-limits.txt":
             rate_path = os.path.join(root, f)
             break
+    if rate_path:
+        break
 if rate_path:
     data = json.load(open(rate_path))
     if isinstance(data.get("result"), dict) and "rules" in data["result"]:
@@ -66,6 +70,8 @@ for root, dirs, files in os.walk(config_path):
         if f == "IP-Access-Rules.txt":
             ip_path = os.path.join(root, f)
             break
+    if ip_path:
+        break
 if ip_path:
     data = json.load(open(ip_path))
     if isinstance(data.get("result"), list):
