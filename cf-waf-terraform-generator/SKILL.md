@@ -139,7 +139,7 @@ Read each skip rule's RuleLabels from the summary. For rules positioned AFTER sk
 - **Rate-based rules**: Add `NOT label_match(skip:http_ratelimit)` if that label exists. NEVER use `skip:all_remaining_custom_rules` (Cloudflare rate-limiting is a separate phase)
 - **Managed rules**: Add `NOT label_match(skip:http_request_firewall_managed)` if that label exists
 
-Present the plan to user and ask for confirmation before generating Terraform.
+Present the plan as a summary in your response, then proceed directly to generating Terraform. Do NOT wait for user confirmation — this skill runs as a subagent with no interactive access to the user.
 
 ### 3. Generate Terraform Files
 
@@ -231,7 +231,7 @@ Create `locals.ip_set_arns` map and call module twice:
 ### 5. Generate Deployment README
 
 Create `README_aws-waf-terraform-deployment.md` with:
-- Prerequisites: Terraform >= 1.0, AWS Provider >= 6.2.0
+- Prerequisites: Terraform >= 1.8.0, AWS Provider >= 6.2.0
 - Deployment: `terraform init && terraform apply`
 - CloudFront association instructions
 - Two Web ACLs: website (challenge enabled) vs api-and-file (challenge disabled)

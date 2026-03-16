@@ -66,10 +66,6 @@ Extract the config path from the query — look for any absolute path (starting 
 - STOP immediately
 - Return error: "Configuration directory path is required. Please provide the path to CloudflareBackup output directory."
 
-**If summary files already exist in the output directory (`cloudflare-to-aws-waf/cloudflare-security-rules-summary.md`):**
-- STOP immediately
-- Return message: "Found existing summary files (cloudflare-security-rules-summary.md). Please specify whether to use existing summary or regenerate."
-
 ### 2. Discover and Read Configuration Files
 
 **CRITICAL: Search entire directory tree, don't assume locations.**

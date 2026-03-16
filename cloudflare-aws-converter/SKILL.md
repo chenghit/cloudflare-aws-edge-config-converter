@@ -114,12 +114,13 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
 #### WAF pipeline (analyzer → validator → generator):
 
 **Stage 1: Analyze**
-1. Invoke `cf-waf-analyzer` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. Analyze Cloudflare security rules in {config_path}. Generate output files in {user_language}."`
-2. Check the analyzer's response:
-   - If analyzer reports existing summary files found → ask the user: "Found existing analysis files. Do you want to overwrite them and re-run the analysis, or use the existing files and proceed to validation?"
-     - User says overwrite → invoke analyzer again with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. Analyze Cloudflare security rules in {config_path}. Overwrite existing summary files. Generate output files in {user_language}."`
+1. Before invoking the analyzer, check if `cloudflare-to-aws-waf/cloudflare-security-rules-summary.md` already exists (use `glob` or `fs_read`).
+   - If it exists → ask the user: "Found existing analysis files. Do you want to overwrite them and re-run the analysis, or use the existing files and proceed to validation?"
+     - User says overwrite → proceed to invoke analyzer below
      - User says use existing → skip to Stage 2
-   - If analyzer completed successfully → proceed to Stage 2
+   - If it does not exist → proceed to invoke analyzer below
+2. Invoke `cf-waf-analyzer` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. Analyze Cloudflare security rules in {config_path}. Generate output files in {user_language}."`
+3. If analyzer completed successfully → proceed to Stage 2
 
 **Stage 2: Validate**
 1. Set `validation_round = 1`
