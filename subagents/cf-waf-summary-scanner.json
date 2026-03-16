@@ -1,9 +1,0 @@
-{
-  "name": "cf-waf-summary-scanner",
-  "description": "Pre-scans WAF security rules summary to extract structured rule index (V0 stage)",
-  "resources": [
-    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-waf-summary-scanner/SKILL.md"
-  ],
-  "tools": ["fs_read", "fs_write", "glob", "grep"],
-  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
-}

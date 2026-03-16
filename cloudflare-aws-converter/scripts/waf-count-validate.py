@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate rule counts between source config files and rule_index.json.
+"""Validate rule counts between source config files and waf_ir.json.
 
 Usage:
     python3 waf-count-validate.py <config_path> <waf_output_dir>
@@ -59,46 +59,46 @@ if ip_path:
 else:
     source["ip"] = 0
 
-# --- Index counts (from rule_index.json) ---
-index_path = os.path.join(waf_dir, "rule_index.json")
-if not os.path.exists(index_path):
-    print(f"ERROR: {index_path} not found")
+# --- IR counts (from waf_ir.json) ---
+ir_path = os.path.join(waf_dir, "waf_ir.json")
+if not os.path.exists(ir_path):
+    print(f"ERROR: {ir_path} not found")
     sys.exit(1)
 
-idx = json.load(open(index_path))
+ir = json.load(open(ir_path))
 
-index = {
-    "custom_count": idx.get("custom_rules", {}).get("count", 0),
-    "custom_rules_len": len(idx.get("custom_rules", {}).get("rules", [])),
-    "rate_count": idx.get("rate_limiting_rules", {}).get("count", 0),
-    "rate_rules_len": len(idx.get("rate_limiting_rules", {}).get("rules", [])),
-    "ip_count": idx.get("ip_access_rules", {}).get("count", 0),
-    "ip_rules_len": len(idx.get("ip_access_rules", {}).get("rules", [])),
+ir_counts = {
+    "custom_count": ir.get("custom_rules", {}).get("count", 0),
+    "custom_rules_len": len(ir.get("custom_rules", {}).get("rules", [])),
+    "rate_count": ir.get("rate_limiting_rules", {}).get("count", 0),
+    "rate_rules_len": len(ir.get("rate_limiting_rules", {}).get("rules", [])),
+    "ip_count": ir.get("ip_access_rules", {}).get("count", 0),
+    "ip_rules_len": len(ir.get("ip_access_rules", {}).get("rules", [])),
 }
 
 # --- Compare ---
 errors = []
 
-if source["custom"] != index["custom_count"]:
-    errors.append(f"custom: source={source['custom']} index_count={index['custom_count']}")
-if source["custom"] != index["custom_rules_len"]:
-    errors.append(f"custom rules array: source={source['custom']} index_len={index['custom_rules_len']}")
-if index["custom_count"] != index["custom_rules_len"]:
-    errors.append(f"custom internal: count={index['custom_count']} rules_len={index['custom_rules_len']}")
+if source["custom"] != ir_counts["custom_count"]:
+    errors.append(f"custom: source={source['custom']} ir_count={ir_counts['custom_count']}")
+if source["custom"] != ir_counts["custom_rules_len"]:
+    errors.append(f"custom rules array: source={source['custom']} ir_len={ir_counts['custom_rules_len']}")
+if ir_counts["custom_count"] != ir_counts["custom_rules_len"]:
+    errors.append(f"custom internal: count={ir_counts['custom_count']} rules_len={ir_counts['custom_rules_len']}")
 
-if source["rate"] != index["rate_count"]:
-    errors.append(f"rate: source={source['rate']} index_count={index['rate_count']}")
-if source["rate"] != index["rate_rules_len"]:
-    errors.append(f"rate rules array: source={source['rate']} index_len={index['rate_rules_len']}")
-if index["rate_count"] != index["rate_rules_len"]:
-    errors.append(f"rate internal: count={index['rate_count']} rules_len={index['rate_rules_len']}")
+if source["rate"] != ir_counts["rate_count"]:
+    errors.append(f"rate: source={source['rate']} ir_count={ir_counts['rate_count']}")
+if source["rate"] != ir_counts["rate_rules_len"]:
+    errors.append(f"rate rules array: source={source['rate']} ir_len={ir_counts['rate_rules_len']}")
+if ir_counts["rate_count"] != ir_counts["rate_rules_len"]:
+    errors.append(f"rate internal: count={ir_counts['rate_count']} rules_len={ir_counts['rate_rules_len']}")
 
-if source["ip"] != index["ip_count"]:
-    errors.append(f"ip: source={source['ip']} index_count={index['ip_count']}")
-if source["ip"] != index["ip_rules_len"]:
-    errors.append(f"ip rules array: source={source['ip']} index_len={index['ip_rules_len']}")
-if index["ip_count"] != index["ip_rules_len"]:
-    errors.append(f"ip internal: count={index['ip_count']} rules_len={index['ip_rules_len']}")
+if source["ip"] != ir_counts["ip_count"]:
+    errors.append(f"ip: source={source['ip']} ir_count={ir_counts['ip_count']}")
+if source["ip"] != ir_counts["ip_rules_len"]:
+    errors.append(f"ip rules array: source={source['ip']} ir_len={ir_counts['ip_rules_len']}")
+if ir_counts["ip_count"] != ir_counts["ip_rules_len"]:
+    errors.append(f"ip internal: count={ir_counts['ip_count']} rules_len={ir_counts['ip_rules_len']}")
 
 if errors:
     print("COUNT MISMATCH:")

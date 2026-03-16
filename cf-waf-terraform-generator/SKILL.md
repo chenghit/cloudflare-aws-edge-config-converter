@@ -1,11 +1,11 @@
 ---
 name: cf-waf-terraform-generator
-description: Generates AWS WAF Terraform configuration from a validated security rules summary. Use this skill after cf-waf-analyzer and cf-waf-analyzer-validator have produced and validated cloudflare-security-rules-summary.md. This skill reads the summary, generates a conversion plan, produces Terraform modules with proper nesting and splitting strategies, and validates the output. It does NOT read original Cloudflare configuration files — it only reads the summary.
+description: Generates AWS WAF Terraform configuration from a validated IR JSON. Use this skill after cf-waf-analyzer and cf-waf-analyzer-validator have produced and validated waf_ir.json. This skill reads the IR JSON, generates a conversion plan, produces Terraform modules with proper nesting and splitting strategies, and validates the output. It does NOT read original Cloudflare configuration files — it only reads the IR JSON.
 ---
 
 # Cloudflare to AWS WAF Terraform Generator
 
-Generate AWS WAF Terraform configuration from a validated security rules summary.
+Generate AWS WAF Terraform configuration from a validated IR JSON.
 
 **CRITICAL: When activated, your FIRST action is:**
 1. Read ALL reference documents (Step 0 in Workflow)
@@ -15,24 +15,21 @@ Generate AWS WAF Terraform configuration from a validated security rules summary
 - Read original Cloudflare configuration files
 - Re-analyze or re-classify rules
 - Skip reading reference documents
-- Deviate from the Workflow
 
-**Language Adaptation**: Generate output files in the language specified in the query (e.g., "Generate output files in Chinese"). If no language is specified, default to English.
+**Language Adaptation**: Generate output files in the language specified in the query. Default to English.
 
 ## Path Resolution
 
-Reference files in `references/` directory. Summary file in `cloudflare-to-aws-waf/` relative to current working directory.
+Reference files in `references/` directory. IR file in `cloudflare-to-aws-waf/` relative to current working directory.
 
 ## Output Directory
 
 **All output files will be written to**: `cloudflare-to-aws-waf/` in current working directory.
 
-**⚠️ CRITICAL: Output path is `cloudflare-to-aws-waf/`, NOT any other directory. Do NOT create `aws-waf-terraform/` or any other custom directory name.**
-
 **File Structure (MUST follow exactly):**
 ```
 cloudflare-to-aws-waf/
-├── cloudflare-security-rules-summary.md    # INPUT (already exists, do not modify)
+├── waf_ir.json                              # INPUT (already exists, do not modify)
 ├── versions.tf                              # PRE-WRITTEN by waf-init.sh (do not modify)
 ├── ip_sets.tf                               # Root: shared IP sets (YOU generate this)
 ├── main.tf                                  # Root: locals + two module calls (YOU generate this)
@@ -44,42 +41,55 @@ cloudflare-to-aws-waf/
 └── README_aws-waf-terraform-deployment.md   # Deployment guide (YOU generate this)
 ```
 
-**⚠️ CRITICAL: The `modules/waf/` subdirectory is pre-created by waf-init.sh. Place module files there. The root `main.tf` calls the module twice (website + api-and-file). Do NOT put all files flat in one directory.**
+## How to Read the IR JSON
 
-## How to Read the Summary File
+The IR file (`waf_ir.json`) is your ONLY input. It contains structured data — read JSON fields directly, no parsing needed.
 
-The summary file (`cloudflare-security-rules-summary.md`) is your ONLY input. It contains all information needed to generate Terraform. Here is how to extract what you need:
+### Top-level structure
+```json
+{
+  "ip_lists": [...],
+  "ip_access_rules": { "count": N, "rules": [...] },
+  "custom_rules": { "count": N, "skip_labels_present": {...}, "rules": [...] },
+  "rate_limiting_rules": { "count": N, "rules": [...] },
+  "non_convertible_notes": [...]
+}
+```
 
-### Section 1: IP Lists and Their Items
-- Each list has a name, kind (ip or asn), and items table
-- **"AWS WAF conversion"** line tells you what to create:
-  - "Create two IP sets — `name-ipv4` and `name-ipv6`" → create `aws_wafv2_ip_set` resources
-  - "Use `asn_match_statement`" → use inline ASN list, no IP set resource needed
-  - "Empty list" → skip
-  - "Out of scope — redirect lists" → skip
+### ip_lists
+Each entry has `name`, `kind`, `conversion`, and items:
+- `conversion: "ip_set"` → create `aws_wafv2_ip_set` resources (use `items_ipv4` and `items_ipv6`)
+- `conversion: "asn_inline"` → use inline ASN list in statements, no IP set resource
+- `conversion: "empty"` or `"out_of_scope"` → skip
 
-### Section 2: IP Access Rules
-- Each rule has: Mode (action), Target (condition), Convertible status, and conversion notes
-- These rules are NEVER affected by skip rule labels (they execute before skip rules)
+### ip_access_rules.rules
+Each rule has `mode` (action), `target`, `value`, `aws_statement_type`, `split_count`.
+- `split_count > 1` → use `ip_sets` array for separate IPv4/IPv6 resources
+- These rules are NEVER affected by skip rule labels
 
-### Section 3: WAF Custom Rules
-- Each rule has: Action, Expression, Convertible status, and conversion plan
-- **"Splitting required"** block tells you exactly how to split:
-  - Phase 1 branches, Phase 2 IPv4/IPv6 variants, final rule count
-  - Each branch's planned AWS WAF statement
-- **"IP Sets to create"** block lists inline IP sets with names and addresses
-- **Skip rules** have: Action Parameters JSON, Phases Being Skipped, RuleLabels list
-  - Use the RuleLabels list verbatim — do not re-derive from action_parameters
+### custom_rules.rules
+Each rule has `action`, `expression`, `convertibility`, `aws_statement_type`, `split`, `scope_down`.
+- `split.required: true` → read `split.branches` for per-branch statement types and IP set names
+- `split.total_aws_rules` → number of AWS WAF rules this generates
+- `scope_down.skip_all_remaining_custom_rules: true` → wrap in NOT label_match scope-down
+- Skip rules have `labels` array → use verbatim for `rule_label` blocks
+- Partial rules have `convertible_expression` + `aws_statement_type` → generate statement from these
+- `ip_sets` array (if present) → create IP set resources
 
-### Section 4: Rate Limiting Rules
-- Each rule has: Expression, Rate limit config, Convertible status, AWS WAF calculation
-- **"Mandatory fallback applied"** or **"AWS configuration"** tells you the Limit and EvaluationWindowSec
-- **"Scope-down statement"** tells you which conditions to include (convertible only)
+### custom_rules.skip_labels_present
+Tells you which skip labels exist globally:
+- `all_remaining_custom_rules: true` → some custom rules need scope-down
+- `http_ratelimit: true` → rate-limiting rules need scope-down
+- `http_request_firewall_managed: true` → managed rules need scope-down
+
+### rate_limiting_rules.rules
+Each rule has `aws_limit`, `aws_evaluation_window_sec`, `mandatory_fallback`, `scope_down`, `aws_statement_type`.
+- `scope_down.skip_http_ratelimit: true` → add NOT label_match in scope_down_statement
 - Rate-limiting rules are NEVER split
+- NEVER use `skip:all_remaining_custom_rules` for rate-limiting rules
 
-### Section 5: Notes on Rules Requiring Manual Intervention
-- Lists non-convertible rules with explanations
-- Referenced when generating the deployment README (Step 5) — not used for Terraform generation
+### non_convertible_notes
+Array of notes for the deployment README. Each has `rule`, `field`, `reason`, `aws_equivalent`, `manual_action`.
 
 ## Workflow
 
@@ -92,67 +102,53 @@ The summary file (`cloudflare-security-rules-summary.md`) is your ONLY input. It
 5. `references/aws-managed-rules.md` - AWS managed rules Terraform templates
 6. `references/common-mistakes.md` - Common Terraform generation errors (read LAST)
 
-**After reading all 6 references, proceed to Step 1.**
+### 1. Read and Validate IR
 
-### 1. Read and Validate Summary
+Read `cloudflare-to-aws-waf/waf_ir.json`.
 
-Read `cloudflare-to-aws-waf/cloudflare-security-rules-summary.md`.
+**If file does not exist:** STOP. Return error: "IR file not found. Run cf-waf-analyzer and validator first."
 
-**If file does not exist:** STOP. Return error: "Summary file not found. Run cf-waf-analyzer and cf-waf-analyzer-validator first."
-
-Extract from the summary:
-- All IP set definitions (from Section 1 and inline IP sets in Section 3)
+Extract from the IR:
+- All IP set definitions (from `ip_lists` and inline `ip_sets` in rules)
 - All rules with their conversion plans
-- All skip rule RuleLabels
+- All skip rule labels (from `custom_rules.rules` where `action == "skip"`)
 - All rate-limit calculations
+- `skip_labels_present` for scope-down decisions
 
 ### 2. Generate Conversion Plan
 
-**CRITICAL**: Process rules in this exact order to match Cloudflare execution sequence:
-1. IP Access Rules (if any)
+Process rules in this exact order:
+1. IP Access Rules
 2. WAF Custom Rules
 3. Rate Limiting Rules
 
-For each rule, extract the conversion plan directly from the summary — do NOT re-derive it. The summary already contains:
-- Split strategy and final rule count
-- AWS WAF statement types
-- IP set names and contents
-- RuleLabels
-- Scope-down statement content
+For each rule, read the conversion plan directly from IR fields — do NOT re-derive.
 
 **Assign priorities:**
 - Priority 0: Anti-DDoS managed rule
 - Priority 1+: IP Access Rules (count split rules individually)
-- Next: WAF Custom Rules (count split rules individually)
+- Next: WAF Custom Rules (count split rules individually — use `split.total_aws_rules`)
 - Next: Rate Limiting Rules
 - Last 4: AWS managed rule groups
 
-**CRITICAL**: When counting priorities, each split variant is a separate rule with its own priority. Example: a rule that splits into 5 variants occupies priorities N through N+4.
+**Scope-down from skip labels:**
+- **IP Access Rules**: NEVER add skip-label scope-down
+- **Skip rules themselves**: NEVER add skip-label scope-down
+- **Custom rules** (non-skip): if `scope_down.skip_all_remaining_custom_rules: true` → add `NOT label_match(skip:all_remaining_custom_rules)`
+- **Rate-based rules**: if `scope_down.skip_http_ratelimit: true` → add `NOT label_match(skip:http_ratelimit)`. NEVER use `skip:all_remaining_custom_rules`
+- **Managed rules**: if `skip_labels_present.http_request_firewall_managed: true` → add `NOT label_match(skip:http_request_firewall_managed)`
 
-**Determine scope-down from skip rule labels:**
-
-Read each skip rule's RuleLabels from the summary. For rules positioned AFTER skip rules, add label-based scope-down ONLY if the corresponding label exists:
-
-- **IP Access Rules**: NEVER add skip-label scope-down (they execute before skip rules in Cloudflare)
-- **Skip rules themselves**: NEVER add skip-label scope-down (skip rules are not affected by other skip rules — they always evaluate their own match conditions independently)
-- **Custom rules (non-skip, non-rate-based)**: Add `NOT label_match(skip:all_remaining_custom_rules)` if that label exists
-- **Rate-based rules**: Add `NOT label_match(skip:http_ratelimit)` if that label exists. NEVER use `skip:all_remaining_custom_rules` (Cloudflare rate-limiting is a separate phase)
-- **Managed rules**: Add `NOT label_match(skip:http_request_firewall_managed)` if that label exists
-
-Present the plan as a summary in your response, then proceed directly to generating Terraform. Do NOT wait for user confirmation — this skill runs as a subagent with no interactive access to the user.
+Proceed directly to generating Terraform. Do NOT wait for user confirmation.
 
 ### 3. Generate Terraform Files
 
-**Pre-written files (DO NOT generate — already created by waf-init.sh):**
-- `versions.tf`
-- `modules/waf/variables.tf`
-- `modules/waf/outputs.tf`
+**Pre-written files (DO NOT generate):** `versions.tf`, `modules/waf/variables.tf`, `modules/waf/outputs.tf`
 
 **Step 1: Generate `ip_sets.tf`** (root directory)
 
-Create all IP set resources here — shared between both Web ACLs. Include:
-- Named IP lists from Section 1 (split into IPv4/IPv6)
-- Inline IP sets from Section 3 splitting annotations
+Create all IP set resources — shared between both Web ACLs:
+- Named IP lists from `ip_lists` where `conversion == "ip_set"`
+- Inline IP sets from rules' `ip_sets` arrays
 
 **Step 2: Generate `modules/waf/main.tf`**
 
@@ -161,21 +157,19 @@ Web ACL resource with rules in priority order. Reference IP sets via `var.ip_set
 **Nesting rules:**
 - Max 3 nesting levels
 - No AND-in-AND or OR-in-OR (flatten as siblings)
-- De Morgan's Law: `NOT (A OR B)` → `NOT A AND NOT B` (siblings in one `and_statement`)
+- De Morgan's Law: `NOT (A OR B)` → `NOT A AND NOT B`
 
 **Skip action implementation:**
-- Skip rules → `count` action with `rule_label` blocks. The rule's own match condition is its normal statement (NOT wrapped in any skip-label scope-down).
-- Subsequent custom rules → wrap in `and_statement { not_statement { label_match(skip:all_remaining_custom_rules) }, original_statement }`
-- Subsequent rate-based rules → `scope_down_statement { and_statement { not_statement { label_match(skip:http_ratelimit) }, original_conditions } }`
-- Subsequent managed rules → `scope_down_statement { not_statement { label_match(skip:http_request_firewall_managed) } }`
+- Skip rules → `count` action with `rule_label` blocks (use `labels` array from IR verbatim)
+- Subsequent custom rules → wrap in `and_statement { not_statement { label_match }, original_statement }`
+- Subsequent rate-based rules → `scope_down_statement { and_statement { not_statement { label_match }, original_conditions } }`
+- Subsequent managed rules → `scope_down_statement { not_statement { label_match } }`
 
 **Challenge action conversion:**
 - `interactive_challenge` → `captcha {}`
 - `js_challenge`, `managed_challenge` → `challenge {}`
 
 **All AWS managed rules use `override_action { count {} }` for monitoring.**
-
-See `references/aws-managed-rules.md` for complete templates.
 
 **Step 3: Generate root `main.tf`**
 
@@ -185,25 +179,23 @@ Create `locals.ip_set_arns` map and call module twice:
 
 ### 4. Validate Generated Terraform
 
-**File Structure Verification:**
+**File Structure:**
 - [ ] `ip_sets.tf` exists with all IP set resources
 - [ ] `main.tf` exists with locals and two module calls
-- [ ] `modules/waf/main.tf` exists (Web ACL only, no IP sets)
-- [ ] Pre-written files untouched: `versions.tf`, `modules/waf/variables.tf`, `modules/waf/outputs.tf`
+- [ ] `modules/waf/main.tf` exists (Web ACL only)
+- [ ] Pre-written files untouched
 
-**Self-Check Checklist:**
-- [ ] IP sets in root `ip_sets.tf`, referenced via `var.ip_set_arns` in module
-- [ ] Nesting depth ≤ 3 for all rules
+**Self-Check:**
+- [ ] IP sets in root, referenced via `var.ip_set_arns` in module
+- [ ] Nesting depth ≤ 3
 - [ ] No AND-in-AND or OR-in-OR
-- [ ] Geo rules use `geo_match_statement`
-- [ ] ASN rules use `asn_match_statement` with inline list
-- [ ] Skip rules have correct RuleLabels (matching summary verbatim)
-- [ ] Skip rules are NOT wrapped in skip-label scope-down (they evaluate their own conditions independently)
-- [ ] IP Access Rules are NOT wrapped in skip-label scope-down
+- [ ] Skip rules have correct labels (from IR `labels` array)
+- [ ] Skip rules NOT wrapped in skip-label scope-down
+- [ ] IP Access Rules NOT wrapped in skip-label scope-down
 - [ ] Rate-based rules NEVER check `skip:all_remaining_custom_rules`
-- [ ] Priorities sequential with no gaps (counting all split variants)
+- [ ] Priorities sequential with no gaps
 - [ ] Rule order: Anti-DDoS → IP Access → WAF Custom → Rate Limiting → Managed
-- [ ] Rate-based rules use Limit and EvaluationWindowSec from summary
+- [ ] Rate-based rules use `aws_limit` and `aws_evaluation_window_sec` from IR
 - [ ] Challenge actions correctly mapped
 - [ ] All managed rules use `override_action { count {} }`
 
@@ -215,11 +207,9 @@ Create `README_aws-waf-terraform-deployment.md` with:
 - CloudFront association instructions
 - Two Web ACLs: website (challenge enabled) vs api-and-file (challenge disabled)
 - IP sets quota note
-- Non-converted rules from summary Section 5 (rule name, Cloudflare feature, AWS equivalent, why manual)
+- Non-converted rules from `non_convertible_notes` (rule name, field, reason, AWS equivalent, manual action)
 
 ### 6. Return Result
-
-After all files are generated, end your response with this exact block:
 
 ```
 ---RESULT---
@@ -234,9 +224,9 @@ OUTPUT_FILES:
 
 ## Reference
 
-- `references/terraform-architecture.md` - Module architecture and IP set sharing
-- `references/nesting-and-splitting.md` - Nesting constraints and cascading split strategy
-- `references/field-conversions.md` - Field mapping and conversion rules
-- `references/action-conversions.md` - Action conversions and rate limiting
-- `references/aws-managed-rules.md` - Managed rules templates and ordering
-- `references/common-mistakes.md` - Common Terraform generation errors
+- `references/terraform-architecture.md`
+- `references/nesting-and-splitting.md`
+- `references/field-conversions.md`
+- `references/action-conversions.md`
+- `references/aws-managed-rules.md`
+- `references/common-mistakes.md`

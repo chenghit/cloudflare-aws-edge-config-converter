@@ -8,7 +8,7 @@ This guide explains the output structure and deployment steps for each pipeline.
 
 ```
 cloudflare-to-aws-waf/
-├── cloudflare-security-rules-summary.md   # Analysis summary (input to generator)
+├── waf_ir.json                             # Structured IR (input to generator)
 ├── versions.tf                             # Provider version constraints
 ├── ip_sets.tf                              # Shared IP sets (referenced by both ACLs)
 ├── main.tf                                 # Locals + two module calls (website + api-and-file)

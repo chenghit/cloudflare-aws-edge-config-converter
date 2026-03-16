@@ -8,7 +8,7 @@
 
 ```
 cloudflare-to-aws-waf/
-├── cloudflare-security-rules-summary.md   # 分析摘要（generator 的输入）
+├── waf_ir.json                             # 结构化 IR（generator 的输入）
 ├── versions.tf                             # Provider 版本约束
 ├── ip_sets.tf                              # 共享 IP sets（两个 ACL 都会引用）
 ├── main.tf                                 # Locals + 两个 module 调用（website + api-and-file）

@@ -1,11 +1,11 @@
 ---
 name: cf-waf-analyzer
-description: Analyzes Cloudflare security configurations (WAF custom rules, rate limiting rules, IP access rules, IP/ASN lists) and generates a structured summary for AWS WAF migration. Use this skill when you need to analyze Cloudflare security rules, understand WAF rule convertibility, or prepare security configuration summary before converting to AWS WAF. This skill reads CloudflareBackup configuration files, parses rule expressions, determines convertibility status, and generates a Markdown summary grouped by rule type. This skill does NOT generate Terraform code - it only analyzes and summarizes Cloudflare security configurations.
+description: Analyzes Cloudflare security configurations (WAF custom rules, rate limiting rules, IP access rules, IP/ASN lists) and generates structured IR JSON for AWS WAF migration. Use this skill when you need to analyze Cloudflare security rules, understand WAF rule convertibility, or prepare security configuration IR before converting to AWS WAF. This skill reads CloudflareBackup configuration files, parses rule expressions, determines convertibility status, and generates per-batch IR JSON files. This skill does NOT generate Terraform code - it only analyzes and produces structured IR.
 ---
 
 # Cloudflare WAF Config Analyzer
 
-Analyze Cloudflare security configurations and generate a structured summary for AWS WAF migration planning.
+Analyze Cloudflare security configurations and generate structured IR JSON for AWS WAF migration.
 
 **CRITICAL: When activated, your FIRST action is:**
 1. Read the reference documents specified for your batch (Step 0 in Workflow)
@@ -16,7 +16,7 @@ Analyze Cloudflare security configurations and generate a structured summary for
 - Skip reading reference documents
 - Deviate from the Workflow
 
-**Language Adaptation**: Generate output files in the language specified in the query (e.g., "Generate output files in Chinese"). If no language is specified, default to English.
+**Language Adaptation**: Generate output files in the language specified in the query (e.g., "Generate output files in Chinese"). If no language is specified, default to English. Note: JSON field names are always English; only human-readable string values (like `non_convertible_reason`) follow the language setting.
 
 ## Path Resolution
 
@@ -29,10 +29,12 @@ Reference files in `references/` directory. User data from path provided by user
 **File Structure:**
 ```
 cloudflare-to-aws-waf/
-└── cloudflare-security-rules-summary.md    # Step 4: Rule summary
+├── waf_ir_ip.json       # Batch A1 output
+├── waf_ir_custom.json   # Batch A2 output
+└── waf_ir_rate.json     # Batch A3 output
 ```
 
-**CRITICAL**: The output directory `cloudflare-to-aws-waf/` is pre-created by the orchestrator (waf-init.sh). Do NOT create it yourself. All file write operations use this directory as base path.
+**CRITICAL**: The output directory `cloudflare-to-aws-waf/` is pre-created by the orchestrator (waf-init.sh). Do NOT create it yourself.
 
 ## Scope
 
@@ -46,64 +48,40 @@ cloudflare-to-aws-waf/
 
 ### 0. Read Reference Documents (CRITICAL - Must be first)
 
-**Before starting any analysis, read the reference documents specified for your batch.**
-
-The orchestrator invokes this skill in 3 batches. Each batch processes specific rule types and writes specific summary sections. The batch is specified in the invocation query.
+The orchestrator invokes this skill in 3 batches. Each batch processes specific rule types and outputs a specific JSON file.
 
 **Batch A1 (IP Lists + IP Access Rules):**
 - Read: `references/field-conversions.md`, `references/non-convertible-rules.md`
 - Process: IP-Lists.txt, List-Items-*.txt, IP-Access-Rules.txt
-- Write: Summary Section 1 (IP Lists) + Section 2 (IP Access Rules)
-- Use `fs_write` create mode (creates new file)
+- Output: `waf_ir_ip.json`
 
 **Batch A2 (WAF Custom Rules):**
 - Read: ALL 5 reference documents
 - Process: WAF-Custom-Rules.txt, IP-Lists.txt, List-Items-*.txt
-- Write: Summary Section 3 (WAF Custom Rules) + Section 5 (Manual Intervention notes)
-- Use `fs_write` append mode (appends to file created by A1)
+- Output: `waf_ir_custom.json`
 
 **Batch A3 (Rate Limiting Rules):**
 - Read: `references/action-conversions.md`, `references/common-mistakes.md`, `references/non-convertible-rules.md`
 - Process: Rate-limits.txt
-- Write: Summary Section 4 (Rate Limiting Rules) + append to Section 5 if any partial/non-convertible rate limiting rules
-- Use `fs_write` append mode (appends to file created by A1+A2)
-
-**After reading the required references for your batch, proceed to Step 1.**
-
-1. `references/non-convertible-rules.md` - Which rules cannot be converted and why
-2. `references/action-conversions.md` - Rate limiting conversion algorithm (CRITICAL for rate-based rules)
-3. `references/field-conversions.md` - IP/ASN/field mapping rules
-4. `references/nesting-and-splitting.md` - Rule splitting strategy (to understand which rules will be split)
-5. `references/common-mistakes.md` - Common errors to avoid (read this LAST)
-
-**Read only the references listed for your batch above, then proceed to Step 1.**
+- Input from query: skip_labels text (e.g., `http_ratelimit=true all_remaining_custom_rules=true http_request_firewall_managed=true`)
+- Output: `waf_ir_rate.json`
 
 ### 1. Validate Input
 
-**CRITICAL: Configuration path must be provided by main agent in the initial query.**
+Extract the config path from the query — look for any absolute path (starting with `/` or `~`).
 
-Extract the config path from the query — look for any absolute path (starting with `/` or `~`) in the query. The path format may vary; extract the directory path regardless of surrounding text.
-
-**If no path found in query:**
-- STOP immediately
-- Return error: "Configuration directory path is required. Please provide the path to CloudflareBackup output directory."
+**If no path found in query:** STOP immediately. Return error: "Configuration directory path is required."
 
 ### 2. Discover and Read Configuration Files
-
-**CRITICAL: Search entire directory tree, don't assume locations.**
 
 **Step 2.1:** Based on your batch, use glob to find the relevant files:
 - **Batch A1**: `**/IP-Lists.txt`, `**/List-Items-*.txt`, `**/IP-Access-Rules.txt`
 - **Batch A2**: `**/WAF-Custom-Rules.txt`, `**/IP-Lists.txt`, `**/List-Items-*.txt`
 - **Batch A3**: `**/Rate-limits.txt`
 
-**Step 2.2:** **MANDATORY VALIDATION - If NO relevant configuration files found for this batch, STOP immediately:**
+**Step 2.2:** If NO relevant configuration files found, STOP: "No configuration files found for this batch."
 
-Return error: "No configuration files found for this batch. Expected: {list files relevant to your batch}. Please provide the correct CloudflareBackup output directory."
-
-**Step 2.3:** If duplicate files found (same filename in multiple locations):
-- STOP immediately
-- Return error: "Found duplicate configuration files: [list files]. Please remove duplicates and specify which directory to use."
+**Step 2.3:** If duplicate files found (same filename in multiple locations), STOP: "Found duplicate configuration files."
 
 **Step 2.4:** Read all discovered files. For each list in `IP-Lists.txt`, read corresponding `List-Items-ip-<name>.txt` or `List-Items-asn-<name>.txt`.
 
@@ -111,126 +89,267 @@ Return error: "No configuration files found for this batch. Expected: {list file
 
 ### 3. Parse Cloudflare Configuration
 
-Parse JSON to Cloudflare rule expressions. Process ALL rules in the file — `managed_challenge` is a valid action to convert (→ AWS WAF `challenge {}`), not a managed ruleset. Cloudflare Managed Rulesets (OWASP etc.) are in a separate phase and not present in WAF-Custom-Rules.txt.
+Parse JSON to Cloudflare rule expressions. Process ALL rules in the file — `managed_challenge` is a valid action to convert (→ AWS WAF `challenge {}`), not a managed ruleset.
 
 **Non-convertible fields** (require manual intervention): Client Certificate Verified, MIME Type, European Union, bot fields (`cf.verified_bot_category`, `cf.bot_management.*`), fraud fields (`cf.waf.credential_check.*`), attack score fields (`cf.waf.score*`)
 
 **Conversion strategy:**
-- Only non-convertible fields: Fully non-convertible
-- Convertible OR non-convertible: Partial (convert convertible parts)
-- Convertible AND non-convertible: Fully non-convertible (AND requires both conditions)
+- Only non-convertible fields: Fully non-convertible → `"convertibility": "no"`
+- Convertible OR non-convertible: Partial → `"convertibility": "partial"`
+- Convertible AND non-convertible: Fully non-convertible → `"convertibility": "no"` (AND requires both)
 
-### 4. Generate Markdown Summary
+### 4. Generate IR JSON
 
-**CRITICAL: Preserve Rule Order**
+**CRITICAL: Preserve Rule Order.** Both Cloudflare and AWS WAF execute rules sequentially. Maintain the exact order from original configuration files. Use `position` field (1-indexed) to record order.
 
-Both Cloudflare and AWS WAF execute rules sequentially. **Maintain the exact order from original configuration files** in all sections.
+---
 
-**Batch-specific output:**
+#### Batch A1: `waf_ir_ip.json`
 
-- **Batch A1**: Use `fs_write` **create** mode to write the summary file. Include a title heading, then Section 1 (IP Lists) and Section 2 (IP Access Rules).
-- **Batch A2**: Use `fs_write` **append** mode. Write Section 3 (WAF Custom Rules) and Section 5 (Manual Intervention notes).
-- **Batch A3**: Use `fs_write` **append** mode. Write Section 4 (Rate Limiting Rules). If any rate limiting rules are partial or non-convertible, also append their notes to Section 5.
-
-**For skip action rules:** Extract and document the COMPLETE `action_parameters` JSON from Cloudflare configuration:
-
-**For rules that require splitting (CRITICAL — generator depends on this):**
-
-For each WAF Custom Rule and IP Access Rule, check if splitting is needed and document the plan:
-
-1. **Top-level OR splitting (Phase 1):** If the expression has top-level OR branches (e.g., `(A) or (B)`), note the branch count and list each branch's expression.
-2. **IPv4/IPv6 splitting (Phase 2):** For each branch, check if it references IP lists or inline IPs with both IPv4 and IPv6 addresses (read the actual `List-Items-ip-<name>.txt` contents). If mixed, note the IPv4/IPv6 split.
-3. **Cascading split count:** Calculate the final AWS WAF rule count = (branches with mixed IP × 2) + (branches without mixed IP × 1).
-4. **IP Sets to create:** For each branch with inline IPs, define separate IP sets with names following `<rule-name>-branch-<N>-<context>-ipv4/ipv6`. NEVER combine IPs from different branches.
-5. **AWS WAF statement type:** For each branch, note the planned statement type (`ip_set_reference_statement`, `asn_match_statement`, `geo_match_statement`, `byte_match_statement`, etc.).
-
-Example splitting annotation format:
-```markdown
-- **Splitting required**: Yes
-  - Phase 1: 2 OR branches
-  - Phase 2: Branch 1 has mixed IPv4/IPv6 → split; Branch 2 is ASN only → no split
-  - **Final rule count: 3** (2 + 1)
-  - Branch 1 IPv4: `geo_match_statement` + `ip_set_reference_statement`
-  - Branch 1 IPv6: `geo_match_statement` + `ip_set_reference_statement`
-  - Branch 2: `geo_match_statement` + `asn_match_statement`
-- **IP Sets to create**:
-  - `rule-name-branch-1-ipv4`: [100.0.0.1/32, 100.0.0.2/32]
-  - `rule-name-branch-1-ipv6`: [2001:db8::1/128]
+```json
+{
+  "ip_lists": [
+    {
+      "name": "block_list_1",
+      "kind": "ip",
+      "conversion": "ip_set",
+      "items_ipv4": ["100.0.0.0/24"],
+      "items_ipv6": ["2001:db8::/32"]
+    },
+    {
+      "name": "asn_list_1",
+      "kind": "asn",
+      "conversion": "asn_inline",
+      "items": [1234, 5678]
+    }
+  ],
+  "ip_access_rules": {
+    "count": 2,
+    "rules": [
+      {
+        "position": 1,
+        "name": "block-single-ip",
+        "mode": "block",
+        "target": "ip",
+        "value": "198.51.100.1",
+        "convertibility": "yes",
+        "aws_statement_type": "ip_set_reference_statement",
+        "split_count": 1
+      },
+      {
+        "position": 2,
+        "name": "block-mixed-range",
+        "mode": "block",
+        "target": "ip_range",
+        "value": "198.51.100.0/24, 2001:db8::/32",
+        "convertibility": "yes",
+        "aws_statement_type": "ip_set_reference_statement",
+        "split_count": 2,
+        "ip_sets": [
+          { "name": "block-mixed-range-ipv4", "addresses": ["198.51.100.0/24"] },
+          { "name": "block-mixed-range-ipv6", "addresses": ["2001:db8::/32"] }
+        ]
+      }
+    ]
+  }
+}
 ```
 
-Rate-limiting rules are NEVER split — do not add splitting annotations for them.
+**IP Lists rules:**
+- `kind: "ip"` → `conversion: "ip_set"`, split items into `items_ipv4` and `items_ipv6`
+- `kind: "asn"` → `conversion: "asn_inline"`, keep items as integer array
+- Empty list → `conversion: "empty"`, no items
+- Redirect list → `conversion: "out_of_scope"`
 
-**For skip action rules (continued):** Also extract and document the COMPLETE `action_parameters` JSON:
-- Copy the entire `action_parameters` object verbatim in a code block
-- Explicitly list which `phases` array values are present
-- Note if `ruleset: "current"` is present
-- **CRITICAL**: Only document phases that actually exist in the configuration - do NOT assume or add phases
-- Explicitly state which phases are NOT being skipped to prevent errors
-- This information is critical for correct AWS WAF RuleLabels generation by the downstream Terraform generator
+**IP Access Rules:**
+- `split_count > 1` and `ip_sets` only when value contains mixed IPv4/IPv6. Most rules have `split_count: 1` with no `ip_sets`.
+- `name` = descriptive name derived from the rule (Cloudflare IP Access Rules don't have names — derive from mode + target + value)
 
-**Example format for skip rule documentation:**
+---
 
-```markdown
-### Rule: `skip-example`
-- **Action**: `skip`
-- **Expression**: `(ip.src.country eq "US")`
-- **Action Parameters** (complete):
-  ```json
-  {
+#### Batch A2: `waf_ir_custom.json`
+
+```json
+{
+  "custom_rules": {
+    "count": 3,
+    "skip_labels_present": {
+      "all_remaining_custom_rules": false,
+      "http_ratelimit": false,
+      "http_request_firewall_managed": false
+    },
+    "rules": [
+      {
+        "position": 1,
+        "name": "block-bad-ua",
+        "action": "block",
+        "expression": "(http.user_agent contains \"BadBot\")",
+        "convertibility": "yes",
+        "aws_statement_type": "byte_match_statement",
+        "split": {
+          "required": false,
+          "total_aws_rules": 1
+        },
+        "scope_down": {
+          "skip_all_remaining_custom_rules": false
+        }
+      }
+    ]
+  },
+  "non_convertible_notes": []
+}
+```
+
+**skip_labels_present** (MANDATORY — always output all 3 keys):
+- Scan all rules for `action: "skip"`. For each skip rule:
+  - If `action_parameters.phases` contains `"http_ratelimit"` → `http_ratelimit: true`
+  - If `action_parameters.phases` contains `"http_request_firewall_managed"` → `http_request_firewall_managed: true`
+  - If `action_parameters.ruleset` is `"current"` → `all_remaining_custom_rules: true`
+- If no skip rules exist, all three are `false`.
+
+**For skip action rules**, include additional fields:
+```json
+{
+  "action": "skip",
+  "action_parameters": {
     "phases": ["http_request_firewall_managed"],
     "ruleset": "current"
-  }
-  ```
-- **Phases Being Skipped**: `http_request_firewall_managed` ONLY (does NOT skip `http_ratelimit`)
-- **Convertible**: ✓ Yes
-  - Will be converted to COUNT action with RuleLabels:
-    - `skip:http_request_firewall_managed` (because `"http_request_firewall_managed"` is in phases)
-    - `skip:all_remaining_custom_rules` (because `"ruleset": "current"` is present)
-  - **Note**: Does NOT add `skip:http_ratelimit` RuleLabel because `"http_ratelimit"` is NOT in phases
+  },
+  "labels": [
+    "skip:http_request_firewall_managed",
+    "skip:all_remaining_custom_rules"
+  ]
+}
+```
+- `action_parameters`: copy verbatim from Cloudflare config
+- `labels`: derive from action_parameters (phases → skip:{phase}, ruleset:current → skip:all_remaining_custom_rules)
+- Only include labels for phases that actually exist — do NOT assume phases
+
+**For rules requiring splitting:**
+```json
+{
+  "split": {
+    "required": true,
+    "phase1_branches": 2,
+    "phase2_ipv4_ipv6": true,
+    "total_aws_rules": 3,
+    "branches": [
+      {
+        "branch": 1,
+        "aws_statement_type": "ip_set_reference_statement",
+        "ip_set_name": "rule-name-branch-1"
+      },
+      {
+        "branch": 2,
+        "aws_statement_type": "geo_match_statement"
+      }
+    ]
+  },
+  "ip_sets": [
+    { "name": "rule-name-branch-1-ipv4", "addresses": ["100.0.0.1/32"] },
+    { "name": "rule-name-branch-1-ipv6", "addresses": ["2001:db8::1/128"] }
+  ]
+}
 ```
 
-Output a Markdown file with five sections:
+Splitting rules (from `references/nesting-and-splitting.md`):
+1. **Phase 1 — Top-level OR**: If expression has top-level OR branches, each branch becomes a separate AWS rule
+2. **Phase 2 — IPv4/IPv6**: For each branch referencing IP lists with both IPv4 and IPv6, split into two rules
+3. **Cascading count**: total = (branches with mixed IP × 2) + (branches without × 1)
+4. **IP Sets**: Separate sets per branch, named `<rule-name>-branch-<N>-ipv4/ipv6`. NEVER combine IPs from different branches.
+5. **Rate-limiting rules are NEVER split** — do not add splitting info for them
 
-1. **IP Lists and their items**
-2. **IP Access Rules** - Zone-level IP access rules (execute before WAF custom rules in Cloudflare)
-3. **WAF Custom Rules** - Preserve array order from `WAF-Custom-Rules.txt`
-4. **Rate limiting rules** - Preserve array order from `Rate-limits.txt`
-   - **CRITICAL: For each rate-limiting rule, you MUST calculate the AWS WAF Limit and EvaluationWindowSec using this exact algorithm:**
-     1. For EACH window in [60, 120, 300, 600] seconds, calculate: `limit = requests_per_period × (window / period)`
-     2. Use the FIRST window where limit ≥ 10
-     3. If ALL four windows produce limit < 10: use mandatory fallback `Limit=10, EvaluationWindowSec=600`
-     4. **Show the calculation for ALL four windows in the summary** so the validator can verify
-   - Example: 1 req/10s → 60s: 6 < 10 ❌, 120s: 12 ≥ 10 ✓ → `Limit=12, EvaluationWindowSec=120`
-   - **AWS WAF minimum Limit is 10. NEVER output a Limit below 10.**
-5. **Notes on Rules Requiring Manual Intervention** - For rules that cannot be automatically converted or are partially convertible, use the information from non-convertible-rules.md to provide detailed explanations. Clearly state: **"These rules require manual intervention because AWS WAF implements these features differently from Cloudflare, requiring manual configuration of managed rule groups. This is NOT because AWS WAF lacks these capabilities."**
+**scope_down:**
+- `skip_all_remaining_custom_rules: true` if this rule's position is after any skip rule that has `skip:all_remaining_custom_rules` label
+- Skip rules themselves always have `skip_all_remaining_custom_rules: false`
 
-**CRITICAL**: IP Access Rules must be in a separate section before WAF Custom Rules because they execute earlier in Cloudflare's request processing pipeline and should NOT be affected by skip rules from WAF Custom Rules.
+**For partial rules**, include:
+```json
+{
+  "convertibility": "partial",
+  "convertible_expression": "(http.request.uri.path contains \"/api\")",
+  "non_convertible_reason": "cf.bot_management.score — use AWS WAF Bot Control",
+  "aws_statement_type": "byte_match_statement"
+}
+```
 
-**For each rule, mark convertibility status:**
+**non_convertible_notes** (MANDATORY — output empty array if none):
+```json
+{
+  "non_convertible_notes": [
+    {
+      "rule": "partial-bot-rule",
+      "field": "cf.bot_management.score",
+      "reason": "Cloudflare bot scoring is proprietary",
+      "aws_equivalent": "AWS WAF Bot Control managed rule group",
+      "manual_action": "Enable Bot Control, select protection level"
+    }
+  ]
+}
+```
 
-- **✓ Yes** - Fully convertible
-- **⚠️ Partial** - Partially convertible (some conditions can be converted, others require manual intervention)
-  - Document which parts are convertible and which require manual intervention
-  - Example: Rate limit rule with `(path match) OR (bot field)` → Convert path match, document bot field in Section 5
-- **❌ No** - Not convertible (entire rule requires manual intervention)
+---
 
-For each non-convertible or partially convertible rule found, explain:
-- What Cloudflare feature it uses
-- What AWS WAF equivalent exists
-- Why automatic conversion is not feasible (or only partial)
-- What manual configuration is needed
+#### Batch A3: `waf_ir_rate.json`
 
-Save the summary as `cloudflare-security-rules-summary.md` to avoid conflicts with other Cloudflare conversion skills.
+**Read skip_labels from query.** The orchestrator embeds a line like:
+`Skip labels from custom rules: http_ratelimit=true all_remaining_custom_rules=false http_request_firewall_managed=true`
+
+Parse each `key=value` pair. Use `http_ratelimit` value to fill `scope_down.skip_http_ratelimit` for every rate-limiting rule.
+
+```json
+{
+  "rate_limiting_rules": {
+    "count": 2,
+    "rules": [
+      {
+        "position": 1,
+        "name": "rate-limit-api",
+        "expression": "(http.request.uri.path contains \"/api\")",
+        "convertibility": "yes",
+        "requests_per_period": 100,
+        "period": 60,
+        "aws_limit": 100,
+        "aws_evaluation_window_sec": 60,
+        "calculation_notes": "60s: 100×(60/60)=100 ≥ 10 ✓",
+        "mandatory_fallback": false,
+        "scope_down": {
+          "skip_http_ratelimit": true
+        },
+        "aws_statement_type": "byte_match_statement"
+      }
+    ]
+  },
+  "non_convertible_notes": []
+}
+```
+
+**Rate-limit calculation algorithm (CRITICAL):**
+1. For EACH window in [60, 120, 300, 600] seconds: `limit = requests_per_period × (window / period)`
+2. Use the FIRST window where limit ≥ 10
+3. If ALL four windows produce limit < 10: mandatory fallback `aws_limit=10, aws_evaluation_window_sec=600, mandatory_fallback=true`
+4. Record calculation for ALL four windows in `calculation_notes`
+5. **AWS WAF minimum Limit is 10. NEVER output aws_limit below 10.**
+
+**scope_down.skip_http_ratelimit**: Set to `true` if the skip_labels from query show `http_ratelimit=true`. Set to `false` if `http_ratelimit=false`.
+
+**Rate-limiting rules are NEVER split.** Do not include `split` field.
+
+**For partial rate-limiting rules** (expression contains non-convertible fields):
+- `convertibility: "partial"`, include `convertible_expression` and `non_convertible_reason`
+- Add entry to `non_convertible_notes`
+
+**non_convertible_notes** (MANDATORY — output empty array if none).
 
 ### Return Result
 
-After the summary sections for this batch are written, end your response with this exact block:
+After the JSON file is written, end your response with:
 
 ```
 ---RESULT---
 STATUS: COMPLETE
 BATCH: <A1|A2|A3>
 OUTPUT_FILES:
-  - cloudflare-to-aws-waf/cloudflare-security-rules-summary.md
+  - cloudflare-to-aws-waf/<filename>.json
 ---END---
 ```

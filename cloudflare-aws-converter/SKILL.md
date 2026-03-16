@@ -15,10 +15,9 @@ Orchestrate conversion of Cloudflare configurations to AWS by delegating to spec
 
 | Subagent | Handles | Trigger when user mentions |
 |----------|---------|---------------------------|
-| `cf-waf-analyzer` | Security rules → analysis summary (3 batches) | WAF, firewall, rate limiting, IP rules, security rules |
-| `cf-waf-summary-scanner` | Summary → rule_index.json (V0 pre-scan) | (invoked automatically after analyzer) |
-| `cf-waf-analyzer-validator` | Validates summary in parallel batches (V1/V2/V3/V4) | (invoked automatically after scanner) |
-| `cf-waf-terraform-generator` | Validated summary → AWS WAF Terraform | (invoked automatically after validator passes) |
+| `cf-waf-analyzer` | Security rules → IR JSON (3 batches) | WAF, firewall, rate limiting, IP rules, security rules |
+| `cf-waf-analyzer-validator` | Validates IR JSON in parallel batches (V1/V2/V3/V4) | (invoked automatically after merge) |
+| `cf-waf-terraform-generator` | Validated IR JSON → AWS WAF Terraform | (invoked automatically after validator passes) |
 
 ### CDN Pipeline
 
@@ -121,45 +120,50 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
 
 **Stage 1: Analyze (3 batches, serial)**
 
-1. Before invoking the analyzer, check if `cloudflare-to-aws-waf/cloudflare-security-rules-summary.md` already exists.
-   - If it exists → ask the user: "Found existing analysis files. Do you want to overwrite them and re-run the analysis, or use the existing files and proceed to validation?"
+1. Before invoking the analyzer, check if `cloudflare-to-aws-waf/waf_ir.json` already exists.
+   - If it exists → ask the user: "Found existing IR files. Do you want to overwrite them and re-run the analysis, or use the existing files and proceed to validation?"
      - User says overwrite → delete the entire `cloudflare-to-aws-waf/` directory (`rm -rf cloudflare-to-aws-waf`), then re-run `waf-init.sh` to recreate it with fresh pre-written files. Then proceed to invoke analyzer below.
      - User says use existing → skip to Stage 2
    - If it does not exist → proceed to invoke analyzer below
 
-2. Invoke analyzer 3 times in sequence (A1 → A2 → A3):
+2. Invoke analyzer 3 times in sequence (A1 → A2 → extract skip labels → A3):
 
    **A1**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. Analyze batch A1: IP Lists and IP Access Rules. The Cloudflare backup directory is {config_path}. Generate output files in {user_language}."`
 
    **A2**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. Analyze batch A2: WAF Custom Rules. The Cloudflare backup directory is {config_path}. Generate output files in {user_language}."`
 
-   **A3**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. Analyze batch A3: Rate Limiting Rules. The Cloudflare backup directory is {config_path}. Generate output files in {user_language}."`
+   **Extract skip labels** (between A2 and A3):
+   ```bash
+   skip_labels=$(python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-extract-skip-labels.py "cloudflare-to-aws-waf/waf_ir_custom.json")
+   ```
+   - If exit code 1 → re-invoke A2 once. If second attempt also fails → stop and report.
+   - If exit code 0 → capture the stdout line (e.g., `http_ratelimit=true all_remaining_custom_rules=true http_request_firewall_managed=true`)
+
+   **A3**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. Analyze batch A3: Rate Limiting Rules. Skip labels from custom rules: {skip_labels}. The Cloudflare backup directory is {config_path}. Generate output files in {user_language}."`
 
 3. If any batch fails → stop and report the error. Do not proceed to Stage 2.
 
-**Stage 2: Validate (V0 → parallel V1/V2/V3 → V4)**
+**Stage 2: Validate (merge → count → chunk → parallel V1/V2/V3 → V4)**
 
-**Step 2a: V0 Pre-scan**
+**Step 2a: Merge IR + Count validation + JSON chunking**
 1. Set `validation_round = 1`.
-2. Invoke `cf-waf-summary-scanner` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-summary-scanner/SKILL.md and follow its workflow. Scan the WAF summary and generate rule_index.json. Generate output files in {user_language}."`
-3. If scanner fails → stop and report.
-
-**Step 2b: Count validation + JSON chunking**
-1. Run count validation: `python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-count-validate.py "{config_path}" "cloudflare-to-aws-waf"`
-   - If exit code 1 (mismatch) → re-invoke V0 scanner once. If second attempt also mismatches → stop and report.
+2. Merge batch JSONs: `python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-merge-ir.py "cloudflare-to-aws-waf"`
+   - If exit code 1 → stop and report.
+3. Run count validation: `python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-count-validate.py "{config_path}" "cloudflare-to-aws-waf"`
+   - If exit code 1 (mismatch) → re-invoke the mismatched batch(es) from Stage 1, then re-merge and re-validate. If second attempt also mismatches → stop and report.
    - If exit code 0 → proceed.
-2. Run JSON chunking: `python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-chunk-rules.py "{config_path}" "cloudflare-to-aws-waf" 50`
+4. Run JSON chunking: `python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-chunk-rules.py "{config_path}" "cloudflare-to-aws-waf" 50`
    - Capture the output lines (chunk file paths) for use in V2 dispatch.
-   - If output is `NO_RULES` (0 custom rules), skip all V2 dispatches in Step 2c.
-3. Read `cloudflare-to-aws-waf/rule_index.json` to check rule counts:
-   - If `ip_access_rules.count == 0`, skip V1 in Step 2c.
-   - If `rate_limiting_rules.count == 0`, skip V3 in Step 2c.
+   - If output is `NO_RULES` (0 custom rules), skip all V2 dispatches in Step 2b.
+5. Read `cloudflare-to-aws-waf/waf_ir.json` to check rule counts:
+   - If `ip_access_rules.count == 0`, skip V1 in Step 2b.
+   - If `rate_limiting_rules.count == 0`, skip V3 in Step 2b.
 
-**Step 2c: Parallel validation (V1 + V2 chunks + V3)**
+**Step 2b: Parallel validation (V1 + V2 chunks + V3)**
 
 Dispatch all validation batches in parallel (respecting batch size 2):
 
-- **V1**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. Mode: V1 (IP Access Rules). The Cloudflare backup directory is {config_path}. This is validation round {validation_round}. Generate output files in {user_language}."`
+- **V1**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. Mode: V1 (IP Lists + IP Access Rules). The Cloudflare backup directory is {config_path}. This is validation round {validation_round}. Generate output files in {user_language}."`
 
 - **V2** (one per chunk): `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. Mode: V2 (Custom Rules chunk). The Cloudflare backup directory is {config_path}. Chunk file: cloudflare-to-aws-waf/chunks/custom-rules-{start}-{end}.json (positions {start}-{end}). This is validation round {validation_round}. Generate output files in {user_language}."`
 
@@ -167,24 +171,24 @@ Dispatch all validation batches in parallel (respecting batch size 2):
 
 Wait for all batches to complete.
 
-**Step 2d: V4 Global validation**
+**Step 2c: V4 Global validation**
 
 Invoke: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. Mode: V4 (Global validation). This is validation round {validation_round}. Generate output files in {user_language}."`
 
 Check the `---RESULT---` block:
 - `STATUS: PASS` → if depth is "analyze", proceed to Step 4. If depth is "convert", proceed to Stage 3.
-- `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise, delete `cloudflare-to-aws-waf/rule_index.json`, `cloudflare-to-aws-waf/validation/`, and `cloudflare-to-aws-waf/chunks/`, then re-run Stage 2 from Step 2a.
+- `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise, delete `cloudflare-to-aws-waf/validation/` and `cloudflare-to-aws-waf/chunks/`, then re-run Stage 2 from Step 2a (re-merge to pick up V4 fixes, re-count, re-chunk, re-validate).
 - `STATUS: CANNOT_FIX` → stop and tell the user which issues require manual intervention.
 
 **Stage 3: Generate Terraform** (only if depth is "convert")
-1. Invoke `cf-waf-terraform-generator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/SKILL.md and follow its workflow. Generate AWS WAF Terraform configuration from the validated summary. Generate output files in {user_language}."`
+1. Invoke `cf-waf-terraform-generator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/SKILL.md and follow its workflow. Generate AWS WAF Terraform configuration from the validated IR JSON. Generate output files in {user_language}."`
 2. Check the `---RESULT---` block:
    - `STATUS: COMPLETE` → proceed to Step 3b.
 
 **Step 3b: Terraform validate**
 1. Run: `cd cloudflare-to-aws-waf && terraform init -backend=false && terraform validate`
 2. If validation passes → proceed to Step 4.
-3. If validation fails → re-invoke generator with error details: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/SKILL.md and follow its workflow. Generate AWS WAF Terraform configuration from the validated summary. IMPORTANT: The previous generation had terraform validate errors. Fix these specific issues and regenerate all affected files: {terraform_validate_error_output}. Generate output files in {user_language}."`
+3. If validation fails → re-invoke generator with error details: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/SKILL.md and follow its workflow. Generate AWS WAF Terraform configuration from the validated IR JSON. IMPORTANT: The previous generation had terraform validate errors. Fix these specific issues and regenerate all affected files: {terraform_validate_error_output}. Generate output files in {user_language}."`
 4. Run terraform validate again. If it fails a second time → stop and tell the user: "Terraform validation failed after retry. Please manually fix the errors in cloudflare-to-aws-waf/ and run `terraform validate` to verify. Errors: {error_output}"
 
 ---

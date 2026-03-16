@@ -12,7 +12,7 @@ if not exist "%AGENTS_DIR%" mkdir "%AGENTS_DIR%"
 
 :: Clean old skills (including deprecated cf-waf-converter)
 echo Cleaning old skills...
-for %%D in (cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator cf-waf-converter cf-waf-summary-scanner cf-functions-converter cf-cdn-dns-parser cf-cdn-input-validator cf-cdn-per-domain-processor cf-cdn-ir-chunk-validator cf-cdn-ir-finalizer cf-cdn-ir-final-validator cf-cdn-tf-shared-policies cf-cdn-tf-domain cf-cdn-js-validator) do (
+for %%D in (cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator cf-waf-converter cf-functions-converter cf-cdn-dns-parser cf-cdn-input-validator cf-cdn-per-domain-processor cf-cdn-ir-chunk-validator cf-cdn-ir-finalizer cf-cdn-ir-final-validator cf-cdn-tf-shared-policies cf-cdn-tf-domain cf-cdn-js-validator) do (
     if exist "%SKILLS_DIR%\%%D" rmdir /s /q "%SKILLS_DIR%\%%D"
 )
 if exist "%SKILLS_DIR%\SKILL.md" del /q "%SKILLS_DIR%\SKILL.md"
@@ -24,7 +24,7 @@ if exist "%AGENTS_DIR%\cf-functions-converter.json" del /q "%AGENTS_DIR%\cf-func
 
 :: Copy skills
 echo Copying skills to %SKILLS_DIR%...
-for %%D in (cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator cf-waf-summary-scanner cf-cdn-dns-parser cf-cdn-input-validator cf-cdn-per-domain-processor cf-cdn-ir-chunk-validator cf-cdn-ir-finalizer cf-cdn-ir-final-validator cf-cdn-tf-shared-policies cf-cdn-tf-domain cf-cdn-js-validator) do (
+for %%D in (cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator cf-cdn-dns-parser cf-cdn-input-validator cf-cdn-per-domain-processor cf-cdn-ir-chunk-validator cf-cdn-ir-finalizer cf-cdn-ir-final-validator cf-cdn-tf-shared-policies cf-cdn-tf-domain cf-cdn-js-validator) do (
     xcopy /e /i /q "%%D" "%SKILLS_DIR%\%%D"
 )
 copy /y "cloudflare-aws-converter\SKILL.md" "%SKILLS_DIR%\SKILL.md"
@@ -32,7 +32,7 @@ xcopy /e /i /q "cloudflare-aws-converter\scripts" "%SKILLS_DIR%\scripts"
 
 :: Copy subagent configurations
 echo Copying subagent configurations to %AGENTS_DIR%...
-for %%F in (cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator cf-waf-summary-scanner cf-cdn-dns-parser cf-cdn-input-validator cf-cdn-per-domain-processor cf-cdn-ir-chunk-validator cf-cdn-ir-finalizer cf-cdn-ir-final-validator cf-cdn-tf-shared-policies cf-cdn-tf-domain cf-cdn-js-validator) do (
+for %%F in (cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator cf-cdn-dns-parser cf-cdn-input-validator cf-cdn-per-domain-processor cf-cdn-ir-chunk-validator cf-cdn-ir-finalizer cf-cdn-ir-final-validator cf-cdn-tf-shared-policies cf-cdn-tf-domain cf-cdn-js-validator) do (
     copy /y "subagents\%%F.json" "%AGENTS_DIR%\"
 )
 

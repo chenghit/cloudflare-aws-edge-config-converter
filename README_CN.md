@@ -70,7 +70,7 @@ kiro-cli chat
 
 本工具作为 Kiro CLI skill 运行，由编排器调度专用 subagent。每个 subagent 拥有隔离的上下文，负责一个流程阶段。
 
-**WAF 流程**（4 阶段）：分析（3 批次）→ 扫描 + 校验（并行）→ 生成 Terraform → terraform validate
+**WAF 流程**（4 阶段）：分析（3 批次）→ 合并 + 校验（并行）→ 生成 Terraform → terraform validate
 
 **CDN 流程**（9 阶段）：解析 DNS → 校验用户输入 → 按域名处理规则 → 校验 IR → 合并去重 → 校验最终 IR → 生成共享策略 → 生成每域名 Terraform + JS → 校验 JS
 
@@ -78,7 +78,7 @@ kiro-cli chat
 flowchart TD
     User([用户]) -->|"转换 WAF / CDN / 全部"| Main["编排器"]
 
-    Main -->|WAF| WAF_A["分析器 × 3"] --> WAF_S["扫描器"] --> WAF_V["校验器 × N"] -->|通过| WAF_G["TF 生成器"] --> WAF_T{{"terraform validate"}} --> WAF_Done([WAF Terraform ✅])
+    Main -->|WAF| WAF_A["分析器 × 3"] --> WAF_M["合并 IR"] --> WAF_V["校验器 × N"] -->|通过| WAF_G["TF 生成器"] --> WAF_T{{"terraform validate"}} --> WAF_Done([WAF Terraform ✅])
 
     Main -->|CDN| CDN1["DNS 解析"] -->|CSV| Pause[/"⏸ 用户填写 CSV"/]
     Pause --> CDN2["输入校验"]
@@ -186,7 +186,7 @@ cd cloudflare-aws-edge-config-converter
 
 > **使用其他 Agent 工具？** 安装脚本和所有 SKILL.md 文件默认使用 `~/.kiro/skills/` 作为 skill 安装目录（Kiro CLI 约定）。如需配合其他 agent 工具使用，需要：(1) 修改 `install.sh` / `uninstall.sh` 中的目标目录；(2) 在所有 SKILL.md 文件中将 `~/.kiro/skills/` 全局替换为你的 agent 工具的 skill 路径——subagent 之间通过绝对安装路径互相引用。
 
-高级用户可通过 `/agent swap <subagent-name>` 单独运行各流程阶段。可用 subagent：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-waf-summary-scanner`、`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-per-domain-processor`、`cf-cdn-ir-chunk-validator`、`cf-cdn-ir-finalizer`、`cf-cdn-ir-final-validator`、`cf-cdn-tf-shared-policies`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。
+高级用户可通过 `/agent swap <subagent-name>` 单独运行各流程阶段。可用 subagent：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-per-domain-processor`、`cf-cdn-ir-chunk-validator`、`cf-cdn-ir-finalizer`、`cf-cdn-ir-final-validator`、`cf-cdn-tf-shared-policies`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。
 
 ## Subagent 权限与安全
 

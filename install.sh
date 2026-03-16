@@ -19,7 +19,6 @@ rm -rf \
   "$SKILLS_DIR/cf-waf-terraform-generator" \
   "$SKILLS_DIR/cf-waf-converter" \
   "$SKILLS_DIR/cf-functions-converter" \
-  "$SKILLS_DIR/cf-waf-summary-scanner" \
   "$SKILLS_DIR/cf-cdn-dns-parser" \
   "$SKILLS_DIR/cf-cdn-input-validator" \
   "$SKILLS_DIR/cf-cdn-per-domain-processor" \
@@ -35,7 +34,6 @@ rm -rf \
 cp -r cf-waf-analyzer "$SKILLS_DIR/"
 cp -r cf-waf-analyzer-validator "$SKILLS_DIR/"
 cp -r cf-waf-terraform-generator "$SKILLS_DIR/"
-cp -r cf-waf-summary-scanner "$SKILLS_DIR/"
 cp -r cf-cdn-dns-parser "$SKILLS_DIR/"
 cp -r cf-cdn-input-validator "$SKILLS_DIR/"
 cp -r cf-cdn-per-domain-processor "$SKILLS_DIR/"
@@ -55,7 +53,6 @@ rm -f "$AGENTS_DIR/cf-functions-converter.json"
 cp subagents/cf-waf-analyzer.json "$AGENTS_DIR/"
 cp subagents/cf-waf-analyzer-validator.json "$AGENTS_DIR/"
 cp subagents/cf-waf-terraform-generator.json "$AGENTS_DIR/"
-cp subagents/cf-waf-summary-scanner.json "$AGENTS_DIR/"
 cp subagents/cf-cdn-dns-parser.json "$AGENTS_DIR/"
 cp subagents/cf-cdn-input-validator.json "$AGENTS_DIR/"
 cp subagents/cf-cdn-per-domain-processor.json "$AGENTS_DIR/"
@@ -74,7 +71,6 @@ echo "  - Orchestrator: $SKILLS_DIR/SKILL.md"
 echo "  - WAF Analyzer: $SKILLS_DIR/cf-waf-analyzer/"
 echo "  - WAF Analyzer Validator: $SKILLS_DIR/cf-waf-analyzer-validator/"
 echo "  - WAF Terraform Generator: $SKILLS_DIR/cf-waf-terraform-generator/"
-echo "  - WAF Summary Scanner: $SKILLS_DIR/cf-waf-summary-scanner/"
 echo "  - CDN DNS Parser: $SKILLS_DIR/cf-cdn-dns-parser/"
 echo "  - CDN Input Validator: $SKILLS_DIR/cf-cdn-input-validator/"
 echo "  - CDN Per-Domain Processor: $SKILLS_DIR/cf-cdn-per-domain-processor/"
@@ -89,7 +85,6 @@ echo "Installed subagents:"
 echo "  - cf-waf-analyzer"
 echo "  - cf-waf-analyzer-validator"
 echo "  - cf-waf-terraform-generator"
-echo "  - cf-waf-summary-scanner"
 echo "  - cf-cdn-dns-parser"
 echo "  - cf-cdn-input-validator"
 echo "  - cf-cdn-per-domain-processor"

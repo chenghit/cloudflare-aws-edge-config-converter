@@ -1,34 +1,31 @@
 ---
 name: cf-waf-analyzer-validator
-description: Validates WAF analysis summary against original Cloudflare configuration files. Operates in batch mode — each invocation validates a specific rule type or chunk. V1/V2/V3 modes report issues; V4 mode applies fixes and writes the final report. Use after cf-waf-analyzer has generated its summary and cf-waf-summary-scanner has produced rule_index.json.
+description: Validates WAF IR JSON against original Cloudflare configuration files. Operates in batch mode — each invocation validates a specific rule type or chunk. V1/V2/V3 modes report issues; V4 mode applies fixes serially to waf_ir.json. Use after cf-waf-analyzer has generated IR JSON files and the orchestrator has merged them into waf_ir.json.
 ---
 
 # Cloudflare WAF Analyzer Validator
 
-Validate `cloudflare-to-aws-waf/cloudflare-security-rules-summary.md` by cross-checking it against the original Cloudflare configuration files. V1/V2/V3 modes only report issues (do NOT modify the summary). V4 mode applies all fixes serially and writes the final report.
+Validate `cloudflare-to-aws-waf/waf_ir.json` by cross-checking it against the original Cloudflare configuration files. V1/V2/V3 modes only report issues (do NOT modify waf_ir.json). V4 mode applies all fixes serially and writes the final report.
 
 **Language Adaptation**: Write output files in the language specified in the query. Default to English.
 
 ## Validation Modes
 
-The orchestrator invokes this skill in one of 4 modes, specified in the query:
-
 | Mode | What it validates | Input config files | Checks |
 |------|------------------|--------------------|--------|
-| **V1** | IP Access Rules | IP-Access-Rules.txt, IP-Lists.txt, List-Items-*.txt | 1, 2, 3, 6 |
+| **V1** | IP Lists + IP Access Rules | IP-Access-Rules.txt, IP-Lists.txt, List-Items-*.txt | 1, 2, 3, 6 |
 | **V2** | Custom Rules chunk | Pre-chunked JSON (bare array) + IP-Lists.txt, List-Items-*.txt | 1, 3, 4B, 5, 6, 8, 9 |
 | **V3** | Rate Limiting Rules | Rate-limits.txt | 1, 3, 7, 9 |
-| **V4** | Global cross-type | rule_index.json + per-batch reports | 4A, cross-type consistency |
+| **V4** | Global cross-type | waf_ir.json + per-batch reports | 4A, cross-type consistency |
 
 ## Input
 
 All modes read:
-- `cloudflare-to-aws-waf/rule_index.json` — structured rule index from V0 scanner
-- `cloudflare-to-aws-waf/cloudflare-security-rules-summary.md` — the summary to validate and fix
+- `cloudflare-to-aws-waf/waf_ir.json` — the merged IR to validate and fix
 
 Mode-specific inputs:
 - **V1**: Original IP-Access-Rules.txt, IP-Lists.txt, List-Items-*.txt from config path
-- **V2**: `cloudflare-to-aws-waf/chunks/custom-rules-{start}-{end}.json` (bare JSON array, pre-chunked by orchestrator) + IP-Lists.txt, List-Items-*.txt from config path
+- **V2**: `cloudflare-to-aws-waf/chunks/custom-rules-{start}-{end}.json` (bare JSON array) + IP-Lists.txt, List-Items-*.txt from config path
 - **V3**: Original Rate-limits.txt from config path
 - **V4**: Validation reports from V1, V2, V3 batches
 
@@ -49,14 +46,24 @@ Report JSON format (V1/V2/V3):
   "issues_fixed": 0,
   "issues_cannot_fix": 0,
   "details": [
-    { "check": "Check 1", "rule": "rule-name", "issue": "...", "action": "fixed|cannot_fix" }
+    {
+      "check": "Check 1",
+      "rule": "rule-name",
+      "issue": "...",
+      "action": "fixed|cannot_fix",
+      "fix": {
+        "path": "custom_rules.rules[2].convertibility",
+        "old_value": "no",
+        "new_value": "partial"
+      }
+    }
   ]
 }
 ```
 
-## Reference Documents
+**Fix format for V1/V2/V3 reports:** Each fix specifies a JSON path within waf_ir.json and the old/new values. V4 uses these to apply str_replace on the JSON text. Include the rule `name` field in the fix for unique identification.
 
-Read the references relevant to your mode:
+## Reference Documents
 
 - **V1**: `references/field-conversions.md`, `references/non-convertible-rules.md`
 - **V2**: `references/action-conversions.md`, `references/field-conversions.md`, `references/non-convertible-rules.md`, `references/nesting-and-splitting.md`
@@ -68,20 +75,19 @@ Read the references relevant to your mode:
 ### 0. Read Inputs and References
 
 1. Identify your mode from the query (V1, V2, V3, or V4).
-2. Read `cloudflare-to-aws-waf/rule_index.json`.
-3. Read the reference documents listed for your mode above.
-4. Read the summary file. **For V1/V2/V3**: you will read the full summary but only validate rules in your assigned scope — ignore rules outside your range.
-5. Read the mode-specific input files:
-   - **V1**: Use glob to find IP-Access-Rules.txt, IP-Lists.txt, List-Items-*.txt under the config path.
-   - **V2**: Read the chunk file specified in the query (bare JSON array). Also find IP-Lists.txt, List-Items-*.txt if rules in this chunk reference IP lists. To verify IPv4/IPv6 splitting (Check 6 Part B), you may need to: (1) parse rule expressions for `ip.src in $list_name` or inline IP references, (2) read IP-Lists.txt to find the list definition, (3) read the corresponding List-Items-ip-*.txt to check if the list contains both IPv4 and IPv6 addresses.
-   - **V3**: Use glob to find Rate-limits.txt under the config path.
-   - **V4**: Read all validation report JSONs from `cloudflare-to-aws-waf/validation/`.
+2. Read `cloudflare-to-aws-waf/waf_ir.json`.
+3. Read the reference documents listed for your mode.
+4. Read mode-specific input files:
+   - **V1**: glob for IP-Access-Rules.txt, IP-Lists.txt, List-Items-*.txt
+   - **V2**: Read chunk file from query. Also find IP-Lists.txt, List-Items-*.txt if rules reference IP lists.
+   - **V3**: glob for Rate-limits.txt
+   - **V4**: Read all validation report JSONs from `cloudflare-to-aws-waf/validation/`
 
-**For V2 mode:** The chunk file is a bare JSON array of Cloudflare rule objects (not the full CloudflareBackup response). The query specifies the position range (e.g., "custom rules 1-50"). Use rule_index.json to identify which rules in the summary correspond to this range, then locate them in the summary by their heading/name.
+**For V2 mode:** The chunk file is a bare JSON array of Cloudflare rule objects. The query specifies the position range (e.g., "positions 1-50"). Match rules in waf_ir.json's `custom_rules.rules` array by position.
 
 ### 1. Run Validation Checks
 
-Run only the checks relevant to your mode. Collect all issues before fixing anything.
+Run only the checks relevant to your mode.
 
 ---
 
@@ -89,15 +95,13 @@ Run only the checks relevant to your mode. Collect all issues before fixing anyt
 
 **Modes: V1, V2, V3**
 
-For each rule in the original config (or chunk), verify it appears in the summary. For each summary entry in your scope, verify it corresponds to an original rule.
+For each rule in the original config (or chunk), verify it appears in waf_ir.json. For each IR entry in your scope, verify it corresponds to an original rule.
 
-**Excluded from this check:**
-- Managed rules and DDoS protection rules in the original files (these are out of scope for conversion)
-- IP Lists (verified separately in Check 2)
+**Excluded:** Managed rules and DDoS protection rules (out of scope for conversion).
 
-- **V1**: Check IP Access Rules section against IP-Access-Rules.txt.
-- **V2**: Check the chunk's rules against the corresponding entries in Summary Section 3. Use rule_index.json positions to identify which summary entries belong to this chunk.
-- **V3**: Check Rate Limiting Rules section against Rate-limits.txt.
+- **V1**: Check `ip_lists` array against IP-Lists.txt. Check `ip_access_rules.rules` against IP-Access-Rules.txt.
+- **V2**: Check chunk rules against `custom_rules.rules` by position range.
+- **V3**: Check `rate_limiting_rules.rules` against Rate-limits.txt.
 
 ---
 
@@ -105,7 +109,7 @@ For each rule in the original config (or chunk), verify it appears in the summar
 
 **Mode: V1 only**
 
-For each list in IP-Lists.txt, verify the list and its items appear correctly in Summary Section 1.
+For each list in IP-Lists.txt, verify the list appears in `ip_lists` with correct kind, conversion type, and items.
 
 ---
 
@@ -113,15 +117,15 @@ For each list in IP-Lists.txt, verify the list and its items appear correctly in
 
 **Modes: V1, V2, V3**
 
-For each rule in your scope, verify the convertibility status:
+For each rule in your scope, verify the `convertibility` field:
 
-**Non-convertible fields** (require manual intervention): Client Certificate Verified, MIME Type, European Union, bot fields (`cf.verified_bot_category`, `cf.bot_management.*`), fraud fields (`cf.waf.credential_check.*`), attack score fields (`cf.waf.score*`)
+**Non-convertible fields:** Client Certificate Verified, MIME Type, European Union, bot fields (`cf.verified_bot_category`, `cf.bot_management.*`), fraud fields (`cf.waf.credential_check.*`), attack score fields (`cf.waf.score*`)
 
-**Conversion strategy — apply in this exact order:**
-1. **Rate-based rules are ALWAYS convertible** — at minimum ⚠️ Partial. The mandatory fallback (Limit=10, EvaluationWindowSec=600) makes ALL rate-based rules convertible.
-2. **Convertible OR non-convertible** → ⚠️ Partial
-3. **Convertible AND non-convertible** → ❌ No
-4. **Only non-convertible fields** → ❌ No
+**Rules:**
+1. Rate-based rules are ALWAYS convertible — at minimum `"partial"`
+2. Convertible OR non-convertible → `"partial"`
+3. Convertible AND non-convertible → `"no"`
+4. Only non-convertible fields → `"no"`
 
 ---
 
@@ -129,7 +133,7 @@ For each rule in your scope, verify the convertibility status:
 
 **Mode: V2 only**
 
-Verify rules within this chunk maintain the exact array order from the original configuration. Compare the chunk's rule order against the summary's rule order for the corresponding positions.
+Verify rules within this chunk maintain the exact array order from the original configuration. Compare chunk rule order against `custom_rules.rules` positions.
 
 ---
 
@@ -137,10 +141,7 @@ Verify rules within this chunk maintain the exact array order from the original 
 
 **Mode: V4 only**
 
-Verify the summary sections appear in Cloudflare execution order:
-1. IP Access Rules (execute first)
-2. WAF Custom Rules (execute second)
-3. Rate Limiting Rules (execute last)
+Verify waf_ir.json has all expected top-level keys: `ip_lists`, `ip_access_rules`, `custom_rules`, `rate_limiting_rules`, `non_convertible_notes`.
 
 ---
 
@@ -150,24 +151,18 @@ Verify the summary sections appear in Cloudflare execution order:
 
 For each skip rule in this chunk:
 
-**Part A — Action Parameters Accuracy:**
-- The `action_parameters` JSON matches the original config verbatim
-- The `phases` array values are correctly listed
-- `"ruleset": "current"` is noted if present
+**Part A — Action Parameters:** `action_parameters` matches original config verbatim.
 
-**Part B — RuleLabels Correctness:**
-- `phases` contains `"http_ratelimit"` → must list `skip:http_ratelimit`
-- `phases` contains `"http_request_firewall_managed"` → must list `skip:http_request_firewall_managed`
-- `"ruleset": "current"` exists → must list `skip:all_remaining_custom_rules`
+**Part B — Labels Correctness:**
+- `phases` contains `"http_ratelimit"` → labels must include `"skip:http_ratelimit"`
+- `phases` contains `"http_request_firewall_managed"` → labels must include `"skip:http_request_firewall_managed"`
+- `"ruleset": "current"` → labels must include `"skip:all_remaining_custom_rules"`
 - No extra labels
 
-**Part C — Scope-Down Impact Description:**
-- Verify the summary accurately describes which downstream rules are affected
-- If skip rule has `skip:all_remaining_custom_rules` but NOT `skip:http_ratelimit`: summary must explicitly state "Does NOT skip rate-limiting rules"
-- If skip rule has `skip:http_ratelimit` but NOT `skip:all_remaining_custom_rules`: summary must explicitly state "Does NOT skip remaining custom rules"
-- If skip rule has `skip:http_request_firewall_managed`: summary must explicitly state this only affects managed rules
-- Skip rules themselves are NEVER affected by other skip rules
-- If there are multiple skip rules with `skip:all_remaining_custom_rules`, a downstream custom rule only needs ONE scope-down check for that label (not multiple — the label key is the same regardless of which skip rule produced it)
+**Part C — skip_labels_present Consistency:**
+- If this chunk has a skip rule with `skip:all_remaining_custom_rules` label → `custom_rules.skip_labels_present.all_remaining_custom_rules` must be `true`
+- Same for `http_ratelimit` and `http_request_firewall_managed`
+- If skip rule does NOT skip a phase, verify the summary explicitly does NOT include that label
 
 ---
 
@@ -175,16 +170,14 @@ For each skip rule in this chunk:
 
 **Modes: V1, V2**
 
-For each rule in your scope, verify splitting strategy:
+**Rate-limiting rules are excluded** — they are NEVER split.
 
-**Rate-limiting rules are excluded from Parts A-D** — they are NEVER split (splitting causes independent rate tracking and changes semantics).
-
-**Part A — Top-level OR splitting:** If expression has top-level OR, summary must note split.
-**Part B — IPv4/IPv6 splitting:** Check actual IP list contents for mixed addresses.
-**Part C — Cascading split count:** Verify final rule count.
-**Part D — Inline IP Set definitions:** Separate sets per branch, correct IPv4/IPv6 separation.
-**Part E — Split skip rules share RuleLabels:** All variants add same labels.
-**Part F — AWS WAF statement type:** Correct statement type for each rule/branch.
+**Part A — Top-level OR:** If expression has top-level OR, `split.required` must be `true`.
+**Part B — IPv4/IPv6:** Check actual IP list contents for mixed addresses. If mixed, verify split accounts for it.
+**Part C — Cascading count:** Verify `split.total_aws_rules`.
+**Part D — IP Set definitions:** Separate sets per branch, correct IPv4/IPv6 separation.
+**Part E — Split skip rules share labels:** All split variants of a skip rule must produce the same labels.
+**Part F — AWS WAF statement type:** Correct `aws_statement_type` for each rule/branch.
 
 ---
 
@@ -192,12 +185,12 @@ For each rule in your scope, verify splitting strategy:
 
 **Mode: V3 only**
 
-For each rate-limiting rule, **re-calculate from scratch**:
-
+For each rate-limiting rule, re-calculate from scratch:
 1. Extract `requests_per_period` and `period` from original config
 2. Calculate for ALL four windows: 60s, 120s, 300s, 600s
-3. Select FIRST window where limit ≥ 10. If none → fallback Limit=10, EvaluationWindowSec=600
-4. Compare against summary values
+3. Select FIRST window where limit ≥ 10. If none → fallback 10/600s
+4. Compare `aws_limit` and `aws_evaluation_window_sec` against calculated values
+5. Verify `mandatory_fallback` flag is correct
 
 ---
 
@@ -205,11 +198,12 @@ For each rate-limiting rule, **re-calculate from scratch**:
 
 **Mode: V2 only**
 
-For each rule marked ⚠️ Partial in this chunk:
-- Planned statement includes ONLY convertible conditions
-- Non-convertible conditions are excluded and documented in Section 5
+For each rule with `"convertibility": "partial"`:
+- `convertible_expression` includes ONLY convertible conditions
+- Non-convertible conditions are excluded and documented in `non_convertible_notes`
+- `aws_statement_type` matches the convertible expression
 
-For non-skip custom rules: use rule_index.json to determine if this rule is positioned after a skip rule with `skip:all_remaining_custom_rules`. If so, verify the summary describes the scope-down.
+For non-skip custom rules: check if this rule's position is after any skip rule with `skip:all_remaining_custom_rules`. If so, `scope_down.skip_all_remaining_custom_rules` must be `true`.
 
 ---
 
@@ -217,8 +211,8 @@ For non-skip custom rules: use rule_index.json to determine if this rule is posi
 
 **Modes: V2, V3**
 
-- **V2**: Skip rules themselves NEVER have scope-down. Non-skip custom rules after a skip rule with `skip:all_remaining_custom_rules` (check rule_index.json positions) should have scope-down noted. Use rule_index.json to identify all skip rules and their positions — a non-skip custom rule at position P needs scope-down for `skip:all_remaining_custom_rules` if ANY skip rule at position < P has that label.
-- **V3**: If rule_index.json shows `skip_labels_present.http_ratelimit` is true, verify each rate-limit rule has scope-down for `skip:http_ratelimit` noted. Rate-limit rules NEVER check `skip:all_remaining_custom_rules`.
+- **V2**: Skip rules themselves always have `scope_down.skip_all_remaining_custom_rules: false`. Non-skip custom rules after a skip rule with that label must have `scope_down.skip_all_remaining_custom_rules: true`. A rule at position P needs scope-down if ANY skip rule at position < P has that label.
+- **V3**: If `custom_rules.skip_labels_present.http_ratelimit` is `true`, every rate-limiting rule must have `scope_down.skip_http_ratelimit: true`. Rate-limit rules NEVER check `skip:all_remaining_custom_rules`.
 
 ---
 
@@ -228,56 +222,42 @@ For non-skip custom rules: use rule_index.json to determine if this rule is posi
 - **FIXED**: Issues found that can be fixed.
 - **CANNOT_FIX**: Issues that cannot be resolved by editing.
 
-### 3. Fix Issues (if FIXED)
+### 3. Fix Issues
 
-**V4 mode only:** V4 is responsible for applying all fixes. Read the `details` array from each V1/V2/V3 report, and for each issue with `"action": "fixed"`, apply the fix to `cloudflare-security-rules-summary.md` using `fs_write` str_replace. Apply fixes serially to avoid race conditions.
+**V1/V2/V3 modes:** Do NOT fix waf_ir.json. Record each issue in the JSON report with `"action": "fixed"` or `"cannot_fix"`. Include enough detail for V4 to apply the fix.
 
-**V1/V2/V3 modes:** Do NOT fix the summary yourself. Record each issue in the JSON report with the `action` field set to `"fixed"` (if fixable) or `"cannot_fix"`. Include enough detail in the `issue` and `fix` fields for V4 to apply the fix.
-
-Common fix patterns (for the `fix` field):
-- **Missing or extra rules**: Provide the full rule text to add, or the heading text to remove
-- **Wrong convertibility status**: Provide old status marker and new status marker
-- **Wrong rule order**: Describe the reordering needed
-- **Incomplete skip rule documentation**: Provide the complete action_parameters, RuleLabels, and scope-down description
-- **Missing or incorrect splitting annotations**: Provide the correct split strategy text
-- **Wrong AWS WAF statement type**: Provide the corrected statement type
-- **Incorrect rate-limit calculation**: Provide the correct Limit and EvaluationWindowSec with calculation
-- **Incorrect scope-down content**: Provide the corrected scope-down description
-
-Example:
+**Fix format:** Each fix specifies what to change in waf_ir.json. Use `old_text`/`new_text` pairs that include the rule's `"name"` field as context for unique matching:
 
 ```json
 {
-  "check": "Check 3",
-  "rule": "rate-limit-api",
-  "issue": "Convertibility marked as 'no' but should be 'partial' (rate-based rules are always convertible)",
-  "action": "fixed",
   "fix": {
-    "old_text": "- **Convertible**: ❌ No",
-    "new_text": "- **Convertible**: ⚠️ Partial"
+    "old_text": "\"name\": \"rate-limit-api\",\n    \"convertibility\": \"no\"",
+    "new_text": "\"name\": \"rate-limit-api\",\n    \"convertibility\": \"partial\""
   }
 }
 ```
 
-### 4. Write Validation Report
+Include enough surrounding JSON context (the rule name at minimum) to ensure the old_text is unique in waf_ir.json.
 
-**V1/V2/V3**: Write the JSON report to the appropriate path.
-
-**V4**: Read all V1/V2/V3 reports from `cloudflare-to-aws-waf/validation/`. Determine global status:
-- All PASS → global PASS
-- Any FIXED, no CANNOT_FIX → global FIXED (apply all fixes serially to the summary)
-- Any CANNOT_FIX → global CANNOT_FIX
-
-**Apply fixes (V4 only):** For each report with status FIXED, iterate through the `details` array. For each entry with `"action": "fixed"`, use `fs_write` str_replace with the `old_text` and `new_text` from the `fix` field. Apply fixes one at a time, serially. If a str_replace fails (old_text not found — possibly due to a prior fix changing the surrounding text), log it as a warning in the report and continue with the remaining fixes.
+**V4 mode:** Read all V1/V2/V3 reports. For each issue with `"action": "fixed"`, apply `fs_write` str_replace with `old_text`/`new_text` from the fix. Apply fixes one at a time, serially. If a str_replace fails (old_text not found), log as warning and continue.
 
 Also verify:
-- Check 4A (section order)
-- IP Access Rules have no skip-label scope-down
+- Check 4A (all top-level keys present)
+- IP Access Rules have no skip-label scope-down (they execute before skip rules)
 - Rate-limit rules don't check `skip:all_remaining_custom_rules`
+
+### 4. Write Validation Report
+
+**V1/V2/V3**: Write JSON report to the appropriate path.
+
+**V4**: Determine global status:
+- All PASS → global PASS
+- Any FIXED, no CANNOT_FIX → global FIXED (apply all fixes)
+- Any CANNOT_FIX → global CANNOT_FIX
 
 Write `cloudflare-to-aws-waf/validator-report.md`:
 
-**CRITICAL**: If a previous `validator-report.md` exists (from a prior validation round), read it first and preserve the Changelog section. Append the new round's entry to the existing changelog.
+**CRITICAL**: If a previous `validator-report.md` exists, preserve the Changelog section.
 
 ```markdown
 # Validator Report
@@ -289,7 +269,6 @@ Status: PASS | FIXED | CANNOT_FIX
 |-------|--------|-------------|-------------|
 | V1 (IP Access) | ... | ... | ... |
 | V2 (Custom 1-50) | ... | ... | ... |
-| V2 (Custom 51-100) | ... | ... | ... |
 | V3 (Rate Limiting) | ... | ... | ... |
 
 ## Issues Fixed This Round

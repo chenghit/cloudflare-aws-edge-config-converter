@@ -70,7 +70,7 @@ Not all Cloudflare features have CloudFront equivalents. Non-convertible items a
 
 The tool runs as a Kiro CLI skill with an orchestrator that dispatches to specialized subagents. Each subagent has isolated context and handles one pipeline stage.
 
-**WAF pipeline** (4 stages): analyze (3 batches) → scan + validate (parallel) → generate Terraform → terraform validate
+**WAF pipeline** (4 stages): analyze (3 batches) → merge + validate (parallel) → generate Terraform → terraform validate
 
 **CDN pipeline** (9 stages): parse DNS → validate user input → process rules per domain → validate IR → finalize + dedup → validate final IR → generate shared policies → generate per-domain Terraform + JS → validate JS
 
@@ -78,7 +78,7 @@ The tool runs as a Kiro CLI skill with an orchestrator that dispatches to specia
 flowchart TD
     User([User]) -->|"Convert WAF / CDN / All"| Main["Orchestrator"]
 
-    Main -->|WAF| WAF_A["Analyzer × 3"] --> WAF_S["Scanner"] --> WAF_V["Validator × N"] -->|PASS| WAF_G["TF Generator"] --> WAF_T{{"terraform validate"}} --> WAF_Done([WAF Terraform ✅])
+    Main -->|WAF| WAF_A["Analyzer × 3"] --> WAF_M["Merge IR"] --> WAF_V["Validator × N"] -->|PASS| WAF_G["TF Generator"] --> WAF_T{{"terraform validate"}} --> WAF_Done([WAF Terraform ✅])
 
     Main -->|CDN| CDN1["DNS Parser"] -->|CSV| Pause[/"⏸ User fills CSV"/]
     Pause --> CDN2["Input Validator"]
@@ -186,7 +186,7 @@ Update: `git pull && ./install.sh`
 
 > **Using a different agent tool?** The install scripts and all SKILL.md files use `~/.kiro/skills/` as the default skill directory (Kiro CLI convention). To use these skills with another agent tool, you need to: (1) modify `install.sh` / `uninstall.sh` to point to your tool's skill directory, and (2) find-and-replace `~/.kiro/skills/` with your tool's skill path across all SKILL.md files — subagents reference each other by absolute installed path.
 
-For advanced users: `/agent swap <subagent-name>` to run individual pipeline stages. Available subagents: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-terraform-generator`, `cf-waf-summary-scanner`, `cf-cdn-dns-parser`, `cf-cdn-input-validator`, `cf-cdn-per-domain-processor`, `cf-cdn-ir-chunk-validator`, `cf-cdn-ir-finalizer`, `cf-cdn-ir-final-validator`, `cf-cdn-tf-shared-policies`, `cf-cdn-tf-domain`, `cf-cdn-js-validator`.
+For advanced users: `/agent swap <subagent-name>` to run individual pipeline stages. Available subagents: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-terraform-generator`, `cf-cdn-dns-parser`, `cf-cdn-input-validator`, `cf-cdn-per-domain-processor`, `cf-cdn-ir-chunk-validator`, `cf-cdn-ir-finalizer`, `cf-cdn-ir-final-validator`, `cf-cdn-tf-shared-policies`, `cf-cdn-tf-domain`, `cf-cdn-js-validator`.
 
 ## Subagent Permissions and Security
 
