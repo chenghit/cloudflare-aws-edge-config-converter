@@ -1,6 +1,6 @@
 ---
 name: cf-waf-analyzer-validator
-description: Validates WAF analysis summary against original Cloudflare configuration files. Operates in batch mode — each invocation validates a specific rule type or chunk. V1/V2/V3 modes report issues; V4 mode applies fixes and writes the final report. Use after cf-waf-analyzer has generated its summary and cf-waf-summary-scanner has produced rule_index.yaml.
+description: Validates WAF analysis summary against original Cloudflare configuration files. Operates in batch mode — each invocation validates a specific rule type or chunk. V1/V2/V3 modes report issues; V4 mode applies fixes and writes the final report. Use after cf-waf-analyzer has generated its summary and cf-waf-summary-scanner has produced rule_index.json.
 ---
 
 # Cloudflare WAF Analyzer Validator
@@ -18,12 +18,12 @@ The orchestrator invokes this skill in one of 4 modes, specified in the query:
 | **V1** | IP Access Rules | IP-Access-Rules.txt, IP-Lists.txt, List-Items-*.txt | 1, 2, 3, 6 |
 | **V2** | Custom Rules chunk | Pre-chunked JSON (bare array) + IP-Lists.txt, List-Items-*.txt | 1, 3, 4B, 5, 6, 8, 9 |
 | **V3** | Rate Limiting Rules | Rate-limits.txt | 1, 3, 7, 9 |
-| **V4** | Global cross-type | rule_index.yaml + per-batch reports | 4A, cross-type consistency |
+| **V4** | Global cross-type | rule_index.json + per-batch reports | 4A, cross-type consistency |
 
 ## Input
 
 All modes read:
-- `cloudflare-to-aws-waf/rule_index.yaml` — structured rule index from V0 scanner
+- `cloudflare-to-aws-waf/rule_index.json` — structured rule index from V0 scanner
 - `cloudflare-to-aws-waf/cloudflare-security-rules-summary.md` — the summary to validate and fix
 
 Mode-specific inputs:
@@ -68,7 +68,7 @@ Read the references relevant to your mode:
 ### 0. Read Inputs and References
 
 1. Identify your mode from the query (V1, V2, V3, or V4).
-2. Read `cloudflare-to-aws-waf/rule_index.yaml`.
+2. Read `cloudflare-to-aws-waf/rule_index.json`.
 3. Read the reference documents listed for your mode above.
 4. Read the summary file. **For V1/V2/V3**: you will read the full summary but only validate rules in your assigned scope — ignore rules outside your range.
 5. Read the mode-specific input files:
@@ -77,7 +77,7 @@ Read the references relevant to your mode:
    - **V3**: Use glob to find Rate-limits.txt under the config path.
    - **V4**: Read all validation report JSONs from `cloudflare-to-aws-waf/validation/`.
 
-**For V2 mode:** The chunk file is a bare JSON array of Cloudflare rule objects (not the full CloudflareBackup response). The query specifies the position range (e.g., "custom rules 1-50"). Use rule_index.yaml to identify which rules in the summary correspond to this range, then locate them in the summary by their heading/name.
+**For V2 mode:** The chunk file is a bare JSON array of Cloudflare rule objects (not the full CloudflareBackup response). The query specifies the position range (e.g., "custom rules 1-50"). Use rule_index.json to identify which rules in the summary correspond to this range, then locate them in the summary by their heading/name.
 
 ### 1. Run Validation Checks
 
@@ -92,7 +92,7 @@ Run only the checks relevant to your mode. Collect all issues before fixing anyt
 For each rule in the original config (or chunk), verify it appears in the summary. For each summary entry in your scope, verify it corresponds to an original rule.
 
 - **V1**: Check IP Access Rules section against IP-Access-Rules.txt.
-- **V2**: Check the chunk's rules against the corresponding entries in Summary Section 3. Use rule_index.yaml positions to identify which summary entries belong to this chunk.
+- **V2**: Check the chunk's rules against the corresponding entries in Summary Section 3. Use rule_index.json positions to identify which summary entries belong to this chunk.
 - **V3**: Check Rate Limiting Rules section against Rate-limits.txt.
 
 ---
@@ -198,7 +198,7 @@ For each rule marked ⚠️ Partial in this chunk:
 - Planned statement includes ONLY convertible conditions
 - Non-convertible conditions are excluded and documented in Section 5
 
-For non-skip custom rules: use rule_index.yaml to determine if this rule is positioned after a skip rule with `skip:all_remaining_custom_rules`. If so, verify the summary describes the scope-down.
+For non-skip custom rules: use rule_index.json to determine if this rule is positioned after a skip rule with `skip:all_remaining_custom_rules`. If so, verify the summary describes the scope-down.
 
 ---
 
@@ -206,8 +206,8 @@ For non-skip custom rules: use rule_index.yaml to determine if this rule is posi
 
 **Modes: V2, V3**
 
-- **V2**: Skip rules themselves NEVER have scope-down. Non-skip custom rules after a skip rule with `skip:all_remaining_custom_rules` (check rule_index.yaml positions) should have scope-down noted.
-- **V3**: If rule_index.yaml shows `skip_labels_present.http_ratelimit` is true, verify each rate-limit rule has scope-down for `skip:http_ratelimit` noted. Rate-limit rules NEVER check `skip:all_remaining_custom_rules`.
+- **V2**: Skip rules themselves NEVER have scope-down. Non-skip custom rules after a skip rule with `skip:all_remaining_custom_rules` (check rule_index.json positions) should have scope-down noted.
+- **V3**: If rule_index.json shows `skip_labels_present.http_ratelimit` is true, verify each rate-limit rule has scope-down for `skip:http_ratelimit` noted. Rate-limit rules NEVER check `skip:all_remaining_custom_rules`.
 
 ---
 

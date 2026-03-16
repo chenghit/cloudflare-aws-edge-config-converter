@@ -16,7 +16,7 @@ Orchestrate conversion of Cloudflare configurations to AWS by delegating to spec
 | Subagent | Handles | Trigger when user mentions |
 |----------|---------|---------------------------|
 | `cf-waf-analyzer` | Security rules → analysis summary (3 batches) | WAF, firewall, rate limiting, IP rules, security rules |
-| `cf-waf-summary-scanner` | Summary → rule_index.yaml (V0 pre-scan) | (invoked automatically after analyzer) |
+| `cf-waf-summary-scanner` | Summary → rule_index.json (V0 pre-scan) | (invoked automatically after analyzer) |
 | `cf-waf-analyzer-validator` | Validates summary in parallel batches (V1/V2/V3/V4) | (invoked automatically after scanner) |
 | `cf-waf-terraform-generator` | Validated summary → AWS WAF Terraform | (invoked automatically after validator passes) |
 
@@ -141,7 +141,7 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
 
 **Step 2a: V0 Pre-scan**
 1. Set `validation_round = 1`.
-2. Invoke `cf-waf-summary-scanner` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-summary-scanner/SKILL.md and follow its workflow. Scan the WAF summary and generate rule_index.yaml. Generate output files in {user_language}."`
+2. Invoke `cf-waf-summary-scanner` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-summary-scanner/SKILL.md and follow its workflow. Scan the WAF summary and generate rule_index.json. Generate output files in {user_language}."`
 3. If scanner fails → stop and report.
 
 **Step 2b: Count validation + JSON chunking**
@@ -169,7 +169,7 @@ Invoke: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/
 
 Check the `---RESULT---` block:
 - `STATUS: PASS` → if depth is "analyze", proceed to Step 4. If depth is "convert", proceed to Stage 3.
-- `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise, delete `cloudflare-to-aws-waf/rule_index.yaml`, `cloudflare-to-aws-waf/validation/`, and `cloudflare-to-aws-waf/chunks/`, then re-run Stage 2 from Step 2a.
+- `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise, delete `cloudflare-to-aws-waf/rule_index.json`, `cloudflare-to-aws-waf/validation/`, and `cloudflare-to-aws-waf/chunks/`, then re-run Stage 2 from Step 2a.
 - `STATUS: CANNOT_FIX` → stop and tell the user which issues require manual intervention.
 
 **Stage 3: Generate Terraform** (only if depth is "convert")

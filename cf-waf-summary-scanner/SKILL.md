@@ -1,6 +1,6 @@
 ---
 name: cf-waf-summary-scanner
-description: Pre-scans the WAF security rules summary to extract a structured rule index (rule_index.yaml). This is the first validation stage (V0) — it only extracts information, does not validate or modify the summary. Use after cf-waf-analyzer has generated cloudflare-security-rules-summary.md.
+description: Pre-scans the WAF security rules summary to extract a structured rule index (rule_index.json). This is the first validation stage (V0) — it only extracts information, does not validate or modify the summary. Use after cf-waf-analyzer has generated cloudflare-security-rules-summary.md.
 ---
 
 # WAF Summary Scanner (V0)
@@ -17,7 +17,7 @@ Extract a structured rule index from `cloudflare-to-aws-waf/cloudflare-security-
 
 ## Output
 
-- `cloudflare-to-aws-waf/rule_index.yaml` — structured rule index
+- `cloudflare-to-aws-waf/rule_index.json` — structured rule index
 
 ## Workflow
 
@@ -57,33 +57,37 @@ Scan all skip rules' labels and set three boolean flags:
 - `http_ratelimit`: true if ANY skip rule has `skip:http_ratelimit`
 - `http_request_firewall_managed`: true if ANY skip rule has `skip:http_request_firewall_managed`
 
-### 3. Write rule_index.yaml
+### 3. Write rule_index.json
 
-Write the extracted data to `cloudflare-to-aws-waf/rule_index.yaml` in this exact format:
+Write the extracted data to `cloudflare-to-aws-waf/rule_index.json` in this exact format:
 
-```yaml
-ip_access_rules:
-  count: <number>
-  rules:
-    - { position: 1, name: "<name>", convertibility: "<yes|partial|no>" }
-    # ...
-
-custom_rules:
-  count: <number>
-  skip_labels_present:
-    all_remaining_custom_rules: <true|false>
-    http_ratelimit: <true|false>
-    http_request_firewall_managed: <true|false>
-  rules:
-    - { position: 1, name: "<name>", type: "<action>", convertibility: "<yes|partial|no>" }
-    - { position: 3, name: "<name>", type: "skip", convertibility: "yes", labels: ["skip:http_request_firewall_managed"] }
-    # ...
-
-rate_limiting_rules:
-  count: <number>
-  rules:
-    - { position: 1, name: "<name>", convertibility: "<yes|partial|no>" }
-    # ...
+```json
+{
+  "ip_access_rules": {
+    "count": 20,
+    "rules": [
+      { "position": 1, "name": "block-cn-ips", "convertibility": "yes" }
+    ]
+  },
+  "custom_rules": {
+    "count": 150,
+    "skip_labels_present": {
+      "all_remaining_custom_rules": true,
+      "http_ratelimit": true,
+      "http_request_firewall_managed": true
+    },
+    "rules": [
+      { "position": 1, "name": "block-bad-ua", "type": "block", "convertibility": "yes" },
+      { "position": 3, "name": "skip-managed-for-office", "type": "skip", "convertibility": "yes", "labels": ["skip:http_request_firewall_managed"] }
+    ]
+  },
+  "rate_limiting_rules": {
+    "count": 30,
+    "rules": [
+      { "position": 1, "name": "rate-limit-api", "convertibility": "yes" }
+    ]
+  }
+}
 ```
 
 **CRITICAL:** The `count` field MUST equal the length of the `rules` array in each section. If you are unsure about a rule's position or attributes, include it anyway — the orchestrator will run a deterministic count validation script after this step.
@@ -94,7 +98,7 @@ rate_limiting_rules:
 ---RESULT---
 STATUS: COMPLETE
 OUTPUT_FILES:
-  - cloudflare-to-aws-waf/rule_index.yaml
+  - cloudflare-to-aws-waf/rule_index.json
 COUNTS:
   ip_access_rules: <number>
   custom_rules: <number>
