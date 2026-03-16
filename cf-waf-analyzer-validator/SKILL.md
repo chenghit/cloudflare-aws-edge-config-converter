@@ -91,6 +91,10 @@ Run only the checks relevant to your mode. Collect all issues before fixing anyt
 
 For each rule in the original config (or chunk), verify it appears in the summary. For each summary entry in your scope, verify it corresponds to an original rule.
 
+**Excluded from this check:**
+- Managed rules and DDoS protection rules in the original files (these are out of scope for conversion)
+- IP Lists (verified separately in Check 2)
+
 - **V1**: Check IP Access Rules section against IP-Access-Rules.txt.
 - **V2**: Check the chunk's rules against the corresponding entries in Summary Section 3. Use rule_index.json positions to identify which summary entries belong to this chunk.
 - **V3**: Check Rate Limiting Rules section against Rate-limits.txt.
@@ -159,6 +163,11 @@ For each skip rule in this chunk:
 
 **Part C — Scope-Down Impact Description:**
 - Verify the summary accurately describes which downstream rules are affected
+- If skip rule has `skip:all_remaining_custom_rules` but NOT `skip:http_ratelimit`: summary must explicitly state "Does NOT skip rate-limiting rules"
+- If skip rule has `skip:http_ratelimit` but NOT `skip:all_remaining_custom_rules`: summary must explicitly state "Does NOT skip remaining custom rules"
+- If skip rule has `skip:http_request_firewall_managed`: summary must explicitly state this only affects managed rules
+- Skip rules themselves are NEVER affected by other skip rules
+- If there are multiple skip rules with `skip:all_remaining_custom_rules`, a downstream custom rule only needs ONE scope-down check for that label (not multiple — the label key is the same regardless of which skip rule produced it)
 
 ---
 
@@ -167,6 +176,8 @@ For each skip rule in this chunk:
 **Modes: V1, V2**
 
 For each rule in your scope, verify splitting strategy:
+
+**Rate-limiting rules are excluded from Parts A-D** — they are NEVER split (splitting causes independent rate tracking and changes semantics).
 
 **Part A — Top-level OR splitting:** If expression has top-level OR, summary must note split.
 **Part B — IPv4/IPv6 splitting:** Check actual IP list contents for mixed addresses.
@@ -221,7 +232,19 @@ For non-skip custom rules: use rule_index.json to determine if this rule is posi
 
 **V4 mode only:** V4 is responsible for applying all fixes. Read the `details` array from each V1/V2/V3 report, and for each issue with `"action": "fixed"`, apply the fix to `cloudflare-security-rules-summary.md` using `fs_write` str_replace. Apply fixes serially to avoid race conditions.
 
-**V1/V2/V3 modes:** Do NOT fix the summary yourself. Record each issue in the JSON report with the `action` field set to `"fixed"` (if fixable) or `"cannot_fix"`. Include enough detail in the `issue` and `fix` fields for V4 to apply the fix. For example:
+**V1/V2/V3 modes:** Do NOT fix the summary yourself. Record each issue in the JSON report with the `action` field set to `"fixed"` (if fixable) or `"cannot_fix"`. Include enough detail in the `issue` and `fix` fields for V4 to apply the fix.
+
+Common fix patterns (for the `fix` field):
+- **Missing or extra rules**: Provide the full rule text to add, or the heading text to remove
+- **Wrong convertibility status**: Provide old status marker and new status marker
+- **Wrong rule order**: Describe the reordering needed
+- **Incomplete skip rule documentation**: Provide the complete action_parameters, RuleLabels, and scope-down description
+- **Missing or incorrect splitting annotations**: Provide the correct split strategy text
+- **Wrong AWS WAF statement type**: Provide the corrected statement type
+- **Incorrect rate-limit calculation**: Provide the correct Limit and EvaluationWindowSec with calculation
+- **Incorrect scope-down content**: Provide the corrected scope-down description
+
+Example:
 
 ```json
 {
@@ -253,6 +276,8 @@ Also verify:
 - Rate-limit rules don't check `skip:all_remaining_custom_rules`
 
 Write `cloudflare-to-aws-waf/validator-report.md`:
+
+**CRITICAL**: If a previous `validator-report.md` exists (from a prior validation round), read it first and preserve the Changelog section. Append the new round's entry to the existing changelog.
 
 ```markdown
 # Validator Report
