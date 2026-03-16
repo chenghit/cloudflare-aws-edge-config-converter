@@ -15,6 +15,7 @@ fi
 REMOVED_COUNT=0
 for agent in \
   cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator cf-waf-converter \
+  cf-functions-converter \
   \
   cf-cdn-dns-parser cf-cdn-input-validator cf-cdn-per-domain-processor \
   cf-cdn-ir-chunk-validator cf-cdn-ir-finalizer cf-cdn-ir-final-validator \

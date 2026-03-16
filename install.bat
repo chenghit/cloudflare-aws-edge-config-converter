@@ -12,7 +12,7 @@ if not exist "%AGENTS_DIR%" mkdir "%AGENTS_DIR%"
 
 :: Clean old skills (including deprecated cf-waf-converter)
 echo Cleaning old skills...
-for %%D in (cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator cf-waf-converter cf-cdn-dns-parser cf-cdn-input-validator cf-cdn-per-domain-processor cf-cdn-ir-chunk-validator cf-cdn-ir-finalizer cf-cdn-ir-final-validator cf-cdn-tf-shared-policies cf-cdn-tf-domain cf-cdn-js-validator) do (
+for %%D in (cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator cf-waf-converter cf-functions-converter cf-cdn-dns-parser cf-cdn-input-validator cf-cdn-per-domain-processor cf-cdn-ir-chunk-validator cf-cdn-ir-finalizer cf-cdn-ir-final-validator cf-cdn-tf-shared-policies cf-cdn-tf-domain cf-cdn-js-validator) do (
     if exist "%SKILLS_DIR%\%%D" rmdir /s /q "%SKILLS_DIR%\%%D"
 )
 if exist "%SKILLS_DIR%\SKILL.md" del /q "%SKILLS_DIR%\SKILL.md"
@@ -20,6 +20,7 @@ if exist "%SKILLS_DIR%\scripts" rmdir /s /q "%SKILLS_DIR%\scripts"
 
 :: Remove deprecated subagent
 if exist "%AGENTS_DIR%\cf-waf-converter.json" del /q "%AGENTS_DIR%\cf-waf-converter.json"
+if exist "%AGENTS_DIR%\cf-functions-converter.json" del /q "%AGENTS_DIR%\cf-functions-converter.json"
 
 :: Copy skills
 echo Copying skills to %SKILLS_DIR%...

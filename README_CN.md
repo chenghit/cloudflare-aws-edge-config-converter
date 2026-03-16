@@ -195,11 +195,11 @@ cd cloudflare-aws-edge-config-converter
 
 ## 更多信息
 
-- [最佳实践](./docs/best-practices.md)
-- [部署指南](./docs/deployment-guide.md)
-- [限制与注意事项](./docs/limitations.md)
-- [故障排除](./docs/troubleshooting.md)
-- [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)
+- [最佳实践](./docs/best-practices_CN.md)
+- [部署指南](./docs/deployment-guide_CN.md)
+- [限制与注意事项](./docs/limitations_CN.md)
+- [故障排除](./docs/troubleshooting_CN.md)
+- [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming_CN.md)
 
 ## 相关资源
 

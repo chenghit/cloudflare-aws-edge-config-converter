@@ -18,6 +18,7 @@ rm -rf \
   "$SKILLS_DIR/cf-waf-analyzer-validator" \
   "$SKILLS_DIR/cf-waf-terraform-generator" \
   "$SKILLS_DIR/cf-waf-converter" \
+  "$SKILLS_DIR/cf-functions-converter" \
   "$SKILLS_DIR/cf-cdn-dns-parser" \
   "$SKILLS_DIR/cf-cdn-input-validator" \
   "$SKILLS_DIR/cf-cdn-per-domain-processor" \
@@ -48,6 +49,7 @@ cp -r cloudflare-aws-converter/scripts "$SKILLS_DIR/"
 # Copy subagent configurations
 echo "Copying subagent configurations to $AGENTS_DIR..."
 rm -f "$AGENTS_DIR/cf-waf-converter.json"
+rm -f "$AGENTS_DIR/cf-functions-converter.json"
 cp subagents/cf-waf-analyzer.json "$AGENTS_DIR/"
 cp subagents/cf-waf-analyzer-validator.json "$AGENTS_DIR/"
 cp subagents/cf-waf-terraform-generator.json "$AGENTS_DIR/"
