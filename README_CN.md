@@ -70,7 +70,7 @@ kiro-cli chat
 
 本工具作为 Kiro CLI skill 运行，由编排器调度专用 subagent。每个 subagent 拥有隔离的上下文，负责一个流程阶段。
 
-**WAF 流程**（3 阶段）：分析 → 校验 → 生成 Terraform
+**WAF 流程**（4 阶段）：分析（3 批次）→ 扫描 + 校验（并行）→ 生成 Terraform → terraform validate
 
 **CDN 流程**（9 阶段）：解析 DNS → 校验用户输入 → 按域名处理规则 → 校验 IR → 合并去重 → 校验最终 IR → 生成共享策略 → 生成每域名 Terraform + JS → 校验 JS
 
@@ -78,7 +78,7 @@ kiro-cli chat
 flowchart TD
     User([用户]) -->|"转换 WAF / CDN / 全部"| Main["编排器"]
 
-    Main -->|WAF| WAF_A["分析器"] --> WAF_V["校验器"] -->|通过| WAF_G["TF 生成器"] --> WAF_Done([WAF Terraform ✅])
+    Main -->|WAF| WAF_A["分析器 × 3"] --> WAF_S["扫描器"] --> WAF_V["校验器 × N"] -->|通过| WAF_G["TF 生成器"] --> WAF_T{{"terraform validate"}} --> WAF_Done([WAF Terraform ✅])
 
     Main -->|CDN| CDN1["DNS 解析"] -->|CSV| Pause[/"⏸ 用户填写 CSV"/]
     Pause --> CDN2["输入校验"]

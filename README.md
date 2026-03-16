@@ -70,7 +70,7 @@ Not all Cloudflare features have CloudFront equivalents. Non-convertible items a
 
 The tool runs as a Kiro CLI skill with an orchestrator that dispatches to specialized subagents. Each subagent has isolated context and handles one pipeline stage.
 
-**WAF pipeline** (3 stages): analyze → validate → generate Terraform
+**WAF pipeline** (4 stages): analyze (3 batches) → scan + validate (parallel) → generate Terraform → terraform validate
 
 **CDN pipeline** (9 stages): parse DNS → validate user input → process rules per domain → validate IR → finalize + dedup → validate final IR → generate shared policies → generate per-domain Terraform + JS → validate JS
 
@@ -78,7 +78,7 @@ The tool runs as a Kiro CLI skill with an orchestrator that dispatches to specia
 flowchart TD
     User([User]) -->|"Convert WAF / CDN / All"| Main["Orchestrator"]
 
-    Main -->|WAF| WAF_A["Analyzer"] --> WAF_V["Validator"] -->|PASS| WAF_G["TF Generator"] --> WAF_Done([WAF Terraform ✅])
+    Main -->|WAF| WAF_A["Analyzer × 3"] --> WAF_S["Scanner"] --> WAF_V["Validator × N"] -->|PASS| WAF_G["TF Generator"] --> WAF_T{{"terraform validate"}} --> WAF_Done([WAF Terraform ✅])
 
     Main -->|CDN| CDN1["DNS Parser"] -->|CSV| Pause[/"⏸ User fills CSV"/]
     Pause --> CDN2["Input Validator"]
