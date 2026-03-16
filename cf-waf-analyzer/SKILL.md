@@ -151,7 +151,8 @@ Parse JSON to Cloudflare rule expressions. Process ALL rules in the file — `ma
         ]
       }
     ]
-  }
+  },
+  "non_convertible_notes": []
 }
 ```
 
@@ -165,14 +166,7 @@ Parse JSON to Cloudflare rule expressions. Process ALL rules in the file — `ma
 - `split_count > 1` and `ip_sets` only when value contains mixed IPv4/IPv6. Most rules have `split_count: 1` with no `ip_sets`.
 - `name` = descriptive name derived from the rule (Cloudflare IP Access Rules don't have names — derive from mode + target + value)
 
-**non_convertible_notes** (MANDATORY — output empty array if none). In practice IP Access Rules are always convertible, but include the field for consistency:
-```json
-{
-  "ip_lists": [...],
-  "ip_access_rules": {...},
-  "non_convertible_notes": []
-}
-```
+**non_convertible_notes** (MANDATORY — output empty array if none). In practice IP Access Rules are always convertible, but include the field for consistency.
 
 ---
 
