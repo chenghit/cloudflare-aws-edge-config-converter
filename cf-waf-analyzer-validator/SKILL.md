@@ -52,16 +52,15 @@ Report JSON format (V1/V2/V3):
       "issue": "...",
       "action": "fixed|cannot_fix",
       "fix": {
-        "path": "custom_rules.rules[2].convertibility",
-        "old_value": "no",
-        "new_value": "partial"
+        "old_text": "\"name\": \"rule-name\",\n    \"convertibility\": \"no\"",
+        "new_text": "\"name\": \"rule-name\",\n    \"convertibility\": \"partial\""
       }
     }
   ]
 }
 ```
 
-**Fix format for V1/V2/V3 reports:** Each fix specifies a JSON path within waf_ir.json and the old/new values. V4 uses these to apply str_replace on the JSON text. Include the rule `name` field in the fix for unique identification.
+**Fix format for V1/V2/V3 reports:** Each fix uses `old_text`/`new_text` pairs for `fs_write` str_replace on waf_ir.json. Include the rule's `"name"` field as context to ensure unique matching. V4 applies these directly.
 
 ## Reference Documents
 
@@ -162,7 +161,7 @@ For each skip rule in this chunk:
 **Part C — skip_labels_present Consistency:**
 - If this chunk has a skip rule with `skip:all_remaining_custom_rules` label → `custom_rules.skip_labels_present.all_remaining_custom_rules` must be `true`
 - Same for `http_ratelimit` and `http_request_firewall_managed`
-- If skip rule does NOT skip a phase, verify the summary explicitly does NOT include that label
+- If skip rule does NOT skip a phase, verify the IR does NOT include that phase's label in the rule's `labels` array
 
 ---
 

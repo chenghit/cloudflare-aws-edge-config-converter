@@ -36,7 +36,7 @@ merged = {
     "ip_access_rules": ip.get("ip_access_rules", {}),
     "custom_rules": custom.get("custom_rules", {}),
     "rate_limiting_rules": rate.get("rate_limiting_rules", {}),
-    "non_convertible_notes": custom.get("non_convertible_notes", []) + rate.get("non_convertible_notes", []),
+    "non_convertible_notes": ip.get("non_convertible_notes", []) + custom.get("non_convertible_notes", []) + rate.get("non_convertible_notes", []),
 }
 
 out_path = os.path.join(waf_dir, "waf_ir.json")

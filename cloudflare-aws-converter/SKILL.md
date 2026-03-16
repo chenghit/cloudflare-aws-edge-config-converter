@@ -177,7 +177,7 @@ Invoke: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/
 
 Check the `---RESULT---` block:
 - `STATUS: PASS` → if depth is "analyze", proceed to Step 4. If depth is "convert", proceed to Stage 3.
-- `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise, delete `cloudflare-to-aws-waf/validation/` and `cloudflare-to-aws-waf/chunks/`, then re-run Stage 2 from Step 2a (re-merge to pick up V4 fixes, re-count, re-chunk, re-validate).
+- `STATUS: FIXED` → increment `validation_round`. If `validation_round > 3`, stop and tell the user manual review is required. Otherwise, delete `cloudflare-to-aws-waf/validation/` and `cloudflare-to-aws-waf/chunks/`, then re-run Stage 2 from Step 2a **but skip the merge step** (V4 already applied fixes to waf_ir.json — re-merging from batch JSONs would overwrite those fixes). Start from count validation instead.
 - `STATUS: CANNOT_FIX` → stop and tell the user which issues require manual intervention.
 
 **Stage 3: Generate Terraform** (only if depth is "convert")

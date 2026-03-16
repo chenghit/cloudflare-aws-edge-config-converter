@@ -72,6 +72,7 @@ Each rule has `action`, `expression`, `convertibility`, `aws_statement_type`, `s
 - `split.required: true` → read `split.branches` for per-branch statement types and IP set names
 - `split.total_aws_rules` → number of AWS WAF rules this generates
 - `scope_down.skip_all_remaining_custom_rules: true` → wrap in NOT label_match scope-down
+- `aws_action` (if present) → use instead of `action` for Terraform action block (`"challenge"` → `challenge {}`, `"captcha"` → `captcha {}`)
 - Skip rules have `labels` array → use verbatim for `rule_label` blocks
 - Partial rules have `convertible_expression` + `aws_statement_type` → generate statement from these
 - `ip_sets` array (if present) → create IP set resources
@@ -146,9 +147,10 @@ Proceed directly to generating Terraform. Do NOT wait for user confirmation.
 
 **Step 1: Generate `ip_sets.tf`** (root directory)
 
-Create all IP set resources — shared between both Web ACLs:
-- Named IP lists from `ip_lists` where `conversion == "ip_set"`
-- Inline IP sets from rules' `ip_sets` arrays
+Create all IP set resources — shared between both Web ACLs. Collect from THREE sources:
+1. `ip_lists` where `conversion == "ip_set"` → create `<name>-ipv4` and `<name>-ipv6` resources
+2. `ip_access_rules.rules[].ip_sets` → inline IP sets from mixed IPv4/IPv6 access rules
+3. `custom_rules.rules[].ip_sets` → inline IP sets from split custom rules
 
 **Step 2: Generate `modules/waf/main.tf`**
 
@@ -166,8 +168,8 @@ Web ACL resource with rules in priority order. Reference IP sets via `var.ip_set
 - Subsequent managed rules → `scope_down_statement { not_statement { label_match } }`
 
 **Challenge action conversion:**
-- `interactive_challenge` → `captcha {}`
-- `js_challenge`, `managed_challenge` → `challenge {}`
+- If rule has `aws_action` field → use it: `"challenge"` → `challenge {}`, `"captcha"` → `captcha {}`
+- If no `aws_action` field → use `action` directly: `block` → `block {}`, `allow` → `allow {}`, `count` → `count {}`
 
 **All AWS managed rules use `override_action { count {} }` for monitoring.**
 

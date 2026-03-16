@@ -165,6 +165,15 @@ Parse JSON to Cloudflare rule expressions. Process ALL rules in the file — `ma
 - `split_count > 1` and `ip_sets` only when value contains mixed IPv4/IPv6. Most rules have `split_count: 1` with no `ip_sets`.
 - `name` = descriptive name derived from the rule (Cloudflare IP Access Rules don't have names — derive from mode + target + value)
 
+**non_convertible_notes** (MANDATORY — output empty array if none). In practice IP Access Rules are always convertible, but include the field for consistency:
+```json
+{
+  "ip_lists": [...],
+  "ip_access_rules": {...},
+  "non_convertible_notes": []
+}
+```
+
 ---
 
 #### Batch A2: `waf_ir_custom.json`
@@ -262,6 +271,12 @@ Splitting rules (from `references/nesting-and-splitting.md`):
 **scope_down:**
 - `skip_all_remaining_custom_rules: true` if this rule's position is after any skip rule that has `skip:all_remaining_custom_rules` label
 - Skip rules themselves always have `skip_all_remaining_custom_rules: false`
+
+**Challenge action mapping** — include `aws_action` field when the Cloudflare action differs from the AWS action name:
+- `managed_challenge` → `"aws_action": "challenge"`
+- `js_challenge` → `"aws_action": "challenge"`
+- `interactive_challenge` → `"aws_action": "captcha"`
+- `block`, `allow`, `skip`, `challenge` → no `aws_action` field needed (action name maps directly or is handled specially)
 
 **For partial rules**, include:
 ```json
