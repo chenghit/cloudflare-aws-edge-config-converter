@@ -30,6 +30,8 @@ kiro-cli chat
 将 /path/to/cloudflare-backup 中的全部 Cloudflare 配置转换到 AWS
 ```
 
+请始终提供 CloudflareBackup 的根目录（包含 `account/` 和 zone 子目录如 `example.com/` 的那个目录）。不要提供子目录——WAF 规则引用的 IP 列表位于 zone 目录之外的 account 级目录中。
+
 如需在没有自己配置的情况下测试，可使用 `examples/cloudflare-configs/`。
 
 ## 前提条件
