@@ -150,6 +150,10 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
    - If exit code 0 → proceed.
 2. Run JSON chunking: `python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-chunk-rules.py "{config_path}" "cloudflare-to-aws-waf" 50`
    - Capture the output lines (chunk file paths) for use in V2 dispatch.
+   - If output is `NO_RULES` (0 custom rules), skip all V2 dispatches in Step 2c.
+3. Read `cloudflare-to-aws-waf/waf_ir.json` (or `rule_index.json`) to check rule counts:
+   - If `ip_access_rules.count == 0`, skip V1 in Step 2c.
+   - If `rate_limiting_rules.count == 0`, skip V3 in Step 2c.
 
 **Step 2c: Parallel validation (V1 + V2 chunks + V3)**
 

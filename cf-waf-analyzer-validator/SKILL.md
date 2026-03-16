@@ -217,7 +217,7 @@ For non-skip custom rules: use rule_index.json to determine if this rule is posi
 
 **Modes: V2, V3**
 
-- **V2**: Skip rules themselves NEVER have scope-down. Non-skip custom rules after a skip rule with `skip:all_remaining_custom_rules` (check rule_index.json positions) should have scope-down noted.
+- **V2**: Skip rules themselves NEVER have scope-down. Non-skip custom rules after a skip rule with `skip:all_remaining_custom_rules` (check rule_index.json positions) should have scope-down noted. Use rule_index.json to identify all skip rules and their positions — a non-skip custom rule at position P needs scope-down for `skip:all_remaining_custom_rules` if ANY skip rule at position < P has that label.
 - **V3**: If rule_index.json shows `skip_labels_present.http_ratelimit` is true, verify each rate-limit rule has scope-down for `skip:http_ratelimit` noted. Rate-limit rules NEVER check `skip:all_remaining_custom_rules`.
 
 ---
@@ -268,7 +268,7 @@ Example:
 - Any FIXED, no CANNOT_FIX → global FIXED (apply all fixes serially to the summary)
 - Any CANNOT_FIX → global CANNOT_FIX
 
-**Apply fixes (V4 only):** For each report with status FIXED, iterate through the `details` array. For each entry with `"action": "fixed"`, use `fs_write` str_replace with the `old_text` and `new_text` from the `fix` field. Apply fixes one at a time, serially.
+**Apply fixes (V4 only):** For each report with status FIXED, iterate through the `details` array. For each entry with `"action": "fixed"`, use `fs_write` str_replace with the `old_text` and `new_text` from the `fix` field. Apply fixes one at a time, serially. If a str_replace fails (old_text not found — possibly due to a prior fix changing the surrounding text), log it as a warning in the report and continue with the remaining fixes.
 
 Also verify:
 - Check 4A (section order)
