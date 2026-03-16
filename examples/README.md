@@ -12,13 +12,6 @@
 
 These can be used to test conversion without your own Cloudflare backup.
 
-## Conversation History
-
-`conversation-history/` contains complete conversation transcripts showing how to use each skill:
-
-- `cloudflare-to-aws-waf.txt` — WAF conversion (3-stage pipeline: analyzer → validator → generator)
-- CDN full pipeline example — coming soon
-
 ## How to Use
 
 ```bash

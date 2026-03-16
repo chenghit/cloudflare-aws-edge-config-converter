@@ -12,13 +12,6 @@
 
 可以用这些示例在没有自己 Cloudflare 备份的情况下测试转换。
 
-## 对话历史
-
-`conversation-history/` 包含完整的对话记录，展示各 skill 的使用方式：
-
-- `cloudflare-to-aws-waf.txt` — WAF 转换（3 阶段 pipeline：分析 → 校验 → 生成）
-- CDN 完整流程示例 — 即将补充
-
 ## 使用方法
 
 ```bash
