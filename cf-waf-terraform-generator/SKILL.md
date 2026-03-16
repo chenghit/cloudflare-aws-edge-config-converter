@@ -143,35 +143,18 @@ Present the plan as a summary in your response, then proceed directly to generat
 
 ### 3. Generate Terraform Files
 
-**Step 1: Generate `versions.tf`** (root directory)
-```hcl
-terraform {
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 6.2"
-    }
-  }
-}
-```
+**Pre-written files (DO NOT generate — already created by waf-init.sh):**
+- `versions.tf`
+- `modules/waf/variables.tf`
+- `modules/waf/outputs.tf`
 
-**Step 2: Generate `ip_sets.tf`** (root directory)
+**Step 1: Generate `ip_sets.tf`** (root directory)
 
 Create all IP set resources here — shared between both Web ACLs. Include:
 - Named IP lists from Section 1 (split into IPv4/IPv6)
 - Inline IP sets from Section 3 splitting annotations
 
-**Step 3: Generate `modules/waf/variables.tf`**
-
-```hcl
-variable "web_acl_name" { type = string }
-variable "anti_ddos_use_advanced_config" { type = bool }
-variable "anti_ddos_challenge_action" { type = string }
-variable "anti_ddos_block_sensitivity" { type = string }
-variable "ip_set_arns" { type = map(string) }
-```
-
-**Step 4: Generate `modules/waf/main.tf`**
+**Step 2: Generate `modules/waf/main.tf`**
 
 Web ACL resource with rules in priority order. Reference IP sets via `var.ip_set_arns["set_name"]`.
 
@@ -194,9 +177,7 @@ Web ACL resource with rules in priority order. Reference IP sets via `var.ip_set
 
 See `references/aws-managed-rules.md` for complete templates.
 
-**Step 5: Generate `modules/waf/outputs.tf`**
-
-**Step 6: Generate root `main.tf`**
+**Step 3: Generate root `main.tf`**
 
 Create `locals.ip_set_arns` map and call module twice:
 - `waf_website`: challenge enabled, basic Anti-DDoS
@@ -205,12 +186,10 @@ Create `locals.ip_set_arns` map and call module twice:
 ### 4. Validate Generated Terraform
 
 **File Structure Verification:**
-- [ ] `versions.tf` exists
 - [ ] `ip_sets.tf` exists with all IP set resources
 - [ ] `main.tf` exists with locals and two module calls
 - [ ] `modules/waf/main.tf` exists (Web ACL only, no IP sets)
-- [ ] `modules/waf/variables.tf` exists
-- [ ] `modules/waf/outputs.tf` exists
+- [ ] Pre-written files untouched: `versions.tf`, `modules/waf/variables.tf`, `modules/waf/outputs.tf`
 
 **Self-Check Checklist:**
 - [ ] IP sets in root `ip_sets.tf`, referenced via `var.ip_set_arns` in module
@@ -246,12 +225,9 @@ After all files are generated, end your response with this exact block:
 ---RESULT---
 STATUS: COMPLETE
 OUTPUT_FILES:
-  - cloudflare-to-aws-waf/versions.tf
   - cloudflare-to-aws-waf/ip_sets.tf
   - cloudflare-to-aws-waf/main.tf
   - cloudflare-to-aws-waf/modules/waf/main.tf
-  - cloudflare-to-aws-waf/modules/waf/variables.tf
-  - cloudflare-to-aws-waf/modules/waf/outputs.tf
   - cloudflare-to-aws-waf/README_aws-waf-terraform-deployment.md
 ---END---
 ```

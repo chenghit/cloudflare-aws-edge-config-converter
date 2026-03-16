@@ -44,9 +44,31 @@ cloudflare-to-aws-waf/
 
 ## Workflow
 
-### 0. Read All Reference Documents (CRITICAL - Must be first)
+### 0. Read Reference Documents (CRITICAL - Must be first)
 
-**Before starting any analysis, you MUST read ALL reference documents:**
+**Before starting any analysis, read the reference documents specified for your batch.**
+
+The orchestrator invokes this skill in 3 batches. Each batch processes specific rule types and writes specific summary sections. The batch is specified in the invocation query.
+
+**Batch A1 (IP Lists + IP Access Rules):**
+- Read: `references/field-conversions.md`, `references/non-convertible-rules.md`
+- Process: IP-Lists.txt, List-Items-*.txt, IP-Access-Rules.txt
+- Write: Summary Section 1 (IP Lists) + Section 2 (IP Access Rules)
+- Use `fs_write` create mode (creates new file)
+
+**Batch A2 (WAF Custom Rules):**
+- Read: ALL 5 reference documents
+- Process: WAF-Custom-Rules.txt, IP-Lists.txt, List-Items-*.txt
+- Write: Summary Section 3 (WAF Custom Rules) + Section 5 (Manual Intervention notes)
+- Use `fs_write` append mode (appends to file created by A1)
+
+**Batch A3 (Rate Limiting Rules):**
+- Read: `references/action-conversions.md`, `references/common-mistakes.md`
+- Process: Rate-limits.txt
+- Write: Summary Section 4 (Rate Limiting Rules) + append to Section 5 if any partial/non-convertible rate limiting rules
+- Use `fs_write` append mode (appends to file created by A1+A2)
+
+**After reading the required references for your batch, proceed to Step 1.**
 
 1. `references/non-convertible-rules.md` - Which rules cannot be converted and why
 2. `references/action-conversions.md` - Rate limiting conversion algorithm (CRITICAL for rate-based rules)
@@ -54,7 +76,7 @@ cloudflare-to-aws-waf/
 4. `references/nesting-and-splitting.md` - Rule splitting strategy (to understand which rules will be split)
 5. `references/common-mistakes.md` - Common errors to avoid (read this LAST)
 
-**After reading all 5 references, proceed to Step 1.**
+**Read only the references listed for your batch above, then proceed to Step 1.**
 
 ### 1. Validate Input
 
@@ -70,7 +92,10 @@ Extract the config path from the query — look for any absolute path (starting 
 
 **CRITICAL: Search entire directory tree, don't assume locations.**
 
-**Step 2.1:** Use glob to find: `**/IP-Lists.txt`, `**/List-Items-*.txt`, `**/IP-Access-Rules.txt`, `**/WAF-Custom-Rules.txt`, `**/Rate-limits.txt`
+**Step 2.1:** Based on your batch, use glob to find the relevant files:
+- **Batch A1**: `**/IP-Lists.txt`, `**/List-Items-*.txt`, `**/IP-Access-Rules.txt`
+- **Batch A2**: `**/WAF-Custom-Rules.txt`, `**/IP-Lists.txt`, `**/List-Items-*.txt`
+- **Batch A3**: `**/Rate-limits.txt`
 
 **Step 2.2:** **MANDATORY VALIDATION - If NO configuration files found, STOP immediately:**
 
@@ -118,6 +143,12 @@ Parse JSON to Cloudflare rule expressions. Ignore managed rules and DDoS protect
 **CRITICAL: Preserve Rule Order**
 
 Both Cloudflare and AWS WAF execute rules sequentially. **Maintain the exact order from original configuration files** in all sections.
+
+**Batch-specific output:**
+
+- **Batch A1**: Use `fs_write` **create** mode to write the summary file. Include a title heading, then Section 1 (IP Lists) and Section 2 (IP Access Rules).
+- **Batch A2**: Use `fs_write` **append** mode. Write Section 3 (WAF Custom Rules) and Section 5 (Manual Intervention notes).
+- **Batch A3**: Use `fs_write` **append** mode. Write Section 4 (Rate Limiting Rules). If any rate limiting rules are partial or non-convertible, also append their notes to Section 5.
 
 **For skip action rules:** Extract and document the COMPLETE `action_parameters` JSON from Cloudflare configuration:
 - Copy the entire `action_parameters` object verbatim in a code block
@@ -183,11 +214,12 @@ Save the summary as `cloudflare-security-rules-summary.md` to avoid conflicts wi
 
 ### Return Result
 
-After the summary file is generated, end your response with this exact block:
+After the summary sections for this batch are written, end your response with this exact block:
 
 ```
 ---RESULT---
 STATUS: COMPLETE
+BATCH: <A1|A2|A3>
 OUTPUT_FILES:
   - cloudflare-to-aws-waf/cloudflare-security-rules-summary.md
 ---END---

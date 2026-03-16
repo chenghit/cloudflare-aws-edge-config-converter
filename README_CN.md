@@ -37,6 +37,8 @@ kiro-cli chat
 - **Kiro CLI** >= 1.24 — [安装文档](https://kiro.dev/docs/getting-started/installation/)。⚠️ 不推荐使用 Kiro IDE（不支持 subagent 中的 `skill://` 资源绑定）。
 - **Terraform** >= 1.8.0，AWS Provider >= 6.x — [安装 Terraform](https://developer.hashicorp.com/terraform/install)
 - **模型**：最低 `claude-sonnet-4.6`。CDN 迁移推荐使用 `claude-sonnet-4.6-1m`（每域名处理和 Terraform 生成的 context 消耗较大，与域名数量无关）。在 Kiro 中通过 `/model` 切换。
+  - **WAF 迁移**：≤ 50 条规则用 `claude-sonnet-4.6`，51–100 条用 `claude-sonnet-4.6-1m`，> 100 条用 `claude-opus-4.6-1m`（generator output token 限制）。"规则"= WAF Custom Rules + Rate Limiting Rules + IP Access Rules 总数。复杂规则（多 OR 分支 + 混合 IPv4/IPv6）可能需要降一档选模型。WAF pipeline 最多支持约 200 条 CF 规则；超过此数建议先在 Cloudflare 端简化规则或手动迁移。
+  - **CDN 迁移**：无论域名数量，统一使用 `claude-sonnet-4.6-1m`。
 - **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。运行前申请通配符证书（如 `*.example.com`），或在 CSV 中留空让 Terraform 自动查找已签发的证书。
 - **输入格式**：仅支持 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 导出。不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)——详见 [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)
 
@@ -178,7 +180,7 @@ cd cloudflare-aws-edge-config-converter
 
 > **使用其他 Agent 工具？** 安装脚本和所有 SKILL.md 文件默认使用 `~/.kiro/skills/` 作为 skill 安装目录（Kiro CLI 约定）。如需配合其他 agent 工具使用，需要：(1) 修改 `install.sh` / `uninstall.sh` 中的目标目录；(2) 在所有 SKILL.md 文件中将 `~/.kiro/skills/` 全局替换为你的 agent 工具的 skill 路径——subagent 之间通过绝对安装路径互相引用。
 
-高级用户可通过 `/agent swap <subagent-name>` 单独运行各流程阶段。可用 subagent：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-per-domain-processor`、`cf-cdn-ir-chunk-validator`、`cf-cdn-ir-finalizer`、`cf-cdn-ir-final-validator`、`cf-cdn-tf-shared-policies`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。
+高级用户可通过 `/agent swap <subagent-name>` 单独运行各流程阶段。可用 subagent：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-waf-summary-scanner`、`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-per-domain-processor`、`cf-cdn-ir-chunk-validator`、`cf-cdn-ir-finalizer`、`cf-cdn-ir-final-validator`、`cf-cdn-tf-shared-policies`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。
 
 ## Subagent 权限与安全
 
