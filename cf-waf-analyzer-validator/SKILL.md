@@ -73,7 +73,7 @@ Read the references relevant to your mode:
 4. Read the summary file. **For V1/V2/V3**: you will read the full summary but only validate rules in your assigned scope — ignore rules outside your range.
 5. Read the mode-specific input files:
    - **V1**: Use glob to find IP-Access-Rules.txt, IP-Lists.txt, List-Items-*.txt under the config path.
-   - **V2**: Read the chunk file specified in the query (bare JSON array). Also find IP-Lists.txt, List-Items-*.txt if rules in this chunk reference IP lists.
+   - **V2**: Read the chunk file specified in the query (bare JSON array). Also find IP-Lists.txt, List-Items-*.txt if rules in this chunk reference IP lists. To verify IPv4/IPv6 splitting (Check 6 Part B), you may need to: (1) parse rule expressions for `ip.src in $list_name` or inline IP references, (2) read IP-Lists.txt to find the list definition, (3) read the corresponding List-Items-ip-*.txt to check if the list contains both IPv4 and IPv6 addresses.
    - **V3**: Use glob to find Rate-limits.txt under the config path.
    - **V4**: Read all validation report JSONs from `cloudflare-to-aws-waf/validation/`.
 

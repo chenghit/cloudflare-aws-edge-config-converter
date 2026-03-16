@@ -123,7 +123,7 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
 
 1. Before invoking the analyzer, check if `cloudflare-to-aws-waf/cloudflare-security-rules-summary.md` already exists.
    - If it exists → ask the user: "Found existing analysis files. Do you want to overwrite them and re-run the analysis, or use the existing files and proceed to validation?"
-     - User says overwrite → delete the file, proceed to invoke analyzer below
+     - User says overwrite → delete the entire `cloudflare-to-aws-waf/` directory (`rm -rf cloudflare-to-aws-waf`), then re-run `waf-init.sh` to recreate it with fresh pre-written files. Then proceed to invoke analyzer below.
      - User says use existing → skip to Stage 2
    - If it does not exist → proceed to invoke analyzer below
 
@@ -151,7 +151,7 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
 2. Run JSON chunking: `python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-chunk-rules.py "{config_path}" "cloudflare-to-aws-waf" 50`
    - Capture the output lines (chunk file paths) for use in V2 dispatch.
    - If output is `NO_RULES` (0 custom rules), skip all V2 dispatches in Step 2c.
-3. Read `cloudflare-to-aws-waf/waf_ir.json` (or `rule_index.json`) to check rule counts:
+3. Read `cloudflare-to-aws-waf/rule_index.json` to check rule counts:
    - If `ip_access_rules.count == 0`, skip V1 in Step 2c.
    - If `rate_limiting_rules.count == 0`, skip V3 in Step 2c.
 

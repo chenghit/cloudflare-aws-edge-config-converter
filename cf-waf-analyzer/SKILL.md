@@ -133,6 +133,34 @@ Both Cloudflare and AWS WAF execute rules sequentially. **Maintain the exact ord
 - **Batch A3**: Use `fs_write` **append** mode. Write Section 4 (Rate Limiting Rules). If any rate limiting rules are partial or non-convertible, also append their notes to Section 5.
 
 **For skip action rules:** Extract and document the COMPLETE `action_parameters` JSON from Cloudflare configuration:
+
+**For rules that require splitting (CRITICAL — generator depends on this):**
+
+For each WAF Custom Rule and IP Access Rule, check if splitting is needed and document the plan:
+
+1. **Top-level OR splitting (Phase 1):** If the expression has top-level OR branches (e.g., `(A) or (B)`), note the branch count and list each branch's expression.
+2. **IPv4/IPv6 splitting (Phase 2):** For each branch, check if it references IP lists or inline IPs with both IPv4 and IPv6 addresses (read the actual `List-Items-ip-<name>.txt` contents). If mixed, note the IPv4/IPv6 split.
+3. **Cascading split count:** Calculate the final AWS WAF rule count = (branches with mixed IP × 2) + (branches without mixed IP × 1).
+4. **IP Sets to create:** For each branch with inline IPs, define separate IP sets with names following `<rule-name>-branch-<N>-<context>-ipv4/ipv6`. NEVER combine IPs from different branches.
+5. **AWS WAF statement type:** For each branch, note the planned statement type (`ip_set_reference_statement`, `asn_match_statement`, `geo_match_statement`, `byte_match_statement`, etc.).
+
+Example splitting annotation format:
+```markdown
+- **Splitting required**: Yes
+  - Phase 1: 2 OR branches
+  - Phase 2: Branch 1 has mixed IPv4/IPv6 → split; Branch 2 is ASN only → no split
+  - **Final rule count: 3** (2 + 1)
+  - Branch 1 IPv4: `geo_match_statement` + `ip_set_reference_statement`
+  - Branch 1 IPv6: `geo_match_statement` + `ip_set_reference_statement`
+  - Branch 2: `geo_match_statement` + `asn_match_statement`
+- **IP Sets to create**:
+  - `rule-name-branch-1-ipv4`: [100.0.0.1/32, 100.0.0.2/32]
+  - `rule-name-branch-1-ipv6`: [2001:db8::1/128]
+```
+
+Rate-limiting rules are NEVER split — do not add splitting annotations for them.
+
+**For skip action rules (continued):** Also extract and document the COMPLETE `action_parameters` JSON:
 - Copy the entire `action_parameters` object verbatim in a code block
 - Explicitly list which `phases` array values are present
 - Note if `ruleset: "current"` is present
