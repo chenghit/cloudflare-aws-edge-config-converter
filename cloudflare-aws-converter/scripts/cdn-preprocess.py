@@ -319,6 +319,10 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
     # Process managed transforms
     _process_managed_transforms(ir, managed_transforms, default_beh)
 
+    # Process default cache behavior (Lambda@Edge origin-response)
+    if domain_config.get("apply_default_cache_behavior"):
+        _process_default_cache_behavior(ir, hostname, domain_config, origin_content, all_rules, apex)
+
     # Collect ORP headers across all behaviors
     for beh in ir["cache_behaviors"]:
         orp_set = set()
@@ -594,6 +598,105 @@ def _process_managed_transforms(ir, managed_transforms, default_beh):
             default_beh["response_headers_policy"]["security_headers"].setdefault(
                 "X-Frame-Options", "SAMEORIGIN"
             )
+
+
+# Cloudflare default cached extensions (~70 types)
+# Source: https://developers.cloudflare.com/cache/concepts/default-cache-behavior/
+CLOUDFLARE_DEFAULT_CACHED_EXTENSIONS = {
+    "7z", "csv", "gif", "midi", "png", "tif", "zip",
+    "avi", "doc", "gz", "mkv", "ppt", "tiff", "zst",
+    "avif", "docx", "ico", "mp3", "pptx", "ttf",
+    "apk", "dmg", "iso", "mp4", "ps", "webm",
+    "bin", "ejs", "jar", "ogg", "rar", "webp",
+    "bmp", "eot", "jpg", "otf", "svg", "woff",
+    "bz2", "eps", "jpeg", "pdf", "svgz", "woff2",
+    "class", "exe", "js", "pict", "swf", "xls",
+    "css", "flac", "mid", "pls", "tar", "xlsx",
+}
+
+
+def _process_default_cache_behavior(ir, hostname, domain_config, origin_content, all_rules, apex):
+    """Implement Cloudflare's implicit default cache behavior via Lambda@Edge origin-response.
+
+    Three paths based on how many extensions have custom TTLs:
+    - 0 custom TTL extensions → L@E with empty custom_ttl_map (uses default 7200s)
+    - ≤20 custom TTL extensions → individual cache behaviors per extension + L@E (empty map)
+    - >20 custom TTL extensions → L@E with custom_ttl_map (consolidated)
+    """
+    # Collect extension-based cache rules that apply to this domain
+    custom_ttl_map = {}  # extension → ttl_seconds
+    bypass_extensions = set()
+
+    for rule in all_rules.get("cache", []):
+        if not rule.get("enabled", True):
+            continue
+        expr = rule.get("expression", "true")
+        cond, raw_expr = parse_expression(expr)
+        hosts = extract_host_filter(cond, raw_expr or expr)
+        if not rule_applies_to_domain(hosts, hostname, apex):
+            continue
+
+        # Only look at extension-based rules
+        extensions = _extract_extensions_from_condition(cond)
+        if not extensions:
+            continue
+
+        ap = rule.get("action_parameters", {})
+        if not ap.get("cache", True):
+            # Bypass cache for these extensions — they override default caching
+            bypass_extensions.update(ext.lower() for ext in extensions)
+            continue
+
+        edge_ttl = ap.get("edge_ttl", {})
+        if edge_ttl.get("mode") == "override_origin":
+            ttl = edge_ttl.get("default", 7200)
+            for ext in extensions:
+                custom_ttl_map[ext.lower()] = ttl
+
+    # Remove bypassed extensions from custom_ttl_map
+    for ext in bypass_extensions:
+        custom_ttl_map.pop(ext, None)
+
+    # Determine path
+    custom_count = len(custom_ttl_map)
+
+    if custom_count <= 20:
+        # Path 1 (0 custom) or Path 2 (≤20 custom):
+        # Create individual cache behaviors for custom TTL extensions
+        for ext, ttl in sorted(custom_ttl_map.items()):
+            ext_path = f"*.{ext}"
+            beh = find_or_create_behavior(ir, ext_path, domain_config, origin_content)
+            beh["cache_policy"]["ttl"]["default"] = ttl
+
+        # L@E with empty map — handles remaining ~70 extensions at default 7200s
+        ir["metadata"]["lambda_edge"]["origin_response"] = {
+            "type": "default_cache",
+            "custom_ttl_map": {},
+        }
+    else:
+        # Path 3 (>20 custom): consolidate into L@E custom_ttl_map
+        ir["metadata"]["lambda_edge"]["origin_response"] = {
+            "type": "default_cache",
+            "custom_ttl_map": custom_ttl_map,
+        }
+
+
+def _extract_extensions_from_condition(condition):
+    """Extract file extensions from a parsed condition if it's extension-based."""
+    if condition is None:
+        return []
+    if "logic" in condition:
+        for p in condition.get("parts", []):
+            exts = _extract_extensions_from_condition(p)
+            if exts:
+                return exts
+        return []
+    if condition.get("field") == "uri.path.extension":
+        if condition.get("op") == "in":
+            return condition.get("value", [])
+        if condition.get("op") == "eq" and isinstance(condition.get("value"), str):
+            return [condition["value"]]
+    return []
 
 
 # ── main ─────────────────────────────────────────────────────────────────────

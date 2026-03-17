@@ -192,6 +192,19 @@ def validate_domain(ir, filename):
                 f"has {len(qs_list)} items (CloudFront limit: 10)"
             )
 
+    # Check 15: lambda_edge.origin_response structure (if non-null)
+    le = ir.get("metadata", {}).get("lambda_edge", {})
+    origin_resp = le.get("origin_response")
+    if origin_resp is not None:
+        if not isinstance(origin_resp, dict):
+            errors.append("Check15: lambda_edge.origin_response is not an object")
+        elif origin_resp.get("type") != "default_cache":
+            errors.append(f"Check15: lambda_edge.origin_response.type is '{origin_resp.get('type')}', expected 'default_cache'")
+        elif "custom_ttl_map" not in origin_resp:
+            errors.append("Check15: lambda_edge.origin_response missing custom_ttl_map")
+        elif not isinstance(origin_resp.get("custom_ttl_map"), dict):
+            errors.append("Check15: lambda_edge.origin_response.custom_ttl_map is not an object")
+
     return errors, warnings
 
 
