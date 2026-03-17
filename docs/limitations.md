@@ -36,8 +36,14 @@ The CDN pipeline converts these Cloudflare rule types to CloudFront equivalents:
 
 | Setting | Rule Type | Reason | Alternative |
 |---------|-----------|--------|-------------|
+| `ip.src` / `ip.src in` conditions | Cache Rules, Compression Rules | CloudFront Functions cannot control cache or compression decisions | AWS WAF IP-based rules |
+| `ip.src in $list_name` with CIDR entries | All rule types | CFF `event.viewer.ip` is a single IP; cannot perform CIDR matching | Lambda@Edge or AWS WAF IP set |
+| `ip.src in $list_name` with > 50 entries | All rule types | IP list too large for CloudFront Function 10KB limit | Lambda@Edge or AWS WAF IP set |
 | `serve_stale` (SWR/SIE) | Cache Rules | No CloudFront cache policy equivalent | Origin `Cache-Control: stale-while-revalidate` (limited) |
 | `origin_error_page_passthru` | Cache Rules | Requires Lambda@Edge to intercept origin errors | Lambda@Edge origin-response |
+| Custom error with inline content | Custom Error Rules | CloudFront custom error response cannot serve inline content; error page must be a static file on origin | Deploy error page as static file + `response_page_path` |
+| Custom error with unsupported status code | Custom Error Rules | CloudFront only supports: 400, 403, 404, 405, 414, 416, 500–504 | Lambda@Edge origin-response |
+| Custom error with dynamic headers/logic | Custom Error Rules | CFF and L@E viewer-response do not execute on 4xx+ responses | Lambda@Edge origin-response |
 | Query string-only rewrite | URL Rewrite | CloudFront Functions cannot modify query strings independently | Lambda@Edge |
 | `browser_check` | Configuration | No CloudFront equivalent | AWS WAF Bot Control |
 | `minify` (HTML/CSS/JS) | Configuration | Not supported natively in CloudFront | Origin-side minification |
@@ -47,6 +53,23 @@ The CDN pipeline converts these Cloudflare rule types to CloudFront equivalents:
 | Dynamic values with non-mappable CF variables | Request/Response Header Transform | CloudFront Functions cannot evaluate all Cloudflare expressions | Manual review |
 | Cloud Connector with non-path expressions | Cloud Connector | CloudFront cache behaviors only match on path patterns | Manual origin configuration |
 | Disallowed/read-only response headers | Response Header Transform | CloudFront restricts modification of certain headers (`Via`, `X-Amz-Cf-*`, etc.) | N/A |
+
+### CloudFront Function size limit
+
+CloudFront Functions have a 10 KB size limit after minification. When a domain's `viewer_request.js` exceeds this limit:
+
+1. If the function contains `origin_override` operations, those are split out to a Lambda@Edge origin-request handler, reducing the CFF size.
+2. If the CFF still exceeds 10 KB after splitting, the lowest-priority operations are removed and marked as `non_convertible`. They are **not** escalated to Lambda@Edge viewer-request — viewer events only use CloudFront Functions.
+
+### CloudFront quota limits
+
+| Resource | Limit | What happens when exceeded |
+|----------|-------|---------------------------|
+| Cache behaviors per distribution | 75 | Pipeline error — reduce Cloudflare rules |
+| Cache policy headers (whitelist) | 10 | Marked non_convertible |
+| Cache policy cookies (whitelist) | 10 | Marked non_convertible |
+| Cache policy query strings (whitelist) | 10 | Marked non_convertible |
+| Origin request policy headers | 10 | Marked non_convertible |
 
 ### Cloudflare match fields with no CloudFront equivalent
 
@@ -94,5 +117,5 @@ AI-generated configurations require manual review before production deployment. 
 ### Features not configured by this tool
 
 - **CloudFront access logging** — involves decisions (S3 bucket, log format, shared vs per-domain) outside migration scope
-- **Lambda@Edge deployment** — the tool generates Lambda code but uses `REPLACE_WITH_DEPLOYED_LAMBDA_ARN` placeholders. You must deploy the Lambda functions and fill in the ARNs before `terraform apply`.
+- **Lambda@Edge origin-request deployment** — when CFF exceeds 10 KB and origin_override ops are split to Lambda@Edge, the generated `origin_request_handler.js` includes a comment with the `main.tf` entry you need to add manually after deploying the Lambda function. This only applies to domains where CFF size overflow triggers the split — most domains won't need this.
 - **DNS cutover** — the tool generates CloudFront distributions but does not modify DNS records. You must update DNS to point to CloudFront after verifying the configuration.
