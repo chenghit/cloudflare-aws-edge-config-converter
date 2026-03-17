@@ -39,7 +39,16 @@ Determine what the user wants from their message. There are two dimensions:
 **Dimension 1 — Scope (what to process):**
 - **WAF only**: user mentions WAF, security rules, firewall, rate limiting, IP rules
 - **CDN only**: user mentions CDN, cache, origin rules, CloudFront, redirects, URL rewrites, header transforms
-- **Everything**: user says "convert everything", "full migration", "all configs", or mentions Cloudflare config without specifying a type **and** without mentioning a specific AWS target service (e.g., CloudFront → CDN only, WAF → WAF only)
+- **Everything / Ambiguous**: user says "convert everything", "full migration", "all configs", or scope is unclear → **do NOT guess**. Ask the user to pick one of the following prompts (replace `{path}` with the backup path they already provided):
+  > Which pipeline do you need? Copy one of these:
+  >
+  > **WAF** (security rules → AWS WAF Terraform):
+  > `Convert Cloudflare WAF rules in {path} to AWS WAF`
+  >
+  > **CDN** (cache/redirect/origin rules → CloudFront Terraform):
+  > `Convert CDN configuration in {path} to CloudFront`
+  >
+  > To run both, run them in separate sessions to avoid token limits.
 
 **Dimension 2 — Depth (how far to go):**
 - **Analyze**: user says "analyze", "分析" → run analyzer + validator only, stop before generator/converter
@@ -52,13 +61,8 @@ Determine what the user wants from their message. There are two dimensions:
 |-------|---------------|----------------|
 | WAF only | waf-analyzer → waf-validator | waf-analyzer → waf-validator → waf-terraform-generator |
 | CDN only | CDN full pipeline | CDN full pipeline |
-| Everything | WAF convert → CDN full pipeline | WAF convert → CDN full pipeline |
 
-**Execution order for "Everything":**
-1. WAF pipeline first (analyzer → validator → generator)
-2. CDN full pipeline second
-
-This order matters because WAF and CDN analysis are independent, but running WAF first avoids context confusion.
+**One pipeline per session.** Running both WAF and CDN in a single session risks hitting token limits. If the user explicitly asks for both, warn them and recommend separate sessions.
 
 ### Step 2: Extract config path and validate single-zone
 
