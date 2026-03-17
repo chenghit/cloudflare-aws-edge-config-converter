@@ -40,7 +40,7 @@ All paths are relative to the current working directory when the skill is invoke
 |---|---|
 | CFF functions dir | `cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/functions/` |
 | Lambda dir | `cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/lambda/` |
-| Domain IR | `cloudflare-to-aws-cdn/ir/final/<hostname>.yaml` |
+| Domain IR | `cloudflare-to-aws-cdn/ir/final/<hostname>.json` |
 | Output JSON | `cloudflare-to-aws-cdn/ir/validation/js/<hostname>-v3.json` |
 
 `<hostname>` is the raw hostname (e.g., `cdn.c.example.com`).
@@ -99,7 +99,7 @@ Before running any checks, read:
 
 1. `references/unsupported-syntax.md` — tested forbidden ES6+ features.
 2. `references/validation-checklist.md` — complete validation checklist.
-3. The domain's IR: `cloudflare-to-aws-cdn/ir/final/<hostname>.yaml`
+3. The domain's IR: `cloudflare-to-aws-cdn/ir/final/<hostname>.json`
    — to understand whether Lambda@Edge escalation was expected, whether KVS is
    in use, and which ops should be present.
 
@@ -465,6 +465,6 @@ treat any field not present in V3 schema as ignored.
 
 - `references/unsupported-syntax.md` — **MUST READ.** Tested forbidden ES6+ features (optional chaining, destructuring) with evidence from live testing. These cause silent runtime errors.
 - `references/validation-checklist.md` — Complete validation checklist covering syntax, async ops, rule execution order, continent logic, bulk redirects, query string handling.
-- `cloudflare-to-aws-cdn/ir/final/<hostname>.yaml` — domain IR
+- `cloudflare-to-aws-cdn/ir/final/<hostname>.json` — domain IR
 - CloudFront Functions Runtime 2.0 developer guide (JavaScript constraints)
 - Lambda@Edge developer guide (Node.js runtime, event shape)

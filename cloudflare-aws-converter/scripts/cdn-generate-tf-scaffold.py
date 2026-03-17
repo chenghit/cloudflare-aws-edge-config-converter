@@ -100,7 +100,6 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
     has_vresp = has_viewer_response_ops(ir)
     orp_headers = collect_orp_headers(ir)
     le = meta.get("lambda_edge", {})
-    has_le_origin_req = le.get("origin_request") is not None
     has_le_origin_resp = le.get("origin_response") is not None
     kvs_req = meta.get("kvs_requirements", {})
     has_kvs = any(kvs_req.values())

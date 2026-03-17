@@ -25,11 +25,7 @@ All paths are relative to the current working directory when the skill is invoke
 | Logical name | Resolved path |
 |---|---|
 | Domain IR (input) | `cloudflare-to-aws-cdn/ir/final/<hostname>.json` |
-| Dedup manifest (read-only) | `cloudflare-to-aws-cdn/shared/dedup_manifest.json` |
-| Domain scope | `cloudflare-to-aws-cdn/domain_scope.json` |
 | Output directory | `cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/` |
-| Shared module source | `../../modules/cloudfront_distribution` (relative, for Terraform `source`) |
-| Module template | `references/modules/cloudfront_distribution/` (in this skill directory) |
 
 **Sanitized hostname**: replace `.` and `-` with `_`, lowercase.
 Example: `cdn.c.example.com` → `cdn_c_example_com`.
@@ -515,11 +511,11 @@ If the minified size is still > 10 KB:
 The viewer-request CFF exceeds 10 KB and cannot be reduced further. **Do NOT
 escalate to Lambda@Edge viewer-request** — viewer events should only use CFF.
 
-1. Mark the excess ops as non_convertible in the output. Add a comment in the
-   generated `main.tf`:
-   ```hcl
-   # WARNING: viewer_request.js exceeds 10KB after minification.
-   # Some viewer-request ops could not be included. See conversion_report.md.
+1. Mark the excess ops as non_convertible in the output. Add a comment at the
+   top of `viewer_request.js`:
+   ```javascript
+   // WARNING: Some viewer-request ops were excluded due to 10KB size limit.
+   // See conversion_report.md for details.
    ```
 2. Remove the lowest-priority ops (last in each section) from viewer_request.js
    until the size is ≤ 10 KB. For each removed op, add a non_convertible entry
@@ -582,20 +578,11 @@ If the IR metadata has `lambda_edge.origin_response.type == "default_cache"`:
    are handled by independent cache behaviors (≤20 threshold), so the Lambda
    only needs the default 7200s for remaining extensions.
 4. Write to `lambda/default_cache_origin_response.js`.
-5. Add the Lambda to `default_lambda_function_associations` in the module call:
-   ```hcl
-   default_lambda_function_associations = [
-     {
-       event_type   = "origin-response"
-       lambda_arn   = "REPLACE_WITH_DEPLOYED_LAMBDA_ARN"
-       include_body = false
-     },
-   ]
-   ```
-   The `lambda_arn` placeholder must be filled after deploying the Lambda
-   function — Lambda@Edge ARNs include the version number and cannot be
-   predicted at generation time. Add a comment in `main.tf` instructing the
-   operator to fill it in after deployment.
+
+Note: The scaffold (cdn-generate-tf-scaffold.py) has already added the
+`default_lambda_function_associations` entry for origin-response in `main.tf`
+with the `REPLACE_WITH_DEPLOYED_LAMBDA_ARN` placeholder. Do NOT modify main.tf
+for this — only write the JS file.
 
 ---
 
@@ -620,8 +607,16 @@ If any Lambda@Edge files were generated in step 3 or 4:
     publish       = true
   }
   ```
-- If origin-request L@E was generated (Step 2d Case A), also update `main.tf`:
-  find `default_lambda_function_associations = [` and add the origin-request entry.
+
+Note: Do NOT modify `main.tf` directly. The scaffold pre-generates
+`default_lambda_function_associations` for origin-response (if IR has
+`lambda_edge.origin_response`). For origin-request L@E (Step 2d Case A),
+the scaffold cannot predict this — add a comment in the generated
+`origin_request_handler.js` file header instructing the user:
+```
+// After deploying this Lambda, add to main.tf default_lambda_function_associations:
+//   { event_type = "origin-request", lambda_arn = "<deployed_arn>", include_body = false }
+```
 
 Create all parent directories (`lambda/`) as needed.
 
