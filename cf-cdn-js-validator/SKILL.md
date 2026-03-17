@@ -6,6 +6,8 @@ description: >
   cf-cdn-tf-domain for each domain. Default assumption: input is WRONG. Finds
   failures. Does NOT confirm success. Fails on ambiguity. No fix suggestions.
   False negative is worse than false positive.
+metadata:
+  author: chenghit
 ---
 
 # cf-cdn-js-validator (Validator V3)

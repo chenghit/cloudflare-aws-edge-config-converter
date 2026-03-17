@@ -1,6 +1,8 @@
 ---
 name: cf-cdn-per-domain-processor
 description: Core CDN processing skill. For a single proxied hostname, reads all relevant Cloudflare CDN configuration files, processes all 11 rule types in Cloudflare execution order, and generates a complete CloudFront-native IR accumulator YAML file (ir/accumulator/<hostname>.yaml). This skill is invoked once per domain — for N domains, N parallel invocations are used. The IR format contains fully resolved CloudFront resource specs that downstream Terraform generators can consume directly without re-reading Cloudflare files.
+metadata:
+  author: chenghit
 ---
 
 # cf-cdn-per-domain-processor

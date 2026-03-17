@@ -7,6 +7,8 @@ description: >
   hard limits, cross-reference integrity, and required output files.
   Uses the same adversarial checking posture as V1: input is assumed wrong
   until every check passes. Never suggests fixes — only reports errors.
+metadata:
+  author: chenghit
 ---
 
 # cf-cdn-ir-final-validator

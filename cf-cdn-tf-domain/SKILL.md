@@ -7,6 +7,8 @@ description: >
   for that domain. Invoked once per domain; multiple domains may be processed
   in parallel. Handles function-size management, Lambda@Edge fallback, KVS data
   files, and ACM certificate patterns.
+metadata:
+  author: chenghit
 ---
 
 # cf-cdn-tf-domain

@@ -5,6 +5,8 @@ description: >
   integrity (all proxied hostnames accounted for, valid Y/N flags, correct ACM ARN
   format), and produce domain_scope.json — the authoritative per-domain configuration
   file consumed by cf-cdn-per-domain-processor.
+metadata:
+  author: chenghit
 ---
 
 # Skill: cf-cdn-input-validator

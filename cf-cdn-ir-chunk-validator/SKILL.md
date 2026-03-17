@@ -6,6 +6,8 @@ description: >
   Validates a single ir/accumulator/<hostname>.yaml file using an
   adversarial checking posture: default assumption is the input is WRONG.
   Produces a structured JSON validation report and halts on any failure.
+metadata:
+  author: chenghit
 ---
 
 # cf-cdn-ir-chunk-validator

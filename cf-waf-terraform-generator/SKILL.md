@@ -1,6 +1,8 @@
 ---
 name: cf-waf-terraform-generator
 description: Generates AWS WAF Terraform configuration from a validated IR JSON. Use this skill after cf-waf-analyzer and cf-waf-analyzer-validator have produced and validated waf_ir.json. This skill reads the IR JSON, generates a conversion plan, produces Terraform modules with proper nesting and splitting strategies, and validates the output. It does NOT read original Cloudflare configuration files — it only reads the IR JSON.
+metadata:
+  author: chenghit
 ---
 
 # Cloudflare to AWS WAF Terraform Generator

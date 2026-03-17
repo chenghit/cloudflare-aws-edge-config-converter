@@ -7,6 +7,8 @@ description: >
   origin-request policies, and response-headers policies. These shared resources
   are referenced by ID in every per-domain distribution module, so they must be
   generated before any domain Terraform is applied.
+metadata:
+  author: chenghit
 ---
 
 # cf-cdn-tf-shared-policies

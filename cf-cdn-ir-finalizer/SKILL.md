@@ -8,6 +8,8 @@ description: >
   Reads all ir/accumulator/*.yaml files, sorts cache behaviors by specificity,
   deduplicates shared policies, detects shadowed rules, and writes finalized
   IR files plus a conversion report.
+metadata:
+  author: chenghit
 ---
 
 # cf-cdn-ir-finalizer

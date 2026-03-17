@@ -1,6 +1,8 @@
 ---
 name: cf-waf-analyzer
 description: Analyzes Cloudflare security configurations (WAF custom rules, rate limiting rules, IP access rules, IP/ASN lists) and generates structured IR JSON for AWS WAF migration. Use this skill when you need to analyze Cloudflare security rules, understand WAF rule convertibility, or prepare security configuration IR before converting to AWS WAF. This skill reads CloudflareBackup configuration files, parses rule expressions, determines convertibility status, and generates per-batch IR JSON files. This skill does NOT generate Terraform code - it only analyzes and produces structured IR.
+metadata:
+  author: chenghit
 ---
 
 # Cloudflare WAF Config Analyzer

@@ -1,6 +1,8 @@
 ---
 name: cf-waf-analyzer-validator
 description: Validates WAF IR JSON against original Cloudflare configuration files. Operates in batch mode — each invocation validates a specific rule type or chunk. V1/V2/V3 modes report issues; V4 mode applies fixes serially to waf_ir.json. Use after cf-waf-analyzer has generated IR JSON files and the orchestrator has merged them into waf_ir.json.
+metadata:
+  author: chenghit
 ---
 
 # Cloudflare WAF Analyzer Validator

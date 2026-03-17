@@ -5,6 +5,8 @@ description: >
   that will become CloudFront distributions. Detects SaaS configuration and aborts if
   found. Groups hostnames by apex domain for ACM certificate grouping. Produces
   dns_manifest.yaml and user_input_template.csv as outputs for downstream skills.
+metadata:
+  author: chenghit
 ---
 
 # Skill: cf-cdn-dns-parser
