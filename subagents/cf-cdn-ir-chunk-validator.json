@@ -1,9 +1,0 @@
-{
-  "name": "cf-cdn-ir-chunk-validator",
-  "description": "Validates a single domain's accumulator IR YAML file at ir/accumulator/{hostname}.yaml for structural correctness. Performs 8 checks: path_pattern and precedence field presence/types, origin.domain validity, viewer_request_ops entry integrity, non_convertible reason strings, duplicate precedence detection, viewer_request_ops type ordering, hostname-filename consistency, and KVS redirect requirement cross-check. Outputs a per-domain JSON validation report. Must be invoked once per domain (parallelizable).",
-  "resources": [
-    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md"
-  ],
-  "tools": ["fs_read", "fs_write", "glob", "grep"],
-  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
-}

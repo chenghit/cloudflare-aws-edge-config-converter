@@ -359,7 +359,7 @@ boolean fields: `needs_redirects`, `needs_continent`, `needs_eu`.
 #### CHECK CROSS-03: Lambda@Edge expected vs present
 
 From the domain IR, check `lambda_edge` — this is a mapping with sub-fields:
-`origin_request`, `origin_response`, `viewer_request`. Each is either `null`
+`origin_request`, `origin_response`. Each is either `null`
 or a non-null object.
 
 - If **at least one** sub-field is non-null:

@@ -157,5 +157,55 @@ modify the module's `variables.tf` or `main.tf`.
   reference data sources that look up shared policies by name. They must not be
   quoted as strings.
 
+#### 6e. Custom ORP for geo/device headers
+
+When `required_orp_headers` is non-empty across any cache behavior, generate a
+custom ORP resource in the domain's `main.tf` (not in shared policies — ORP
+header needs are domain-specific):
+
+```hcl
+resource "aws_cloudfront_origin_request_policy" "custom_orp_<sanitized_name>" {
+  name    = "cfcdn-orp-custom-<sanitized_name>"
+  comment = "Custom ORP for <hostname> - forwards geo/device headers to CFF"
+
+  headers_config {
+    header_behavior = "allViewerAndWhitelistCloudFront"
+    headers {
+      items = [
+        "CloudFront-Viewer-Country",
+        "CloudFront-Viewer-City",
+        # ... all headers from required_orp_headers, deduplicated across behaviors
+      ]
+    }
+  }
+
+  cookies_config {
+    cookie_behavior = "none"
+  }
+
+  query_strings_config {
+    query_string_behavior = "none"
+  }
+}
+```
+
+Then reference it in the module call:
+```hcl
+  default_origin_request_policy_id = aws_cloudfront_origin_request_policy.custom_orp_<sanitized_name>.id
+```
+
+**header_behavior values**:
+- `"none"` — forward no headers (default)
+- `"allViewer"` — forward all viewer headers
+- `"allViewerAndWhitelistCloudFront"` — forward all viewer headers + specified CloudFront-* headers (use this when you need geo/device headers)
+- `"whitelist"` — forward only specified headers
+
+Use `"allViewerAndWhitelistCloudFront"` when `required_orp_headers` contains any
+`CloudFront-*` headers. This forwards all original viewer headers (Host, etc.)
+plus the specified CloudFront-generated headers.
+
+If `required_orp_headers` is empty, omit the custom ORP resource entirely and
+either use the shared ORP from dedup_manifest or omit the ORP reference.
+
 ---
 

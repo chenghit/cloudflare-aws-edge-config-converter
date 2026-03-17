@@ -47,3 +47,22 @@
 1. 立即停止当前会话
 2. 开启新会话
 3. 每次只为一个项目转换一种规则类型
+
+## CDN Python 脚本报错
+
+**问题**：CDN Stage 3–6（Python 脚本）执行失败
+
+**症状**：
+- `cdn-preprocess.py` 退出码 1（部分失败）或 2（全部失败）
+- `cdn-validate-chunk.py` 报告某些域名 FAIL
+- `cdn-finalize.py` 或 `cdn-validate-final.py` 报错退出
+
+**解决方案**：
+1. 查看错误输出——Python 脚本会在 stderr 打印具体错误信息
+2. 预处理失败：查看 `cloudflare-to-aws-cdn/ir/accumulator/<domain>.error.json`
+3. 校验失败：查看 `cloudflare-to-aws-cdn/ir/validation/chunk/<domain>-v1.json` 或 `final/<domain>-v2.json`
+4. 常见原因：
+   - `domain_scope.json` 未找到 → 先运行 Stage 2（Input Validator）
+   - Cloudflare 配置 JSON 解析错误 → 检查 CloudflareBackup 导出是否完整
+   - Zone 目录未找到 → 确认配置路径指向 CloudflareBackup 根目录（包含 `account/` 和 zone 子目录）
+5. 重试单个域名：`python3 cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`

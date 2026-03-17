@@ -2,7 +2,7 @@
 name: cf-cdn-tf-domain
 description: >
   Main Terraform generator for a single CDN domain. Reads the domain's final IR
-  YAML (ir/final/<hostname>.yaml) and the shared dedup manifest, then emits all
+  JSON (ir/final/<hostname>.json) and the shared dedup manifest, then emits all
   Terraform and JavaScript artefacts needed to deploy a CloudFront distribution
   for that domain. Invoked once per domain; multiple domains may be processed
   in parallel. Handles function-size management, Lambda@Edge fallback, KVS data
@@ -24,7 +24,7 @@ All paths are relative to the current working directory when the skill is invoke
 
 | Logical name | Resolved path |
 |---|---|
-| Domain IR (input) | `cloudflare-to-aws-cdn/ir/final/<hostname>.yaml` |
+| Domain IR (input) | `cloudflare-to-aws-cdn/ir/final/<hostname>.json` |
 | Dedup manifest (read-only) | `cloudflare-to-aws-cdn/shared/dedup_manifest.json` |
 | Domain scope | `cloudflare-to-aws-cdn/domain_scope.json` |
 | Output directory | `cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/` |
@@ -46,11 +46,10 @@ cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/
   kvs.tf                    ← KVS store + data (only if kvs_requirements non-empty)
   kvs-data.json             ← bulk redirect seed data (only if kvs_requirements non-empty)
   functions/
-    <sanitized_name>_viewer_request.js   ← always (unless all logic in Lambda@Edge)
+    <sanitized_name>_viewer_request.js   ← always
     <sanitized_name>_viewer_response.js  ← only if viewer_response_ops non-empty
   lambda/                   ← only if lambda_edge in IR is non-null
-    origin_request_handler.js   ← only if lambda_edge.origin_request is set
-    viewer_request_handler.js   ← only if lambda_edge.viewer_request is set (last resort)
+    origin_request_handler.js   ← only if origin_override ops were split from CFF
 ```
 
 ---
@@ -64,7 +63,7 @@ Before generating any code, read:
 1. `references/cloudfront/runtime2-guide.md` — **MUST READ before generating any JavaScript.** Contains correct API signatures for `rawQueryString()`, `cf.kvs()`, `cf.updateRequestOrigin()`, supported/forbidden syntax, and complete code patterns.
 2. `references/cloudfront/operator-conversion.md` — Cloudflare expression operators → JS code patterns. Read before generating condition logic.
 3. `references/cloudfront/unsupported-syntax.md` — Tested forbidden ES6+ features. Read before generating any JS.
-4. `cloudflare-to-aws-cdn/ir/final/<hostname>.yaml` — the actual
+4. `cloudflare-to-aws-cdn/ir/final/<hostname>.json` — the actual
    domain IR you will process.
 5. `cloudflare-to-aws-cdn/shared/dedup_manifest.json` — to
    resolve policy hashes to Terraform resource addresses.
@@ -88,7 +87,7 @@ via ⚠️ READ NOW triggers:
 
 ### Step 1 — Parse inputs and derive identifiers
 
-**From the IR metadata document** (`cloudflare-to-aws-cdn/ir/final/<hostname>.yaml`, first document):
+**From the IR metadata document** (`cloudflare-to-aws-cdn/ir/final/<hostname>.json`, first document):
 
 ```
 hostname:              cdn.c.example.com
@@ -214,6 +213,100 @@ async function handler(event) {
 ```
 
 **Codegen rules — enforce this order strictly**:
+
+**Understanding the IR condition format (IMPORTANT — read before generating JS)**:
+
+Each `viewer_request_ops` / `viewer_response_ops` entry has two condition-related fields:
+- `condition`: structured condition (parsed by Python), or `null`
+- `raw_expression`: original Cloudflare expression string (unparsed), or `null`
+
+Exactly one is non-null. Three scenarios:
+
+1. **`condition` non-null, `raw_expression` null**: Use the structured condition to generate JS `if` checks.
+   - `{"always": true}` → no `if` wrapper (unconditional)
+   - `{"field": "uri.path", "op": "wildcard", "value": "/api/*"}` → `request.uri.startsWith('/api/')`
+   - `{"field": "country", "op": "eq", "value": "CN"}` → `request.headers['cloudfront-viewer-country'] && request.headers['cloudfront-viewer-country'].value === 'CN'`
+   - `{"field": "ip.src", "op": "in", "value": ["1.2.3.4", "5.6.7.8"]}` → `['1.2.3.4', '5.6.7.8'].includes(event.viewer.ip)`
+   - `{"logic": "and", "parts": [...]}` → combine parts with `&&`
+   - The `params` may also contain `target_expression`, `path_expression`, or `value_expression` — these are Cloudflare expression strings (e.g., `concat(...)`, `wildcard_replace(...)`) that need JS translation. Use `references/cloudfront/operator-conversion.md` and `references/cloudfront/conversion-examples.md` to translate them.
+
+2. **`condition` null, `raw_expression` non-null**: The entire rule (both condition and action) needs JS translation from the raw Cloudflare expression. Use the reference docs to translate.
+
+3. **Both null or both non-null**: Invalid — should not occur (V1 validator catches this).
+
+**ORP header generation**:
+
+Each cache behavior has a `required_orp_headers` array listing CloudFront-Viewer-* headers needed by its ops. When generating the Terraform module call for this domain:
+1. Collect all `required_orp_headers` across all cache behaviors, deduplicate
+2. If non-empty, generate a custom Origin Request Policy that forwards these headers
+3. All geo headers go in ORP (not Cache Policy) to avoid cache fragmentation
+4. `CloudFront-Viewer-ASN`, `CloudFront-Viewer-Address`, `CloudFront-Viewer-TLS` can ONLY go in ORP (not Cache Policy)
+5. If `required_orp_headers` is empty, use AWS managed `AllViewer` ORP or none
+
+**Condition field → JS accessor mapping (complete reference)**:
+
+| IR condition field | JS accessor | Notes |
+|---|---|---|
+| `uri.path` | `request.uri` | Path only, no query string |
+| `uri` | `request.uri` | Same as uri.path in CFF context |
+| `uri.query` | `request.rawQueryString()` | Without leading `?` |
+| `uri.path.extension` | `request.uri.split('.').pop()` | File extension |
+| `host` | `request.headers.host.value` | |
+| `method` | `request.method` | Read-only |
+| `user_agent` | `request.headers['user-agent'] && request.headers['user-agent'].value` | Check existence first |
+| `referer` | `request.headers.referer && request.headers.referer.value` | Check existence first |
+| `http_version` | `request.headers['cloudfront-viewer-http-version'] && request.headers['cloudfront-viewer-http-version'].value` | Needs ORP header |
+| `ip.src` | `event.viewer.ip` | Always available, no ORP needed |
+| `country` | `request.headers['cloudfront-viewer-country'] && request.headers['cloudfront-viewer-country'].value` | Needs ORP header |
+| `city` | `request.headers['cloudfront-viewer-city'] && request.headers['cloudfront-viewer-city'].value` | Needs ORP header |
+| `region` | `request.headers['cloudfront-viewer-country-region-name'] && request.headers['cloudfront-viewer-country-region-name'].value` | Needs ORP header |
+| `region_code` | `request.headers['cloudfront-viewer-country-region'] && request.headers['cloudfront-viewer-country-region'].value` | Needs ORP header |
+| `subdivision_1` | Concatenate: `request.headers['cloudfront-viewer-country'].value + '-' + request.headers['cloudfront-viewer-country-region'].value` | Needs both ORP headers |
+| `latitude` | `request.headers['cloudfront-viewer-latitude'] && request.headers['cloudfront-viewer-latitude'].value` | Needs ORP header |
+| `longitude` | `request.headers['cloudfront-viewer-longitude'] && request.headers['cloudfront-viewer-longitude'].value` | Needs ORP header |
+| `postal_code` | `request.headers['cloudfront-viewer-postal-code'] && request.headers['cloudfront-viewer-postal-code'].value` | Needs ORP header |
+| `metro_code` | `request.headers['cloudfront-viewer-metro-code'] && request.headers['cloudfront-viewer-metro-code'].value` | Needs ORP header, US only |
+| `timezone` | `request.headers['cloudfront-viewer-time-zone'] && request.headers['cloudfront-viewer-time-zone'].value` | Needs ORP header |
+| `asnum` | `request.headers['cloudfront-viewer-asn'] && request.headers['cloudfront-viewer-asn'].value` | ORP only (not Cache Policy) |
+| `continent` | KVS lookup — see pattern below | Needs ORP country header + KVS |
+| `is_eu` | KVS lookup — see pattern below | Needs ORP country header + KVS |
+| `full_uri` | Construct: `` `https://${request.headers.host.value}${request.uri}` `` | Combine host + path |
+
+**KVS lookup patterns for continent and EU**:
+
+```javascript
+// continent lookup — requires KVS with country→continent mapping
+import cf from 'cloudfront';
+const kvsHandle = cf.kvs('<KVS_ID>');
+
+// Inside handler:
+const country = request.headers['cloudfront-viewer-country'] && request.headers['cloudfront-viewer-country'].value;
+let continent = '';
+if (country) {
+  try { continent = await kvsHandle.get('continent:' + country); } catch (e) {}
+}
+if (continent === 'EU') { /* ... */ }
+
+// EU membership lookup — same KVS, different key prefix
+let isEU = false;
+if (country) {
+  try { isEU = (await kvsHandle.get('eu:' + country)) === '1'; } catch (e) {}
+}
+```
+
+**Condition operator → JS translation**:
+
+| IR op | JS code |
+|---|---|
+| `eq` | `=== value` |
+| `ne` | `!== value` |
+| `gt`, `ge`, `lt`, `le` | `>`, `>=`, `<`, `<=` (numeric comparison) |
+| `in` | `[...values].includes(accessor)` |
+| `contains` | `accessor.includes(value)` |
+| `starts_with` | `accessor.startsWith(value)` |
+| `ends_with` | `accessor.endsWith(value)` |
+| `wildcard` | Convert to `startsWith` / `endsWith` / regex as appropriate |
+| `not_eq`, `not_contains`, etc. | Negate the base operator |
 
 **1. redirects** — for each redirect op in `viewer_request_ops` where type == "redirect":
 
@@ -418,6 +511,30 @@ Minification rules (apply in order):
 4. Remove unnecessary whitespace around operators
 5. Collapse multi-line `if` bodies to single line where possible
 
+Size optimization techniques (apply before minification if draft > 6KB):
+- Deduplicate repeated header lookups: `const cc = request.headers['cloudfront-viewer-country'] && request.headers['cloudfront-viewer-country'].value;` — assign once, reuse
+- Combine sequential same-type ops into a single `if` block when conditions are identical
+- Use ternary for simple set-header ops: `request.headers['x'] = {value: cond ? 'a' : 'b'};`
+- For `in` checks with many values, use a Set: `const s = new Set(['a','b','c']); if (s.has(v)) {...}`
+
+Minification example:
+```javascript
+// BEFORE (380 bytes):
+// redirect: EU users to /eu prefix
+if (request.headers['cloudfront-viewer-country'] && request.headers['cloudfront-viewer-country'].value === 'DE') {
+  return {
+    statusCode: 302,
+    headers: {
+      location: { value: '/eu' + request.uri }
+    }
+  };
+}
+
+// AFTER (120 bytes):
+const cc=req.headers['cloudfront-viewer-country'];
+if(cc&&cc.value==='DE')return{statusCode:302,headers:{location:{value:'/eu'+req.uri}}};
+```
+
 After minification, update the size estimate.
 
 #### 2d. Escalation to Lambda@Edge
@@ -432,16 +549,31 @@ If the minified size is still > 10 KB:
 5. If still > 10 KB: fall through to Case B for the remaining viewer_request logic
 
 **Case B — no origin_override ops, OR Case A step 5**:
-1. Move ALL viewer_request logic (entire function body) to
-   `lambda/viewer_request_handler.js` as Lambda@Edge
-2. Remove the CloudFront Function viewer-request association from `main.tf`
-   entirely. **CloudFront does not allow a CFF and Lambda@Edge on the same
-   event type (viewer-request) for the same cache behavior.** Do not generate
-   a pass-through CFF — omit the CFF association and use Lambda@Edge alone.
+
+The viewer-request CFF exceeds 10 KB and cannot be reduced further. **Do NOT
+escalate to Lambda@Edge viewer-request** — viewer events should only use CFF.
+
+1. Mark the excess ops as non_convertible in the output. Add a comment in the
+   generated `main.tf`:
+   ```hcl
+   # WARNING: viewer_request.js exceeds 10KB after minification.
+   # Some viewer-request ops could not be included. See conversion_report.md.
+   ```
+2. Remove the lowest-priority ops (last in each section) from viewer_request.js
+   until the size is ≤ 10 KB. For each removed op, add a non_convertible entry
+   to the domain's output with reason: "CloudFront Function exceeds 10KB limit;
+   this rule was excluded. Consider simplifying rules or implementing via
+   Lambda@Edge origin-request if applicable."
+3. Write the trimmed viewer_request.js.
 
 **Target**: viewer_request.js ≤ 8 KB (leave 2 KB buffer from 10 KB hard limit).
 
 #### 2e. Lambda@Edge file format
+
+**Lambda@Edge is only used for origin events** (origin-request, origin-response).
+Viewer events (viewer-request, viewer-response) are always handled by CloudFront
+Functions. If CFF exceeds 10KB, excess ops are marked non_convertible — they are
+NOT escalated to Lambda@Edge viewer events.
 
 Lambda@Edge files use Node.js **CommonJS** syntax (NOT CloudFront Functions
 Runtime 2.0 syntax, NOT ESM):
@@ -747,9 +879,8 @@ Follow the template exactly. All placeholders (`<sanitized_name>`, `<hostname>`,
 Write files in this order:
 1. `functions/<sanitized_name>_viewer_request.js` (always, unless omitted per Step 2e)
 2. `functions/<sanitized_name>_viewer_response.js` (only if `viewer_response_ops` non-empty)
-3. `lambda/origin_request_handler.js` (if generated by Step 2d)
-4. `lambda/viewer_request_handler.js` (if generated by Step 2d)
-5. `lambda/default_cache_origin_response.js` (if generated by Step 2f)
+3. `lambda/origin_request_handler.js` (if generated by Step 2d Case A)
+4. `lambda/default_cache_origin_response.js` (if generated by Step 2f)
 6. `kvs-data.json` (if kvs_requirements non-empty)
 7. `functions.tf`
 8. `kvs.tf` (if kvs_requirements non-empty)
@@ -787,8 +918,8 @@ After writing all files:
 7. **viewer_request.js**: Scan for `const [` or `let [` or `const {` or `let {`
    — FAIL and escalate if found.
 8. **viewer_request.js**: Scan for `Promise.` — FAIL and escalate if found.
-9. **lambda/*.js** (if present — includes `origin_request_handler.js`,
-   `viewer_request_handler.js`, and `default_cache_origin_response.js`):
+9. **lambda/*.js** (if present — includes `origin_request_handler.js`
+   and `default_cache_origin_response.js`):
    Verify `exports.handler` is present (CommonJS
    format). Verify `import cf from 'cloudfront'` is ABSENT.
 10. **Policy refs**: Verify every `data.aws_cloudfront_*_policy` block in main.tf

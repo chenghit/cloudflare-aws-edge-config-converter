@@ -27,10 +27,6 @@ Orchestrate conversion of Cloudflare configurations to AWS by delegating to spec
 |----------|---------|---------------------------|
 | `cf-cdn-dns-parser` | DNS export → domain manifest + input template | CDN, full migration, domains, DNS |
 | `cf-cdn-input-validator` | Validates user_input.csv → domain_scope.json | (invoked automatically after user fills input) |
-| `cf-cdn-per-domain-processor` | Per-domain CDN rules → IR accumulator YAML | (invoked once per domain, parallelizable) |
-| `cf-cdn-ir-chunk-validator` | Validates each domain's IR accumulator | (invoked once per domain, parallelizable) |
-| `cf-cdn-ir-finalizer` | Merges all accumulators → final IR + dedup manifest + report | (invoked after all chunks validated) |
-| `cf-cdn-ir-final-validator` | Validates each domain's final IR | (invoked once per domain, parallelizable) |
 | `cf-cdn-tf-shared-policies` | Final IR → shared Terraform policies | (invoked after all final IRs validated) |
 | `cf-cdn-tf-domain` | Per-domain final IR → Terraform distribution config | (invoked once per domain, parallelizable) |
 | `cf-cdn-js-validator` | Validates each domain's CloudFront Function JS | (invoked once per domain, parallelizable) |
@@ -56,12 +52,12 @@ Determine what the user wants from their message. There are two dimensions:
 | Scope | Depth: Analyze | Depth: Convert |
 |-------|---------------|----------------|
 | WAF only | waf-analyzer → waf-validator | waf-analyzer → waf-validator → waf-terraform-generator |
-| CDN only | CDN full pipeline (9 stages) | CDN full pipeline (9 stages) |
+| CDN only | CDN full pipeline | CDN full pipeline |
 | Everything | WAF convert → CDN full pipeline | WAF convert → CDN full pipeline |
 
 **Execution order for "Everything":**
 1. WAF pipeline first (analyzer → validator → generator)
-2. CDN full pipeline second (all 9 stages)
+2. CDN full pipeline second
 
 This order matters because WAF and CDN analysis are independent, but running WAF first avoids context confusion.
 
@@ -195,7 +191,9 @@ Check the `---RESULT---` block:
 
 ---
 
-#### CDN full pipeline (9 stages — runs when user wants Terraform output for CloudFront):
+#### CDN full pipeline (5 LLM stages + 4 Python scripts — runs when user wants Terraform output for CloudFront):
+
+Stages 3–6 are deterministic Python scripts (no LLM). Stages 1, 2, 7, 8, 9 are LLM subagents.
 
 **Stage 1: DNS Parsing**
 1. Invoke `cf-cdn-dns-parser` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-dns-parser/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Parse DNS.txt to identify all proxied domains. Detect any Cloudflare for SaaS configurations. Group domains by apex domain for ACM certificate planning. Write dns_manifest.yaml and user_input_template.csv to the cloudflare-to-aws-cdn/ output directory. Generate output files in {user_language}."`
@@ -211,40 +209,53 @@ Check the `---RESULT---` block:
    - `STATUS: ERRORS` → show the user the list of errors and ask them to fix `user_input.csv`, then re-invoke Stage 2
    - `STATUS: CANNOT_FIX` → stop and tell the user which fields require manual correction
 
-**Stage 3: Per-Domain Processing** (parallelizable — invoke once per domain)
-1. Read `cloudflare-to-aws-cdn/domain_scope.json` to get the list of domains (or extract from the Stage 2 response).
-2. For each domain `{domain}` in the list, invoke `cf-cdn-per-domain-processor` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Process domain {domain}. Read cloudflare-to-aws-cdn/domain_scope.json for this domain's settings. Write the IR accumulator to cloudflare-to-aws-cdn/ir/accumulator/ (the skill will derive the sanitized filename from the hostname). Generate output files in {user_language}."`
-3. Dispatch subagents using the parallel batch size defined in Important Rules above.
-4. Wait for all per-domain processors to complete before proceeding.
+**Stage 3–6: Preprocess → Validate → Finalize → Validate Final** (Python scripts, no LLM)
 
-**Stage 4: IR Chunk Validation** (parallelizable — invoke once per domain)
-1. For each domain `{domain}`, invoke `cf-cdn-ir-chunk-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-chunk-validator/SKILL.md and follow its workflow. Validate the IR accumulator for domain {domain} in cloudflare-to-aws-cdn/ir/accumulator/. Output a validation report to cloudflare-to-aws-cdn/ir/validation/chunk/. Generate output files in {user_language}."`
-2. Check the `status` field in the written JSON report:
-   - `"PASS"` → domain is ready for finalization
-   - `"FAIL"` → **auto-retry once** with the following procedure:
-     a. Use `fs_read` to read `cloudflare-to-aws-cdn/ir/validation/chunk/{hostname}-v1.json` and extract the `errors` array.
-     b. Use `execute_bash` to delete the old files: `rm -f cloudflare-to-aws-cdn/ir/accumulator/{sanitized}.yaml cloudflare-to-aws-cdn/ir/validation/chunk/{hostname}-v1.json` (where `{sanitized}` = hostname with every `.` and `-` replaced by `_`, e.g., `cdn.c.example.com` → `cdn_c_example_com`)
-     c. Re-invoke `cf-cdn-per-domain-processor` with the error hint: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-per-domain-processor/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Process domain {domain}. Read cloudflare-to-aws-cdn/domain_scope.json for this domain's settings. IMPORTANT: A previous processing attempt for this domain produced validation errors. Pay special attention to these issues: {errors}. Generate a fresh IR accumulator from the source Cloudflare files — do NOT attempt to read or modify any existing IR file. Generate output files in {user_language}."`
-     d. Re-invoke `cf-cdn-ir-chunk-validator` for this domain.
-     e. If the second attempt also FAILs → mark this domain as `SKIPPED` (record the errors), continue processing other domains. Do NOT block the pipeline.
-3. Once all non-SKIPPED domains have `status: "PASS"`, proceed to Stage 5. Track the list of SKIPPED domains and their failure reasons for the final report.
+These four stages are fully deterministic Python scripts. Run them in sequence:
 
-**Stage 5: IR Finalization**
-1. Invoke `cf-cdn-ir-finalizer` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-finalizer/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Merge and finalize all validated IR accumulator YAMLs from cloudflare-to-aws-cdn/ir/accumulator/. Deduplicate shared policies across all domains. Write per-domain final IR files to cloudflare-to-aws-cdn/ir/final/. Write the shared deduplication manifest to cloudflare-to-aws-cdn/shared/dedup_manifest.json. Generate a human-readable conversion report at cloudflare-to-aws-cdn/conversion_report.md. {skipped_domains_clause} Generate output files in {user_language}."`
-   - If there are SKIPPED domains, set `{skipped_domains_clause}` to: `"The following domains were skipped due to processing failures and should be listed in the conversion report: {list of SKIPPED domains with reasons}."`
-   - If no domains were skipped, omit the clause.
-2. Check the `---RESULT---` block:
-   - `STATUS: COMPLETE` → proceed to Stage 6
-   - `STATUS: ERROR` → report the error to the user and stop
+**Stage 3: Preprocess**
+```bash
+python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-preprocess.py "{config_path}" "cloudflare-to-aws-cdn"
+```
+Check exit code:
+- 0 → all domains processed, proceed to Stage 4
+- 1 → partial failure. Read stderr for failed domain names. Retry failed domains:
+  ```bash
+  python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-preprocess.py "{config_path}" "cloudflare-to-aws-cdn" --domain {failed_domain}
+  ```
+  If retry also fails → mark domain as SKIPPED, continue with remaining domains.
+- 2 → total failure, stop pipeline
 
-**Stage 6: Final IR Validation** (parallelizable — invoke once per domain)
-1. For each domain `{domain}`, invoke `cf-cdn-ir-final-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-final-validator/SKILL.md and follow its workflow. Validate the final IR for domain {domain} at cloudflare-to-aws-cdn/ir/final/{domain}.yaml. Verify all shared policy references exist in cloudflare-to-aws-cdn/shared/dedup_manifest.json. Output a validation report to cloudflare-to-aws-cdn/ir/validation/final/{domain}-v2.json. Generate output files in {user_language}."`
-2. Check the `status` field in the written JSON report:
-   - `"PASS"` → domain is ready for Terraform generation
-   - `"FAIL"` → use `fs_read` to read the V2 validation report JSON. Check the error types:
-     - If ALL errors are `GLOBAL_DEDUP_MANIFEST_MISSING` or `GLOBAL_CONVERSION_REPORT_MISSING`: the finalizer did not complete execution. Re-run Stage 5 once. If it FAILs again → stop the pipeline.
-     - Otherwise: stop the pipeline and tell the user: "The finalizer's input (V1-validated accumulators) is correct, but the finalized IR has structural errors. This is a pipeline bug — automatic retry will not improve the result. Please file a GitHub issue and attach the V2 validation report at cloudflare-to-aws-cdn/ir/validation/final/{domain}-v2.json."
-3. Once all non-SKIPPED domains have `status: "PASS"`, proceed to Stage 7.
+**Stage 4: V1 Chunk Validation**
+```bash
+python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-validate-chunk.py "cloudflare-to-aws-cdn"
+```
+Check exit code:
+- 0 → all PASS, proceed to Stage 5
+- 1 → some FAIL. Read the validation reports at `cloudflare-to-aws-cdn/ir/validation/chunk/{hostname}-v1.json`.
+  - If >50% of domains fail with the same error type → preprocess bug, stop pipeline
+  - Otherwise → delete failed domain's accumulator and validation files, re-run Stage 3 for that domain with `--domain`, then re-run Stage 4
+  - If second attempt also FAILs → mark domain as SKIPPED
+
+**Stage 5: Finalize**
+```bash
+python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-finalize.py "cloudflare-to-aws-cdn" [skipped_domains.json]
+```
+If there are SKIPPED domains, write a JSON file with `[{"hostname": "...", "reason": "..."}]` and pass it as the second argument.
+
+Check exit code:
+- 0 → proceed to Stage 6
+- 1 → stop pipeline, report error
+
+**Stage 6: V2 Final Validation**
+```bash
+python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-validate-final.py "cloudflare-to-aws-cdn"
+```
+Check exit code:
+- 0 → all PASS, proceed to Stage 7
+- 1 → some FAIL. Read `cloudflare-to-aws-cdn/ir/validation/final/{hostname}-v2.json`:
+  - If ALL errors are about missing `dedup_manifest.json` or `conversion_report.md` → re-run Stage 5
+  - Otherwise → pipeline bug, stop and tell user to file a GitHub issue
 
 **Stage 7: Shared Terraform Policies**
 1. Invoke `cf-cdn-tf-shared-policies` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-shared-policies/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Read cloudflare-to-aws-cdn/shared/dedup_manifest.json. Generate Terraform resources for all shared CloudFront policies. Write the output to cloudflare-to-aws-cdn/terraform/shared/policies.tf. Generate output files in {user_language}."`
@@ -253,7 +264,7 @@ Check the `---RESULT---` block:
    - `STATUS: ERROR` → report the error and stop
 
 **Stage 8: Per-Domain Terraform Generation** (parallelizable — invoke once per domain)
-1. For each domain `{domain}`, invoke `cf-cdn-tf-domain` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Generate Terraform configuration for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.yaml and the shared policy manifest at cloudflare-to-aws-cdn/shared/dedup_manifest.json. Write all output files to cloudflare-to-aws-cdn/terraform/domains/ (the skill will derive the sanitized directory name from the hostname). Generate output files in {user_language}."`
+1. For each domain `{domain}`, invoke `cf-cdn-tf-domain` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Generate Terraform configuration for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json and the shared policy manifest at cloudflare-to-aws-cdn/shared/dedup_manifest.json. Write all output files to cloudflare-to-aws-cdn/terraform/domains/ (the skill will derive the sanitized directory name from the hostname). Generate output files in {user_language}."`
 2. Wait for all domain Terraform generators to complete.
 
 **Stage 9: CloudFront Function JS Validation** (parallelizable — invoke once per domain)
@@ -263,7 +274,7 @@ Check the `---RESULT---` block:
    - `"FAIL"` → **auto-retry once** with the following procedure:
      a. Use `fs_read` to read `cloudflare-to-aws-cdn/ir/validation/js/{hostname}-v3.json` and extract the failed checks (entries where `status == "FAIL"`).
      b. Derive the sanitized hostname (replace every `.` and `-` with `_`, e.g., `cdn.c.example.com` → `cdn_c_example_com`). Use `execute_bash` to delete the old output: `rm -rf cloudflare-to-aws-cdn/terraform/domains/{sanitized}/`
-     c. Re-invoke `cf-cdn-tf-domain` with the error hint: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Generate Terraform configuration for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.yaml and the shared policy manifest at cloudflare-to-aws-cdn/shared/dedup_manifest.json. IMPORTANT: A previous generation attempt produced JavaScript validation errors. Pay special attention to these issues: {failed_checks}. Generate all files from scratch — do NOT read any existing files in terraform/domains/. Generate output files in {user_language}."`
+     c. Re-invoke `cf-cdn-tf-domain` with the error hint: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Generate Terraform configuration for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json and the shared policy manifest at cloudflare-to-aws-cdn/shared/dedup_manifest.json. IMPORTANT: A previous generation attempt produced JavaScript validation errors. Pay special attention to these issues: {failed_checks}. Generate all files from scratch — do NOT read any existing files in terraform/domains/. Generate output files in {user_language}."`
      d. Re-invoke `cf-cdn-js-validator` for this domain.
      e. If the second attempt also FAILs → mark this domain as `JS_VALIDATION_FAILED` (record the errors), continue processing other domains.
 3. Once all domains have completed (PASS or JS_VALIDATION_FAILED), proceed to Step 4 (final reporting).
@@ -292,7 +303,7 @@ For "Everything" scope, report results for each pipeline separately.
 
 - **Never read config files yourself** — always delegate to subagents
 - **Pass the exact path** the user provided; do not modify or resolve it
-- **Serial execution** for pipeline stages within a domain group; **parallel execution** where the same stage runs across multiple domains (Stages 3, 4, 6, 8, 9 of the CDN full pipeline)
+- **Serial execution** for pipeline stages; **parallel execution** where the same LLM stage runs across multiple domains (Stages 8, 9 of the CDN pipeline). Stages 3–6 are single Python script invocations (no parallelization needed — they process all domains internally).
 - **Parallel batch size: 2** (default). For parallelizable stages, dispatch at most 2 subagents at a time. Wait for the batch to complete before dispatching the next. This avoids hitting LLM API rate limits on most platforms (Anthropic Tier 1, AWS Bedrock default quotas). Users with higher API quotas can increase this — see the project README.
 - If the user's request is ambiguous about which conversion is needed, infer from context rather than asking
 - **When re-invoking the same subagent**, always explicitly state what action to perform and what inputs to use. Never assume the subagent remembers a previous invocation. Each call is a fresh session with no context. A vague re-invoke query (e.g. "run again") may cause the subagent to skip all tool calls and return immediately.

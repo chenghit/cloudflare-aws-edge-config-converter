@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""cdn-validate-chunk.py — Stage 4: Validate IR accumulator JSONs.
+
+Usage:
+    python3 cdn-validate-chunk.py <output_dir>
+
+Validates all ir/accumulator/*.json files (skips *.error.json).
+Writes ir/validation/chunk/{hostname}-v1.json per domain.
+Exit 0 = all PASS, 1 = any FAIL, 2 = fatal error.
+"""
+import json, sys, os, re
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cdn_expr_parser import FIELD_TO_ORP_HEADERS
+
+# All valid CloudFront-Viewer-* headers that can appear in required_orp_headers
+VALID_ORP_HEADERS = set()
+for headers in FIELD_TO_ORP_HEADERS.values():
+    VALID_ORP_HEADERS.update(headers)
+
+# Valid viewer_request_ops type ordering groups (same index = same priority)
+VR_OPS_ORDER_GROUP = {
+    "redirect": 0,
+    "rewrite": 1,
+    "origin_override": 2,
+    "bulk_redirect": 3,
+    "set_request_header": 4, "add_request_header": 4, "remove_request_header": 4,
+}
+
+REQUIRED_METADATA_FIELDS = [
+    "hostname", "sanitized_name", "apex_domain", "origin_type",
+    "cert_arn_mode", "kvs_requirements",
+]
+
+
+def validate_domain(ir, filename):
+    """Validate a single domain's IR accumulator. Returns (errors, warnings)."""
+    errors = []
+    warnings = []
+    hostname = ir.get("metadata", {}).get("hostname", "")
+    behaviors = ir.get("cache_behaviors", [])
+
+    # Check 1: path_pattern and precedence existence and type
+    for i, b in enumerate(behaviors):
+        if "path_pattern" not in b:
+            errors.append(f"Check1: cache_behaviors[{i}] missing path_pattern")
+        elif not isinstance(b["path_pattern"], str):
+            errors.append(f"Check1: cache_behaviors[{i}].path_pattern is not a string")
+        if "precedence" not in b:
+            errors.append(f"Check1: cache_behaviors[{i}] missing precedence")
+        elif not isinstance(b["precedence"], int):
+            errors.append(f"Check1: cache_behaviors[{i}].precedence is not an integer")
+
+    # Check 2: origin.domain validity
+    for i, b in enumerate(behaviors):
+        origin = b.get("origin", {})
+        domain = origin.get("domain", "")
+        if not domain:
+            errors.append(f"Check2: cache_behaviors[{i}].origin.domain is empty")
+        elif not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$', domain):
+            errors.append(f"Check2: cache_behaviors[{i}].origin.domain '{domain}' is not a valid hostname")
+
+    # Check 3: viewer_request_ops entry completeness
+    for i, b in enumerate(behaviors):
+        for j, op in enumerate(b.get("viewer_request_ops", [])):
+            if "type" not in op:
+                errors.append(f"Check3: cache_behaviors[{i}].viewer_request_ops[{j}] missing type")
+            if "cf_source_rule" not in op:
+                errors.append(f"Check3: cache_behaviors[{i}].viewer_request_ops[{j}] missing cf_source_rule")
+        for j, op in enumerate(b.get("viewer_response_ops", [])):
+            if "type" not in op:
+                errors.append(f"Check3: cache_behaviors[{i}].viewer_response_ops[{j}] missing type")
+
+    # Check 4: non_convertible reason non-empty
+    for i, b in enumerate(behaviors):
+        for j, nc in enumerate(b.get("non_convertible", [])):
+            reason = nc.get("reason", "")
+            if not reason or not reason.strip():
+                errors.append(f"Check4: cache_behaviors[{i}].non_convertible[{j}] has empty reason")
+
+    # Check 5: precedence uniqueness
+    precs = [b.get("precedence") for b in behaviors if b.get("precedence") is not None]
+    if len(precs) != len(set(precs)):
+        dupes = [p for p in precs if precs.count(p) > 1]
+        errors.append(f"Check5: duplicate precedence values: {sorted(set(dupes))}")
+
+    # Check 6: viewer_request_ops type ordering (by group)
+    for i, b in enumerate(behaviors):
+        ops = b.get("viewer_request_ops", [])
+        last_group = -1
+        for j, op in enumerate(ops):
+            op_type = op.get("type", "")
+            group = VR_OPS_ORDER_GROUP.get(op_type, 99)
+            if group < last_group:
+                errors.append(
+                    f"Check6: cache_behaviors[{i}].viewer_request_ops[{j}] "
+                    f"type '{op_type}' is out of order (after '{ops[j-1].get('type', '')}')"
+                )
+                break
+            last_group = group
+
+    # Check 7: hostname matches filename
+    expected_hostname = filename.replace(".json", "")
+    if hostname != expected_hostname:
+        errors.append(f"Check7: metadata.hostname '{hostname}' does not match filename '{expected_hostname}'")
+
+    # Check 8: KVS requirements consistency
+    kvs_req = ir.get("metadata", {}).get("kvs_requirements", {})
+    kvs_data = ir.get("metadata", {}).get("kvs_data", [])
+    if kvs_req.get("needs_redirects") and not kvs_data:
+        errors.append("Check8: kvs_requirements.needs_redirects is true but kvs_data is empty")
+    if not kvs_req.get("needs_redirects") and kvs_data:
+        errors.append("Check8: kvs_data is non-empty but kvs_requirements.needs_redirects is false")
+
+    # Check 9: metadata required fields
+    metadata = ir.get("metadata", {})
+    for field in REQUIRED_METADATA_FIELDS:
+        if field not in metadata:
+            errors.append(f"Check9: metadata missing required field '{field}'")
+
+    # Check 10: no .error.json residual (checked at directory level, not here)
+
+    # Check 11: condition and raw_expression mutual exclusivity
+    for i, b in enumerate(behaviors):
+        for ops_name in ("viewer_request_ops", "viewer_response_ops"):
+            for j, op in enumerate(b.get(ops_name, [])):
+                cond = op.get("condition")
+                raw = op.get("raw_expression")
+                has_cond = cond is not None
+                has_raw = raw is not None
+                if has_cond and has_raw:
+                    errors.append(
+                        f"Check11: cache_behaviors[{i}].{ops_name}[{j}] "
+                        f"has both condition and raw_expression (must be mutually exclusive)"
+                    )
+                if not has_cond and not has_raw:
+                    errors.append(
+                        f"Check11: cache_behaviors[{i}].{ops_name}[{j}] "
+                        f"has neither condition nor raw_expression"
+                    )
+
+    # Check 12: required_orp_headers consistency
+    for i, b in enumerate(behaviors):
+        orp_headers = set(b.get("required_orp_headers", []))
+        # 12a: all headers must be known
+        for h in orp_headers:
+            if h not in VALID_ORP_HEADERS:
+                errors.append(f"Check12: cache_behaviors[{i}].required_orp_headers contains unknown header '{h}'")
+        # 12b: conditions using geo fields must have corresponding ORP headers
+        needed = set()
+        for op in b.get("viewer_request_ops", []) + b.get("viewer_response_ops", []):
+            cond = op.get("condition")
+            if cond:
+                _collect_needed_orp(cond, needed)
+        missing = needed - orp_headers
+        if missing:
+            warnings.append(
+                f"Check12: cache_behaviors[{i}] conditions use fields requiring "
+                f"ORP headers {sorted(missing)} but they are not in required_orp_headers"
+            )
+
+    # Check 13: required_orp_headers count ≤ 10
+    for i, b in enumerate(behaviors):
+        orp_count = len(b.get("required_orp_headers", []))
+        if orp_count > 10:
+            warnings.append(
+                f"Check13: cache_behaviors[{i}] has {orp_count} required_orp_headers "
+                f"(CloudFront default quota is 10; request increase via AWS Support)"
+            )
+
+    # Check 14: cache policy headers/cookies/query_strings ≤ 10
+    for i, b in enumerate(behaviors):
+        cp = b.get("cache_policy", {})
+        ck = cp.get("cache_key", {})
+        for key in ("headers", "cookies"):
+            items = ck.get(key, [])
+            if isinstance(items, list) and len(items) > 10:
+                errors.append(
+                    f"Check14: cache_behaviors[{i}].cache_policy.cache_key.{key} "
+                    f"has {len(items)} items (CloudFront limit: 10)"
+                )
+        qs = ck.get("query_strings")
+        if isinstance(qs, list) and len(qs) > 10:
+            errors.append(
+                f"Check14: cache_behaviors[{i}].cache_policy.cache_key.query_strings "
+                f"has {len(qs)} items (CloudFront limit: 10)"
+            )
+        qs_list = ck.get("query_strings_list", [])
+        if isinstance(qs_list, list) and len(qs_list) > 10:
+            errors.append(
+                f"Check14: cache_behaviors[{i}].cache_policy.cache_key.query_strings_list "
+                f"has {len(qs_list)} items (CloudFront limit: 10)"
+            )
+
+    return errors, warnings
+
+
+def _collect_needed_orp(cond, needed):
+    """Recursively collect ORP headers needed by a condition."""
+    if "logic" in cond:
+        for p in cond.get("parts", []):
+            _collect_needed_orp(p, needed)
+    elif "field" in cond:
+        field = cond["field"]
+        for h in FIELD_TO_ORP_HEADERS.get(field, []):
+            needed.add(h)
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: cdn-validate-chunk.py <output_dir>", file=sys.stderr)
+        sys.exit(2)
+
+    output_dir = sys.argv[1]
+    acc_dir = os.path.join(output_dir, "ir", "accumulator")
+    val_dir = os.path.join(output_dir, "ir", "validation", "chunk")
+    os.makedirs(val_dir, exist_ok=True)
+
+    if not os.path.isdir(acc_dir):
+        print(f"ERROR: {acc_dir} not found", file=sys.stderr)
+        sys.exit(2)
+
+    # Check 10: detect .error.json residuals
+    error_files = [f for f in os.listdir(acc_dir) if f.endswith(".error.json")]
+
+    json_files = sorted(f for f in os.listdir(acc_dir) if f.endswith(".json") and not f.endswith(".error.json"))
+    if not json_files:
+        print("ERROR: no accumulator JSON files found", file=sys.stderr)
+        sys.exit(2)
+
+    all_pass = True
+    for filename in json_files:
+        filepath = os.path.join(acc_dir, filename)
+        hostname = filename.replace(".json", "")
+
+        try:
+            with open(filepath) as f:
+                ir = json.load(f)
+        except json.JSONDecodeError as e:
+            report = {
+                "hostname": hostname,
+                "validator": "cdn-validate-chunk",
+                "status": "FAIL",
+                "errors": [f"JSON parse error: {e}"],
+                "warnings": [],
+            }
+            _write_report(val_dir, hostname, report)
+            all_pass = False
+            print(f"FAIL: {hostname} (JSON parse error)")
+            continue
+
+        errors, warnings = validate_domain(ir, filename)
+
+        # Check 10: add error if this domain has a .error.json
+        err_file = f"{hostname}.error.json"
+        if err_file in error_files:
+            errors.append(f"Check10: {err_file} exists — preprocess failed for this domain")
+
+        status = "FAIL" if errors else "PASS"
+        report = {
+            "hostname": hostname,
+            "validator": "cdn-validate-chunk",
+            "status": status,
+            "errors": errors,
+            "warnings": warnings,
+        }
+        _write_report(val_dir, hostname, report)
+
+        if errors:
+            all_pass = False
+            print(f"FAIL: {hostname} ({len(errors)} errors)")
+            for e in errors:
+                print(f"  {e}")
+        else:
+            w = f" ({len(warnings)} warnings)" if warnings else ""
+            print(f"PASS: {hostname}{w}")
+
+    # Summary
+    print(f"\n{'='*60}")
+    if error_files:
+        print(f"⚠ Preprocess error files detected: {', '.join(error_files)}")
+    print(f"Validated {len(json_files)} domains: {'ALL PASS' if all_pass else 'SOME FAILED'}")
+
+    sys.exit(0 if all_pass else 1)
+
+
+def _write_report(val_dir, hostname, report):
+    path = os.path.join(val_dir, f"{hostname}-v1.json")
+    with open(path, "w") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+
+
+if __name__ == "__main__":
+    main()

@@ -397,7 +397,7 @@ hostname,apply_default_cache_behavior,cert_arn
   not found at the expected path, abort — do not search parent or sibling
   directories for other zones.
 - This skill does **not** read any rule files (Cache-Rules.txt, etc.). Rule processing
-  is handled by cf-cdn-per-domain-processor.
+  is handled by cdn-preprocess.py.
 - This skill does **not** validate ACM certificate ARNs — that is cf-cdn-input-validator's
   responsibility.
 - A hostname with `record_type: A` pointing to an IP address can still become a

@@ -47,3 +47,22 @@
 1. Stop current conversation immediately
 2. Start a new conversation
 3. Convert only one type of rule for one project at a time
+
+## CDN Python Script Errors
+
+**Problem**: CDN Stages 3–6 (Python scripts) fail with an error
+
+**Symptoms**:
+- `cdn-preprocess.py` exits with code 1 (partial) or 2 (total failure)
+- `cdn-validate-chunk.py` reports FAIL for one or more domains
+- `cdn-finalize.py` or `cdn-validate-final.py` exits with error
+
+**Solution**:
+1. Check the error output — Python scripts print specific error messages to stderr
+2. For preprocess failures: check `cloudflare-to-aws-cdn/ir/accumulator/<domain>.error.json` for details
+3. For validation failures: check `cloudflare-to-aws-cdn/ir/validation/chunk/<domain>-v1.json` or `final/<domain>-v2.json`
+4. Common causes:
+   - `domain_scope.json` not found → run Stage 2 (Input Validator) first
+   - JSON parse error in Cloudflare config → check if CloudflareBackup export is complete
+   - Zone directory not found → verify the config path points to the CloudflareBackup root (containing `account/` and zone subdirectories)
+5. To retry a single domain: `python3 cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`

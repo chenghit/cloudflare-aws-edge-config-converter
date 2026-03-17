@@ -4,7 +4,7 @@ description: >
   Validate operator-filled user_input.csv against dns_manifest.yaml, enforce data
   integrity (all proxied hostnames accounted for, valid Y/N flags, correct ACM ARN
   format), and produce domain_scope.json — the authoritative per-domain configuration
-  file consumed by cf-cdn-per-domain-processor.
+  file consumed by cdn-preprocess.py.
 metadata:
   author: chenghit
 ---
@@ -258,7 +258,7 @@ Construct the `domain_scope.json` object as follows:
 
 **`backup_path`**: Ask for the backup directory path if not already known from context.
 This should be the same directory path used in Step 1 (cf-cdn-dns-parser). It is
-stored here so that cf-cdn-per-domain-processor can locate all rule files without
+stored here so that cdn-preprocess.py can locate all rule files without
 needing to ask the operator again.
 
 #### Building `domains` array:
@@ -374,16 +374,15 @@ Output:
   <OUTPUT_DIR>/domain_scope.json
 
 Next steps:
-  Run cf-cdn-per-domain-processor for each domain in domain_scope.json.
-  This can be done in parallel — one invocation per domain.
+  Run cdn-preprocess.py to process all domains at once:
 
-  Example invocation:
-    cf-cdn-per-domain-processor --hostname cdn.c.example.com \
-      --domain-scope cloudflare-to-aws-cdn/domain_scope.json \
-      --backup-path <backup_dir>
+    python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-preprocess.py \
+      <backup_dir> cloudflare-to-aws-cdn
 
-  Or to process all domains sequentially:
-    For each hostname in domain_scope.json, run cf-cdn-per-domain-processor.
+  Or process a single domain:
+
+    python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-preprocess.py \
+      <backup_dir> cloudflare-to-aws-cdn --domain cdn.c.example.com
 ```
 
 ---
@@ -449,10 +448,10 @@ self-contained in the workflow steps above.
 ## Notes and Constraints
 
 - This skill performs **data validation only** — it does not read any Cloudflare rule
-  files. Rule processing is entirely in cf-cdn-per-domain-processor.
+  files. Rule processing is entirely in cdn-preprocess.py.
 - `domain_scope.json` is the **single source of truth** for all downstream steps.
   Never modify it manually after this point.
-- The `global_rules_note` field is a reminder to cf-cdn-per-domain-processor that
+- The `global_rules_note` field is a reminder to cdn-preprocess.py that
   rules without `http.host` conditions apply to every domain — this is documented
   here for traceability, not because this skill handles those rules.
 - If the operator wants to add a hostname that was NOT proxied in Cloudflare (e.g.,

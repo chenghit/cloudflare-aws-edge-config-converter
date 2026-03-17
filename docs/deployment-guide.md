@@ -160,8 +160,9 @@ After verifying each CloudFront distribution is working:
   edited.** It's a generic wrapper — all domain-specific configuration is in
   each domain's `main.tf`.
 - **CloudFront Functions have a 10KB size limit.** If a function exceeds this,
-  the pipeline automatically escalates logic to Lambda@Edge. Check the
-  `lambda/` directory in each domain.
+  the pipeline splits origin_override logic to Lambda@Edge origin-request.
+  Remaining viewer-event ops that still don't fit are marked non-convertible.
+  Check the `lambda/` directory in each domain for origin-event handlers.
 - **CloudFront KVS has a default quota of 50 stores per account.** If you have
   more than 50 domains using bulk redirects, [request a quota increase](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html)
   before deploying.

@@ -1,9 +1,0 @@
-{
-  "name": "cf-cdn-ir-final-validator",
-  "description": "Performs final validation on a single domain's finalized IR file at ir/final/{hostname}.yaml before Terraform generation. Verifies that all shared policy references exist in shared/dedup_manifest.json, cache behavior path patterns are valid CloudFront path patterns, ACM certificate ARN placeholders follow the expected format, CloudFront Function code is complete (not just snippets), all origins have a valid target, and no Cloudflare-specific features remain untranslated. On PASS, marks the domain as ready for Terraform generation. On issues, emits a structured ISSUES list with FIXED or CANNOT_FIX disposition per issue. Must be invoked once per domain (parallelizable). Accepts a --domain argument.",
-  "resources": [
-    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-ir-final-validator/SKILL.md"
-  ],
-  "tools": ["fs_read", "fs_write", "glob", "grep"],
-  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
-}

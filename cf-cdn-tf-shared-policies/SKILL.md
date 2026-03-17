@@ -61,7 +61,7 @@ JSON example covering all three policy types.
 
 ### Step 1 — Parse `dedup_manifest.json`
 
-The manifest produced by `cf-cdn-ir-finalizer` has this top-level structure:
+The manifest produced by `cdn-finalize.py` has this top-level structure:
 
 ```jsonc
 {

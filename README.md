@@ -38,12 +38,12 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 
 - **Kiro CLI** >= 1.24 — [Installation guide](https://kiro.dev/docs/getting-started/installation/). ⚠️ Kiro IDE is not recommended (does not support `skill://` resource binding in subagents).
 - **Terraform** >= 1.8.0 with AWS Provider >= 6.x — [Install Terraform](https://developer.hashicorp.com/terraform/install). Note: `terraform validate` (run automatically after WAF generation) requires internet access on first run to download the AWS provider (~300MB).
-- **Python 3** — Required by WAF pipeline helper scripts (count validation, JSON chunking). Pre-installed on macOS and most Linux distributions. No third-party packages needed (stdlib only).
+- **Python 3** — Required by both WAF and CDN pipeline scripts. WAF uses helper scripts for count validation and JSON chunking. CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–6) — these replaced LLM subagents for deterministic, sub-second processing. Pre-installed on macOS and most Linux distributions. No third-party packages needed (stdlib only).
 - **Model**: `claude-sonnet-4.6-1m` minimum. Switch with `/model` in Kiro.
   - **WAF migration**: `claude-sonnet-4.6-1m` for ≤ 100 rules, `claude-opus-4.6-1m` for > 100 rules. "Rules" = WAF Custom Rules + Rate Limiting Rules + IP Access Rules total. WAF pipeline supports up to ~200 CF rules; beyond that, consider simplifying rules in Cloudflare first or manual migration. The bottleneck for large rule sets is the Terraform generator's output — AWS WAF requires splitting Cloudflare rules that use top-level OR logic or mixed IPv4/IPv6 IP lists into multiple AWS WAF rules (e.g., a rule with 3 OR branches and mixed IPs becomes 6 AWS WAF rules). Typical split ratio is ~2x; simple zones ~1.5x, complex zones with many OR + mixed IP rules up to 3x. Each AWS WAF rule generates ~150 output tokens of HCL:
     - Sonnet 4.6 max output: 64K tokens → safe for ~200 AWS WAF rules (~100 CF rules)
     - Opus 4.6 max output: 128K tokens → safe for ~400 AWS WAF rules (~200 CF rules)
-  - **CDN migration**: `claude-sonnet-4.6-1m` regardless of domain count. CDN bottleneck is context window (reading all rule files + references per domain), not output tokens — each domain is processed independently and generates ~200 lines of Terraform, well within Sonnet's 64K output limit. Opus is not needed.
+  - **CDN migration**: `claude-sonnet-4.6-1m` regardless of domain count. CDN Stages 3–6 are Python scripts (no LLM cost). The remaining LLM stages (DNS parsing, input validation, Terraform/JS generation, JS validation) each process one domain independently and generate ~200 lines of output, well within Sonnet's 64K output limit. Opus is not needed for token capacity, but consider switching to Opus if Sonnet produces incorrect JavaScript for complex Cloudflare expressions (regex_replace, wildcard_replace with capture groups).
 - **ACM certificates** (CDN only): CloudFront requires certs in us-east-1. Provision wildcard certificates (e.g., `*.example.com`) before running, or leave blank in the CSV to let Terraform auto-discover existing ISSUED certs.
 - **Input format**: Only works with [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) exports. NOT compatible with [cf-terraforming](https://github.com/cloudflare/cf-terraforming) — see [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md).
 
@@ -71,7 +71,9 @@ The tool runs as a Kiro CLI skill with an orchestrator that dispatches to specia
 
 **WAF pipeline** (4 stages): analyze (3 batches) → merge + validate (parallel) → generate Terraform → terraform validate
 
-**CDN pipeline** (9 stages): parse DNS → validate user input → process rules per domain → validate IR → finalize + dedup → validate final IR → generate shared policies → generate per-domain Terraform + JS → validate JS
+**CDN pipeline** (5 LLM stages + 4 Python scripts): parse DNS → validate user input → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → generate shared policies → generate per-domain Terraform + JS → validate JS
+
+CDN Stages 3–6 are deterministic Python scripts that replaced LLM subagents. They handle rule parsing, field mapping, expression analysis, cache behavior assembly, policy deduplication, and IR validation — all table-lookup and structural operations that don't need LLM judgment. This makes Stages 3–6 instant (<1 second for any number of domains), fully reproducible, and eliminates ~30 minutes of LLM processing per zone. The remaining LLM stages (7–9) handle Terraform/JS code generation, which genuinely benefits from language model capabilities.
 
 ```mermaid
 flowchart TD
@@ -81,10 +83,10 @@ flowchart TD
 
     Main -->|CDN| CDN1["DNS Parser"] -->|CSV| Pause[/"⏸ User fills CSV"/]
     Pause --> CDN2["Input Validator"]
-    CDN2 --> CDN3["Processor × N"]
-    CDN3 --> CDN4["V1 Validator × N"]
-    CDN4 -->|PASS| CDN5["Finalizer"]
-    CDN5 --> CDN6["V2 Validator × N"]
+    CDN2 --> CDN3["🐍 Preprocess"]
+    CDN3 --> CDN4["🐍 V1 Validate"]
+    CDN4 -->|PASS| CDN5["🐍 Finalize"]
+    CDN5 --> CDN6["🐍 V2 Validate"]
     CDN6 -->|PASS| CDN7["Shared Policies"]
     CDN7 --> CDN8["TF Domain × N"]
     CDN8 --> CDN9["JS Validator × N"]
@@ -185,7 +187,7 @@ Update: `git pull && ./install.sh`
 
 > **Using a different agent tool?** The install scripts and all SKILL.md files use `~/.kiro/skills/` as the default skill directory (Kiro CLI convention). To use these skills with another agent tool, you need to: (1) modify `install.sh` / `uninstall.sh` to point to your tool's skill directory, and (2) find-and-replace `~/.kiro/skills/` with your tool's skill path across all SKILL.md files — subagents reference each other by absolute installed path.
 
-For advanced users: `/agent swap <subagent-name>` to run individual pipeline stages. Available subagents: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-terraform-generator`, `cf-cdn-dns-parser`, `cf-cdn-input-validator`, `cf-cdn-per-domain-processor`, `cf-cdn-ir-chunk-validator`, `cf-cdn-ir-finalizer`, `cf-cdn-ir-final-validator`, `cf-cdn-tf-shared-policies`, `cf-cdn-tf-domain`, `cf-cdn-js-validator`.
+For advanced users: `/agent swap <subagent-name>` to run individual pipeline stages. Available subagents: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-terraform-generator`, `cf-cdn-dns-parser`, `cf-cdn-input-validator`, `cf-cdn-tf-shared-policies`, `cf-cdn-tf-domain`, `cf-cdn-js-validator`. CDN Stages 3–6 are Python scripts (not subagents) — run them directly via `python3`.
 
 ## Subagent Permissions and Security
 

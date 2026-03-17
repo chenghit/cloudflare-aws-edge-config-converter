@@ -138,5 +138,5 @@ aws cloudfront-keyvaluestore put-key \
 - **部署前先看 `conversion_report.md`**。里面列了所有无法转换的规则，可能需要手动处理。
 - **`ir/` 目录仅用于调试。** 部署不需要它。里面是转换过程中用到的中间表示和验证报告。
 - **共享 module（`modules/cloudfront_distribution/`）别改。** 它是通用 wrapper——所有域名特定配置都在各域名的 `main.tf` 里。
-- **CloudFront Functions 有 10KB 大小限制。** 超了的话，pipeline 会自动把逻辑升级到 Lambda@Edge。检查每个域名的 `lambda/` 目录。
+- **CloudFront Functions 有 10KB 大小限制。** 超了的话，pipeline 会把 origin_override 逻辑拆到 Lambda@Edge origin-request。剩余 viewer 逻辑如果还是放不下，会标记为 non-convertible。检查每个域名的 `lambda/` 目录看有没有 origin event handler。
 - **CloudFront KVS 默认配额是每账户 50 个 store。** 如果超过 50 个域名用了 bulk redirects，部署前先[申请配额提升](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html)。
