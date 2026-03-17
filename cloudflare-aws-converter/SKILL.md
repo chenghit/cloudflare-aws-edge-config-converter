@@ -314,6 +314,22 @@ For "Everything" scope, report results for each pipeline separately.
 - Any domains or rules that could not be automatically converted (link to `conversion_report.md`)
 - Path to generated Terraform files
 
+After the summary table, include deployment instructions:
+```
+## Next Steps: Deploy
+
+1. Set your AWS profile (must have CloudFront, Lambda, IAM, and ACM permissions):
+   export AWS_PROFILE=<your-profile-name>
+
+2. Deploy shared policies first:
+   cd cloudflare-to-aws-cdn/terraform/shared && terraform init && terraform apply
+
+3. Deploy each domain:
+   cd cloudflare-to-aws-cdn/terraform/domains/<domain>/ && terraform init && terraform apply
+
+See docs/deployment-guide.md for the full deployment order and DNS cutover steps.
+```
+
 ## Important Rules
 
 - **Never read config files yourself** — always delegate to subagents
