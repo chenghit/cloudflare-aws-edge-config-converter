@@ -115,6 +115,11 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
     w('      source  = "hashicorp/aws"')
     w('      version = ">= 6.0"')
     w('    }')
+    if has_le_origin_resp:
+        w('    archive = {')
+        w('      source  = "hashicorp/archive"')
+        w('      version = ">= 2.0"')
+        w('    }')
     w('  }')
     w('}')
     w('')
@@ -266,11 +271,11 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
         w('  ]')
         w('')
 
-    # Default Lambda@Edge associations — placeholder for tf-domain to fill
+    # Default Lambda@Edge associations
     le_assocs = []
     if has_le_origin_resp:
-        le_assocs.append('    { event_type = "origin-response", lambda_arn = "REPLACE_WITH_DEPLOYED_LAMBDA_ARN", include_body = false }')
-    # origin-request L@E is determined by tf-domain (CFF size check), leave placeholder
+        le_assocs.append(f'    {{ event_type = "origin-response", lambda_arn = aws_lambda_function.{san}_origin_response.qualified_arn, include_body = false }}')
+    # origin-request L@E is determined by tf-domain (CFF size check) — not pre-generated
     if le_assocs:
         w('  default_lambda_function_associations = [')
         for la in le_assocs:
@@ -365,6 +370,8 @@ def generate_functions_tf(ir):
     hostname = ir["metadata"]["hostname"]
     has_vresp = has_viewer_response_ops(ir)
     has_kvs = any(ir["metadata"].get("kvs_requirements", {}).values())
+    le = ir["metadata"].get("lambda_edge", {})
+    has_le_origin_resp = le.get("origin_response") is not None
 
     lines = []
     w = lines.append
@@ -387,6 +394,47 @@ def generate_functions_tf(ir):
         w(f'  publish = true')
         w(f'  code    = file("${{path.module}}/functions/{san}_viewer_response.js")')
         w('}')
+
+    # Lambda@Edge origin-response (deterministic — from IR)
+    if has_le_origin_resp:
+        w('')
+        w(f'# --- Lambda@Edge: origin-response (default cache TTL) ---')
+        w('')
+        w(f'resource "aws_iam_role" "{san}_lambda_edge" {{')
+        w(f'  name = "cfcdn-{san}-lambda-edge"')
+        w(f'  assume_role_policy = jsonencode({{')
+        w(f'    Version = "2012-10-17"')
+        w(f'    Statement = [{{')
+        w(f'      Action = "sts:AssumeRole"')
+        w(f'      Effect = "Allow"')
+        w(f'      Principal = {{')
+        w(f'        Service = ["lambda.amazonaws.com", "edgelambda.amazonaws.com"]')
+        w(f'      }}')
+        w(f'    }}]')
+        w(f'  }})')
+        w(f'}}')
+        w('')
+        w(f'resource "aws_iam_role_policy_attachment" "{san}_lambda_edge_basic" {{')
+        w(f'  role       = aws_iam_role.{san}_lambda_edge.name')
+        w(f'  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"')
+        w(f'}}')
+        w('')
+        w(f'data "archive_file" "{san}_origin_response_zip" {{')
+        w(f'  type        = "zip"')
+        w(f'  source_file = "${{path.module}}/lambda/default_cache_origin_response.js"')
+        w(f'  output_path = "${{path.module}}/lambda/default_cache_origin_response.zip"')
+        w(f'}}')
+        w('')
+        w(f'resource "aws_lambda_function" "{san}_origin_response" {{')
+        w(f'  provider         = aws.us_east_1')
+        w(f'  filename         = data.archive_file.{san}_origin_response_zip.output_path')
+        w(f'  source_code_hash = data.archive_file.{san}_origin_response_zip.output_base64sha256')
+        w(f'  function_name    = "cfcdn-{san}-origin-response"')
+        w(f'  role             = aws_iam_role.{san}_lambda_edge.arn')
+        w(f'  handler          = "default_cache_origin_response.handler"')
+        w(f'  runtime          = "nodejs20.x"')
+        w(f'  publish          = true')
+        w(f'}}')
 
     w('')
     w('# --- LAMBDA_EDGE_PLACEHOLDER ---')
