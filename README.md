@@ -38,7 +38,7 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 
 - **Kiro CLI** >= 1.24 — [Installation guide](https://kiro.dev/docs/getting-started/installation/). ⚠️ Kiro IDE is not recommended (does not support `skill://` resource binding in subagents).
 - **Terraform** >= 1.8.0 with AWS Provider >= 6.x — [Install Terraform](https://developer.hashicorp.com/terraform/install). Note: `terraform validate` (run automatically after WAF generation) requires internet access on first run to download the AWS provider (~300MB).
-- **Python 3** — Required by both WAF and CDN pipeline scripts. WAF uses helper scripts for count validation and JSON chunking. CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–6) — these replaced LLM subagents for deterministic, sub-second processing. Pre-installed on macOS and most Linux distributions. No third-party packages needed (stdlib only).
+- **Python 3** — Required by both WAF and CDN pipeline scripts. WAF uses Python for IP list/access rule analysis and helper scripts for count validation and JSON chunking. CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–7.5) — these replaced LLM subagents for deterministic, sub-second processing. Pre-installed on macOS and most Linux distributions. No third-party packages needed (stdlib only).
 - **Model**: `claude-sonnet-4.6-1m` minimum. Switch with `/model` in Kiro.
   - **WAF migration**: `claude-sonnet-4.6-1m` for ≤ 100 rules, `claude-opus-4.6-1m` for > 100 rules. "Rules" = WAF Custom Rules + Rate Limiting Rules + IP Access Rules total. WAF pipeline supports up to ~200 CF rules; beyond that, consider simplifying rules in Cloudflare first or manual migration. The bottleneck for large rule sets is the Terraform generator's output — AWS WAF requires splitting Cloudflare rules that use top-level OR logic or mixed IPv4/IPv6 IP lists into multiple AWS WAF rules (e.g., a rule with 3 OR branches and mixed IPs becomes 6 AWS WAF rules). Typical split ratio is ~2x; simple zones ~1.5x, complex zones with many OR + mixed IP rules up to 3x. Each AWS WAF rule generates ~150 output tokens of HCL:
     - Sonnet 4.6 max output: 64K tokens → safe for ~200 AWS WAF rules (~100 CF rules)
@@ -69,7 +69,7 @@ Not all Cloudflare features have CloudFront equivalents. Non-convertible items a
 
 The tool runs as a Kiro CLI skill with an orchestrator that dispatches to specialized subagents. Each subagent has isolated context and handles one pipeline stage.
 
-**WAF pipeline** (4 stages): analyze (3 batches) → merge + validate (parallel) → generate Terraform → terraform validate
+**WAF pipeline** (4 stages): **analyze IP lists (Python)** → analyze custom rules + rate limits (2 LLM batches) → merge + validate (parallel) → generate Terraform → terraform validate
 
 **CDN pipeline** (4 LLM stages + 6 Python scripts): parse DNS → validate user input → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → **generate shared policies (Python)** → **generate per-domain Terraform scaffold (Python)** → generate per-domain JS → validate JS
 
@@ -79,7 +79,7 @@ CDN Stages 3–7.5 are deterministic Python scripts that replaced LLM subagents.
 flowchart TD
     User([User]) -->|"Convert WAF / CDN / All"| Main["Orchestrator"]
 
-    Main -->|WAF| WAF_A["Analyzer × 3"] --> WAF_M["Merge IR"] --> WAF_V["Validator × N"] -->|PASS| WAF_G["TF Generator"] --> WAF_T{{"terraform validate"}} --> WAF_Done([WAF Terraform ✅])
+    Main -->|WAF| WAF_IP["🐍 IP Analyzer"] --> WAF_A["Analyzer × 2"] --> WAF_M["Merge IR"] --> WAF_V["Validator × N"] -->|PASS| WAF_G["TF Generator"] --> WAF_T{{"terraform validate"}} --> WAF_Done([WAF Terraform ✅])
 
     Main -->|CDN| CDN1["DNS Parser"] -->|CSV| Pause[/"⏸ User fills CSV"/]
     Pause --> CDN2["Input Validator"]

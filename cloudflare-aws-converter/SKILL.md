@@ -127,9 +127,13 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
      - User says use existing → skip to Stage 2
    - If it does not exist → proceed to invoke analyzer below
 
-2. Invoke analyzer 3 times in sequence (A1 → A2 → extract skip labels → A3):
+2. Run A1 (Python) then invoke A2 and A3 (LLM) in sequence:
 
-   **A1**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. Analyze batch A1: IP Lists and IP Access Rules. The Cloudflare backup directory is {config_path}. Generate output files in {user_language}."`
+   **A1** (Python script, no LLM):
+   ```bash
+   python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-analyze-ip.py "{config_path}" "cloudflare-to-aws-waf"
+   ```
+   Check exit code: 0 = OK, 1 = error (stop pipeline).
 
    **A2**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. Analyze batch A2: WAF Custom Rules. The Cloudflare backup directory is {config_path}. Generate output files in {user_language}."`
 
