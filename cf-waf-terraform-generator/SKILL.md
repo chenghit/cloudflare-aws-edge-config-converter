@@ -207,7 +207,7 @@ Create `locals.ip_set_arns` map and call module twice:
 
 Create `README_aws-waf-terraform-deployment.md` with:
 - Prerequisites: Terraform >= 1.8.0, AWS Provider >= 6.2.0
-- Deployment: `terraform init && terraform apply`
+- Deployment steps: `cd cloudflare-to-aws-waf`, `export AWS_PROFILE=your-profile`, `terraform init`, `terraform plan` (review changes), `terraform apply`
 - CloudFront association instructions
 - Two Web ACLs: website (challenge enabled) vs api-and-file (challenge disabled)
 - IP sets quota note
