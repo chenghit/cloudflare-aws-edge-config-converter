@@ -27,8 +27,7 @@ Orchestrate conversion of Cloudflare configurations to AWS by delegating to spec
 |----------|---------|---------------------------|
 | `cf-cdn-dns-parser` | DNS export → domain manifest + input template | CDN, full migration, domains, DNS |
 | `cf-cdn-input-validator` | Validates user_input.csv → domain_scope.json | (invoked automatically after user fills input) |
-| `cf-cdn-tf-shared-policies` | Final IR → shared Terraform policies | (invoked after all final IRs validated) |
-| `cf-cdn-tf-domain` | Per-domain final IR → Terraform distribution config | (invoked once per domain, parallelizable) |
+| `cf-cdn-tf-domain` | Per-domain final IR → JS files for CloudFront distribution | (invoked once per domain, parallelizable) |
 | `cf-cdn-js-validator` | Validates each domain's CloudFront Function JS | (invoked once per domain, parallelizable) |
 
 ## Workflow
@@ -257,14 +256,22 @@ Check exit code:
   - If ALL errors are about missing `dedup_manifest.json` or `conversion_report.md` → re-run Stage 5
   - Otherwise → pipeline bug, stop and tell user to file a GitHub issue
 
-**Stage 7: Shared Terraform Policies**
-1. Invoke `cf-cdn-tf-shared-policies` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-shared-policies/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Read cloudflare-to-aws-cdn/shared/dedup_manifest.json. Generate Terraform resources for all shared CloudFront policies. Write the output to cloudflare-to-aws-cdn/terraform/shared/policies.tf. Generate output files in {user_language}."`
-2. Check the `---RESULT---` block:
-   - `STATUS: COMPLETE` → proceed to Stage 8
-   - `STATUS: ERROR` → report the error and stop
+**Stage 7: Shared Terraform Policies** (Python script, no LLM)
+```bash
+python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-shared-policies.py "cloudflare-to-aws-cdn"
+```
+Check exit code:
+- 0 → proceed to Stage 7.5
+- 1 → stop pipeline, report error
 
-**Stage 8: Per-Domain Terraform Generation** (parallelizable — invoke once per domain)
-1. For each domain `{domain}`, invoke `cf-cdn-tf-domain` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Generate Terraform configuration for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json and the shared policy manifest at cloudflare-to-aws-cdn/shared/dedup_manifest.json. Write all output files to cloudflare-to-aws-cdn/terraform/domains/ (the skill will derive the sanitized directory name from the hostname). Generate output files in {user_language}."`
+**Stage 7.5: Generate Terraform Scaffold** (Python script, no LLM)
+```bash
+python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-tf-scaffold.py "cloudflare-to-aws-cdn"
+```
+Generates main.tf, functions.tf, outputs.tf, kvs.tf, kvs-data.json for each domain. These are deterministic template files — no LLM needed. Proceed to Stage 8.
+
+**Stage 8: Per-Domain JS Generation** (parallelizable — invoke once per domain)
+1. For each domain `{domain}`, invoke `cf-cdn-tf-domain` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Generate JavaScript files for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json. Terraform scaffold files (main.tf, functions.tf, etc.) have already been generated at cloudflare-to-aws-cdn/terraform/domains/. Only generate JS files (viewer_request.js, viewer_response.js, Lambda@Edge handlers if needed). If Lambda@Edge files are generated, update functions.tf by replacing the LAMBDA_EDGE_PLACEHOLDER comment with L@E resource blocks, and update main.tf lambda_function_associations. Generate output files in {user_language}."`
 2. Wait for all domain Terraform generators to complete.
 
 **Stage 9: CloudFront Function JS Validation** (parallelizable — invoke once per domain)
@@ -273,8 +280,8 @@ Check exit code:
    - `"PASS"` → domain JS is valid
    - `"FAIL"` → **auto-retry once** with the following procedure:
      a. Use `fs_read` to read `cloudflare-to-aws-cdn/ir/validation/js/{hostname}-v3.json` and extract the failed checks (entries where `status == "FAIL"`).
-     b. Derive the sanitized hostname (replace every `.` and `-` with `_`, e.g., `cdn.c.example.com` → `cdn_c_example_com`). Use `execute_bash` to delete the old output: `rm -rf cloudflare-to-aws-cdn/terraform/domains/{sanitized}/`
-     c. Re-invoke `cf-cdn-tf-domain` with the error hint: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Generate Terraform configuration for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json and the shared policy manifest at cloudflare-to-aws-cdn/shared/dedup_manifest.json. IMPORTANT: A previous generation attempt produced JavaScript validation errors. Pay special attention to these issues: {failed_checks}. Generate all files from scratch — do NOT read any existing files in terraform/domains/. Generate output files in {user_language}."`
+     b. Derive the sanitized hostname (replace every `.` and `-` with `_`, e.g., `cdn.c.example.com` → `cdn_c_example_com`). Use `execute_bash` to delete only the JS output (preserve scaffold files): `rm -rf cloudflare-to-aws-cdn/terraform/domains/{sanitized}/functions/ cloudflare-to-aws-cdn/terraform/domains/{sanitized}/lambda/`
+     c. Re-invoke `cf-cdn-tf-domain` with the error hint: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Generate JavaScript files for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json. IMPORTANT: A previous generation attempt produced JavaScript validation errors. Pay special attention to these issues: {failed_checks}. Generate all JS files from scratch — do NOT read any existing JS files. Generate output files in {user_language}."`
      d. Re-invoke `cf-cdn-js-validator` for this domain.
      e. If the second attempt also FAILs → mark this domain as `JS_VALIDATION_FAILED` (record the errors), continue processing other domains.
 3. Once all domains have completed (PASS or JS_VALIDATION_FAILED), proceed to Step 4 (final reporting).

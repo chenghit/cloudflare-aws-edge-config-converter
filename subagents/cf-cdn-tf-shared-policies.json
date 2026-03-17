@@ -1,9 +1,0 @@
-{
-  "name": "cf-cdn-tf-shared-policies",
-  "description": "Generates the shared Terraform configuration file terraform/shared/policies.tf containing all deduplicated CloudFront managed policies. Reads shared/dedup_manifest.json and creates Terraform resources for: aws_cloudfront_cache_policy (custom cache policies with TTL and query string settings), aws_cloudfront_origin_request_policy (header and cookie forwarding settings), aws_cloudfront_response_headers_policy (security headers, CORS, and custom headers), and aws_cloudfront_function resources for shared CloudFront Functions used across multiple domains. Also writes terraform/shared/outputs.tf exporting policy ARNs and IDs for consumption by per-domain modules. References AWS managed policy data sources where applicable to avoid recreating existing policies.",
-  "resources": [
-    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-shared-policies/SKILL.md"
-  ],
-  "tools": ["fs_read", "fs_write", "glob", "grep"],
-  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
-}

@@ -71,7 +71,7 @@ The tool runs as a Kiro CLI skill with an orchestrator that dispatches to specia
 
 **WAF pipeline** (4 stages): analyze (3 batches) → merge + validate (parallel) → generate Terraform → terraform validate
 
-**CDN pipeline** (5 LLM stages + 4 Python scripts): parse DNS → validate user input → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → generate shared policies → generate per-domain Terraform + JS → validate JS
+**CDN pipeline** (4 LLM stages + 6 Python scripts): parse DNS → validate user input → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → **generate shared policies (Python)** → **generate per-domain Terraform scaffold (Python)** → generate per-domain JS → validate JS
 
 CDN Stages 3–6 are deterministic Python scripts that replaced LLM subagents. They handle rule parsing, field mapping, expression analysis, cache behavior assembly, policy deduplication, and IR validation — all table-lookup and structural operations that don't need LLM judgment. This makes Stages 3–6 instant (<1 second for any number of domains), fully reproducible, and eliminates ~30 minutes of LLM processing per zone. The remaining LLM stages (7–9) handle Terraform/JS code generation, which genuinely benefits from language model capabilities.
 
@@ -87,8 +87,9 @@ flowchart TD
     CDN3 --> CDN4["🐍 V1 Validate"]
     CDN4 -->|PASS| CDN5["🐍 Finalize"]
     CDN5 --> CDN6["🐍 V2 Validate"]
-    CDN6 -->|PASS| CDN7["Shared Policies"]
-    CDN7 --> CDN8["TF Domain × N"]
+    CDN6 -->|PASS| CDN7["🐍 Shared Policies"]
+    CDN7 --> CDN75["🐍 TF Scaffold"]
+    CDN75 --> CDN8["TF Domain × N"]
     CDN8 --> CDN9["JS Validator × N"]
     CDN9 -->|PASS| CDN_Done([CDN Terraform + JS ✅])
 
@@ -187,7 +188,7 @@ Update: `git pull && ./install.sh`
 
 > **Using a different agent tool?** The install scripts and all SKILL.md files use `~/.kiro/skills/` as the default skill directory (Kiro CLI convention). To use these skills with another agent tool, you need to: (1) modify `install.sh` / `uninstall.sh` to point to your tool's skill directory, and (2) find-and-replace `~/.kiro/skills/` with your tool's skill path across all SKILL.md files — subagents reference each other by absolute installed path.
 
-For advanced users: `/agent swap <subagent-name>` to run individual pipeline stages. Available subagents: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-terraform-generator`, `cf-cdn-dns-parser`, `cf-cdn-input-validator`, `cf-cdn-tf-shared-policies`, `cf-cdn-tf-domain`, `cf-cdn-js-validator`. CDN Stages 3–6 are Python scripts (not subagents) — run them directly via `python3`.
+For advanced users: `/agent swap <subagent-name>` to run individual pipeline stages. Available subagents: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-terraform-generator`, `cf-cdn-dns-parser`, `cf-cdn-input-validator`, `cf-cdn-tf-domain`, `cf-cdn-js-validator`. CDN Stages 3–7.5 are Python scripts (not subagents) — run them directly via `python3`.
 
 ## Subagent Permissions and Security
 

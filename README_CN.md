@@ -71,7 +71,7 @@ kiro-cli chat
 
 **WAF 流程**（4 阶段）：分析（3 批次）→ 合并 + 校验（并行）→ 生成 Terraform → terraform validate
 
-**CDN 流程**（5 个 LLM 阶段 + 4 个 Python 脚本）：解析 DNS → 校验用户输入 → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → 生成共享策略 → 生成每域名 Terraform + JS → 校验 JS
+**CDN 流程**（4 个 LLM 阶段 + 6 个 Python 脚本）：解析 DNS → 校验用户输入 → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → 生成每域名 JS → 校验 JS
 
 CDN Stage 3–6 是确定性 Python 脚本，替代了原来的 LLM subagent。它们负责规则解析、字段映射、表达式分析、缓存行为组装、策略去重和 IR 校验——全是查表和结构化操作，不需要 LLM 判断。这使得 Stage 3–6 瞬间完成（任意域名数量 <1 秒）、完全可复现，并省去了每个 zone 约 30 分钟的 LLM 处理时间。剩余的 LLM 阶段（7–9）负责 Terraform/JS 代码生成，这些确实需要语言模型能力。
 
@@ -87,8 +87,9 @@ flowchart TD
     CDN3 --> CDN4["🐍 V1 校验"]
     CDN4 -->|通过| CDN5["🐍 合并"]
     CDN5 --> CDN6["🐍 V2 校验"]
-    CDN6 -->|通过| CDN7["共享策略"]
-    CDN7 --> CDN8["TF 域名 × N"]
+    CDN6 -->|通过| CDN7["🐍 共享策略"]
+    CDN7 --> CDN75["🐍 TF 骨架"]
+    CDN75 --> CDN8["TF 域名 × N"]
     CDN8 --> CDN9["JS 校验 × N"]
     CDN9 -->|通过| CDN_Done([CDN Terraform + JS ✅])
 
@@ -187,7 +188,7 @@ cd cloudflare-aws-edge-config-converter
 
 > **使用其他 Agent 工具？** 安装脚本和所有 SKILL.md 文件默认使用 `~/.kiro/skills/` 作为 skill 安装目录（Kiro CLI 约定）。如需配合其他 agent 工具使用，需要：(1) 修改 `install.sh` / `uninstall.sh` 中的目标目录；(2) 在所有 SKILL.md 文件中将 `~/.kiro/skills/` 全局替换为你的 agent 工具的 skill 路径——subagent 之间通过绝对安装路径互相引用。
 
-高级用户可通过 `/agent swap <subagent-name>` 单独运行各流程阶段。可用 subagent：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-tf-shared-policies`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。CDN Stage 3–6 为 Python 脚本（非 subagent），直接通过 `python3` 运行。
+高级用户可通过 `/agent swap <subagent-name>` 单独运行各流程阶段。可用 subagent：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。CDN Stage 3–7.5 为 Python 脚本（非 subagent），直接通过 `python3` 运行。
 
 ## Subagent 权限与安全
 

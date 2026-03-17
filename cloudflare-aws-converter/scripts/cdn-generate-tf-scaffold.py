@@ -1,0 +1,570 @@
+#!/usr/bin/env python3
+"""cdn-generate-tf-scaffold.py — Stage 7.5: Generate Terraform scaffold files.
+
+Generates all deterministic Terraform files from finalized IR JSON.
+tf-domain (Stage 8) only needs to generate JS files afterward.
+
+Usage:
+    python3 cdn-generate-tf-scaffold.py <output_dir>
+
+Exit codes: 0 = OK, 1 = error.
+"""
+import json, sys, os
+
+
+def load_ir(final_dir, hostname):
+    path = os.path.join(final_dir, f"{hostname}.json")
+    with open(path) as f:
+        return json.load(f)
+
+
+def load_manifest(shared_dir):
+    path = os.path.join(shared_dir, "dedup_manifest.json")
+    with open(path) as f:
+        return json.load(f)
+
+
+# ── Origin deduplication ─────────────────────────────────────────────────────
+
+def collect_origins(ir):
+    """Collect unique origins from all cache behaviors. Returns list of origin dicts."""
+    seen = {}  # domain → origin dict with unique id
+    sanitized = ir["metadata"]["sanitized_name"]
+    for b in ir["cache_behaviors"]:
+        o = b["origin"]
+        domain = o["domain"]
+        if domain not in seen:
+            idx = len(seen)
+            oid = f"origin_{sanitized}" if idx == 0 else f"origin_{sanitized}_{idx}"
+            seen[domain] = {
+                "origin_id": oid,
+                "domain": domain,
+                "protocol": o.get("protocol", "https"),
+                "port": o.get("port", 443),
+                "host_header": o.get("host_header"),
+                "custom_origin_headers": o.get("custom_origin_headers", []),
+                "s3_origin": o.get("s3_origin", False),
+            }
+    return list(seen.values()), {d: v["origin_id"] for d, v in seen.items()}
+
+
+def has_viewer_response_ops(ir):
+    return any(len(b.get("viewer_response_ops", [])) > 0 for b in ir["cache_behaviors"])
+
+
+def collect_orp_headers(ir):
+    """Collect all required_orp_headers across all behaviors, deduplicated."""
+    headers = set()
+    for b in ir["cache_behaviors"]:
+        headers.update(b.get("required_orp_headers", []))
+    return sorted(headers)
+
+
+# ── HCL generation helpers ───────────────────────────────────────────────────
+
+def hcl_string(val):
+    if val is None:
+        return "null"
+    return f'"{val}"'
+
+
+def hcl_bool(val):
+    return "true" if val else "false"
+
+
+def hcl_list_strings(items):
+    if not items:
+        return "[]"
+    inner = ", ".join(f'"{i}"' for i in items)
+    return f"[{inner}]"
+
+
+def hcl_id(pid):
+    """Convert policy ID to valid HCL identifier (replace hyphens)."""
+    return pid.replace("-", "_")
+
+
+# ── main.tf generation ───────────────────────────────────────────────────────
+
+def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
+    meta = ir["metadata"]
+    san = meta["sanitized_name"]
+    hostname = meta["hostname"]
+    apex = meta["apex_domain"]
+    behaviors = ir["cache_behaviors"]
+    default_beh = next(b for b in behaviors if b["path_pattern"] == "*")
+    ordered_behs = [b for b in behaviors if b["path_pattern"] != "*"]
+    ds = default_beh["distribution_settings"]
+    has_s3 = any(o["s3_origin"] for o in origins)
+    has_vr = True  # viewer_request.js always exists
+    has_vresp = has_viewer_response_ops(ir)
+    orp_headers = collect_orp_headers(ir)
+    le = meta.get("lambda_edge", {})
+    has_le_origin_req = le.get("origin_request") is not None
+    has_le_origin_resp = le.get("origin_response") is not None
+    kvs_req = meta.get("kvs_requirements", {})
+    has_kvs = any(kvs_req.values())
+    custom_errors = meta.get("custom_error_responses", [])
+
+    lines = []
+    w = lines.append
+
+    # Header
+    w('terraform {')
+    w('  required_providers {')
+    w('    aws = {')
+    w('      source  = "hashicorp/aws"')
+    w('      version = ">= 6.0"')
+    w('    }')
+    w('  }')
+    w('}')
+    w('')
+    w('provider "aws" {')
+    w('  alias  = "us_east_1"')
+    w('  region = "us-east-1"')
+    w('}')
+    w('')
+
+    # ACM certificate
+    if meta["cert_arn_mode"] == "explicit" and meta.get("cert_arn"):
+        w(f'locals {{')
+        w(f'  cert_arn_{san} = "{meta["cert_arn"]}"')
+        w('}')
+        cert_ref = f"local.cert_arn_{san}"
+    else:
+        w(f'data "aws_acm_certificate" "{san}" {{')
+        w(f'  provider    = aws.us_east_1')
+        w(f'  domain      = "*.{apex}"')
+        w(f'  statuses    = ["ISSUED"]')
+        w(f'  most_recent = true')
+        w('}')
+        cert_ref = f"data.aws_acm_certificate.{san}.arn"
+    w('')
+
+    # Policy data sources
+    policy_ids = _collect_policy_ids(behaviors)
+    for pid in sorted(policy_ids):
+        pinfo = manifest["policies"].get(pid, {})
+        ptype = pinfo.get("type", "")
+        if ptype == "cache_policy":
+            bypass = pinfo.get("config", {}).get("bypass", False)
+            prefix = "cfcdn-cache-bypass" if bypass else "cfcdn-cache-policy"
+            w(f'data "aws_cloudfront_cache_policy" "{hcl_id(pid)}" {{')
+            w(f'  name = "{prefix}-{pid}"')
+            w('}')
+        elif ptype == "origin_request_policy":
+            w(f'data "aws_cloudfront_origin_request_policy" "{hcl_id(pid)}" {{')
+            w(f'  name = "cfcdn-orp-{pid}"')
+            w('}')
+        elif ptype == "response_headers_policy":
+            w(f'data "aws_cloudfront_response_headers_policy" "{hcl_id(pid)}" {{')
+            w(f'  name = "cfcdn-rhp-{pid}"')
+            w('}')
+        w('')
+
+    # S3 OAC
+    if has_s3:
+        w(f'resource "aws_cloudfront_origin_access_control" "s3_oac" {{')
+        w(f'  name                              = "cfcdn-s3-oac-{san}"')
+        w(f'  description                       = "OAC for S3 origins ({hostname})"')
+        w(f'  origin_access_control_origin_type = "s3"')
+        w(f'  signing_behavior                  = "always"')
+        w(f'  signing_protocol                  = "sigv4"')
+        w('}')
+        w('')
+
+    # Custom ORP for geo/device headers
+    if orp_headers:
+        w(f'resource "aws_cloudfront_origin_request_policy" "custom_orp_{san}" {{')
+        w(f'  name    = "cfcdn-orp-custom-{san}"')
+        w(f'  comment = "Custom ORP for {hostname} - forwards geo/device headers to CFF"')
+        w('')
+        w('  headers_config {')
+        w('    header_behavior = "allViewerAndWhitelistCloudFront"')
+        w('    headers {')
+        w(f'      items = {hcl_list_strings(orp_headers)}')
+        w('    }')
+        w('  }')
+        w('')
+        w('  cookies_config {')
+        w('    cookie_behavior = "none"')
+        w('  }')
+        w('')
+        w('  query_strings_config {')
+        w('    query_string_behavior = "none"')
+        w('  }')
+        w('}')
+        w('')
+
+    # Module call
+    w(f'module "cdn_{san}" {{')
+    w(f'  source = "../../modules/cloudfront_distribution"')
+    w('')
+    w(f'  hostname = "{hostname}"')
+    w(f'  aliases  = ["{hostname}"]')
+    w(f'  price_class             = "{ds.get("price_class", "PriceClass_All")}"')
+    w(f'  http_version            = "{ds.get("http_version", "http2and3")}"')
+    w(f'  is_ipv6_enabled         = {hcl_bool(ds.get("is_ipv6_enabled", True))}')
+    w(f'  minimum_protocol_version = "{ds.get("minimum_protocol_version", "TLSv1.2_2021")}"')
+    w(f'  wait_for_deployment     = false')
+    w(f'  acm_certificate_arn     = {cert_ref}')
+    w('')
+
+    # Origins
+    w('  origins = [')
+    for o in origins:
+        w('    {')
+        w(f'      origin_id   = "{o["origin_id"]}"')
+        w(f'      domain_name = "{o["domain"]}"')
+        if o["s3_origin"]:
+            w(f'      s3_origin                = true')
+            w(f'      origin_access_control_id = aws_cloudfront_origin_access_control.s3_oac.id')
+        else:
+            proto = "https-only"
+            if o["protocol"] == "http":
+                proto = "http-only"
+            w(f'      protocol_policy = "{proto}"')
+            w(f'      https_port     = {o["port"]}')
+            if o["host_header"]:
+                w(f'      custom_origin_headers = [{{ name = "Host", value = "{o["host_header"]}" }}]')
+        w('    },')
+    w('  ]')
+    w('')
+
+    # Default cache behavior
+    default_origin_id = domain_to_origin_id.get(default_beh["origin"]["domain"], origins[0]["origin_id"])
+    w(f'  default_target_origin_id       = "{default_origin_id}"')
+    w(f'  default_viewer_protocol_policy = "{ds.get("viewer_protocol_policy", "redirect-to-https")}"')
+    w(f'  default_compress               = true')
+
+    cp_id = default_beh.get("cache_policy_id")
+    if cp_id:
+        w(f'  default_cache_policy_id = data.aws_cloudfront_cache_policy.{hcl_id(cp_id)}.id')
+
+    # ORP: custom ORP takes precedence over shared
+    if orp_headers:
+        w(f'  default_origin_request_policy_id = aws_cloudfront_origin_request_policy.custom_orp_{san}.id')
+    else:
+        orp_id = default_beh.get("origin_request_policy_id")
+        if orp_id:
+            w(f'  default_origin_request_policy_id = data.aws_cloudfront_origin_request_policy.{hcl_id(orp_id)}.id')
+
+    rhp_id = default_beh.get("response_headers_policy_id")
+    if rhp_id:
+        w(f'  default_response_headers_policy_id = data.aws_cloudfront_response_headers_policy.{hcl_id(rhp_id)}.id')
+    w('')
+
+    # Default function associations
+    func_assocs = []
+    if has_vr:
+        func_assocs.append(f'    {{ event_type = "viewer-request", function_arn = aws_cloudfront_function.{san}_viewer_request.arn }}')
+    if has_vresp:
+        func_assocs.append(f'    {{ event_type = "viewer-response", function_arn = aws_cloudfront_function.{san}_viewer_response.arn }}')
+    if func_assocs:
+        w('  default_function_associations = [')
+        for fa in func_assocs:
+            w(f'{fa},')
+        w('  ]')
+        w('')
+
+    # Default Lambda@Edge associations — placeholder for tf-domain to fill
+    le_assocs = []
+    if has_le_origin_resp:
+        le_assocs.append('    { event_type = "origin-response", lambda_arn = "REPLACE_WITH_DEPLOYED_LAMBDA_ARN", include_body = false }')
+    # origin-request L@E is determined by tf-domain (CFF size check), leave placeholder
+    if le_assocs:
+        w('  default_lambda_function_associations = [')
+        for la in le_assocs:
+            w(f'{la},')
+        w('  ]')
+        w('')
+
+    # Ordered cache behaviors
+    if ordered_behs:
+        w('  ordered_cache_behaviors = [')
+        for b in ordered_behs:
+            b_origin_id = domain_to_origin_id.get(b["origin"]["domain"], default_origin_id)
+            w('    {')
+            w(f'      path_pattern           = "{b["path_pattern"]}"')
+            w(f'      target_origin_id       = "{b_origin_id}"')
+            w(f'      viewer_protocol_policy = "redirect-to-https"')
+            w(f'      compress               = true')
+            b_cp = b.get("cache_policy_id")
+            if b_cp:
+                w(f'      cache_policy_id = data.aws_cloudfront_cache_policy.{hcl_id(b_cp)}.id')
+            b_orp = b.get("origin_request_policy_id")
+            if b_orp:
+                w(f'      origin_request_policy_id = data.aws_cloudfront_origin_request_policy.{hcl_id(b_orp)}.id')
+            b_rhp = b.get("response_headers_policy_id")
+            if b_rhp:
+                w(f'      response_headers_policy_id = data.aws_cloudfront_response_headers_policy.{hcl_id(b_rhp)}.id')
+            # Share the domain's CFF with all behaviors — CloudFront requires
+            # explicit function_associations per behavior (no inheritance)
+            b_func = []
+            if has_vr:
+                b_func.append(f'{{ event_type = "viewer-request", function_arn = aws_cloudfront_function.{san}_viewer_request.arn }}')
+            if has_vresp:
+                b_func.append(f'{{ event_type = "viewer-response", function_arn = aws_cloudfront_function.{san}_viewer_response.arn }}')
+            if b_func:
+                w('      function_associations = [')
+                for bf in b_func:
+                    w(f'        {bf},')
+                w('      ]')
+            w('    },')
+        w('  ]')
+        w('')
+
+    # Geo restriction
+    geo_type = ds.get("geo_restriction_type", "none")
+    geo_locs = ds.get("geo_restriction_locations", [])
+    w(f'  geo_restriction_type      = "{geo_type}"')
+    w(f'  geo_restriction_locations = {hcl_list_strings(geo_locs)}')
+
+    # WAF
+    waf_arn = ds.get("waf_acl_arn")
+    if waf_arn:
+        w(f'  web_acl_id = "{waf_arn}"')
+
+    # Custom error responses
+    if custom_errors:
+        w('')
+        w('  custom_error_responses = [')
+        for ce in custom_errors:
+            w('    {')
+            w(f'      error_code            = {ce["error_code"]}')
+            if ce.get("response_code"):
+                w(f'      response_code         = {ce["response_code"]}')
+                w(f'      response_page_path    = ""')
+            else:
+                w(f'      response_code         = {ce["error_code"]}')
+                w(f'      response_page_path    = ""')
+            w(f'      error_caching_min_ttl = 10')
+            w('    },')
+        w('  ]')
+
+    w('')
+    w(f'  tags = {{ Domain = "{hostname}" }}')
+    w('}')
+
+    return "\n".join(lines) + "\n"
+
+
+def _collect_policy_ids(behaviors):
+    ids = set()
+    for b in behaviors:
+        for key in ("cache_policy_id", "origin_request_policy_id", "response_headers_policy_id"):
+            pid = b.get(key)
+            if pid:
+                ids.add(pid)
+    return ids
+
+
+# ── functions.tf generation ──────────────────────────────────────────────────
+
+def generate_functions_tf(ir):
+    san = ir["metadata"]["sanitized_name"]
+    hostname = ir["metadata"]["hostname"]
+    has_vresp = has_viewer_response_ops(ir)
+    has_kvs = any(ir["metadata"].get("kvs_requirements", {}).values())
+
+    lines = []
+    w = lines.append
+
+    # viewer_request function (always)
+    w(f'resource "aws_cloudfront_function" "{san}_viewer_request" {{')
+    w(f'  name    = "cfcdn-{san}-viewer-request"')
+    w(f'  runtime = "cloudfront-js-2.0"')
+    w(f'  publish = true')
+    w(f'  code    = file("${{path.module}}/functions/{san}_viewer_request.js")')
+    if has_kvs:
+        w(f'  key_value_store_associations = [aws_cloudfront_key_value_store.{san}_kvs.arn]')
+    w('}')
+
+    if has_vresp:
+        w('')
+        w(f'resource "aws_cloudfront_function" "{san}_viewer_response" {{')
+        w(f'  name    = "cfcdn-{san}-viewer-response"')
+        w(f'  runtime = "cloudfront-js-2.0"')
+        w(f'  publish = true')
+        w(f'  code    = file("${{path.module}}/functions/{san}_viewer_response.js")')
+        w('}')
+
+    w('')
+    w('# --- LAMBDA_EDGE_PLACEHOLDER ---')
+
+    return "\n".join(lines) + "\n"
+
+
+# ── kvs.tf generation ────────────────────────────────────────────────────────
+
+def generate_kvs_tf(ir):
+    san = ir["metadata"]["sanitized_name"]
+    hostname = ir["metadata"]["hostname"]
+
+    lines = []
+    w = lines.append
+
+    w(f'resource "aws_cloudfront_key_value_store" "{san}_kvs" {{')
+    w(f'  name    = "cfcdn-{san}-kvs"')
+    w(f'  comment = "KVS for {hostname}"')
+    w('}')
+    w('')
+    w(f'output "{san}_kvs_arn" {{')
+    w(f'  description = "KVS ARN for {hostname}"')
+    w(f'  value       = aws_cloudfront_key_value_store.{san}_kvs.arn')
+    w('}')
+
+    return "\n".join(lines) + "\n"
+
+
+# ── kvs-data.json generation ─────────────────────────────────────────────────
+
+def generate_kvs_data(ir):
+    kvs_data = ir["metadata"].get("kvs_data", [])
+    # Add continent/EU mappings if needed
+    kvs_req = ir["metadata"].get("kvs_requirements", {})
+    if kvs_req.get("needs_continent"):
+        kvs_data.extend(_continent_kvs_entries())
+    if kvs_req.get("needs_eu"):
+        kvs_data.extend(_eu_kvs_entries())
+    return json.dumps({"data": kvs_data}, indent=2, ensure_ascii=False) + "\n"
+
+
+def _continent_kvs_entries():
+    """Country → continent mapping for KVS."""
+    # ISO 3166-1 alpha-2 → continent code
+    mapping = {
+        "AF": "AS", "AX": "EU", "AL": "EU", "DZ": "AF", "AS": "OC", "AD": "EU",
+        "AO": "AF", "AI": "NA", "AQ": "AN", "AG": "NA", "AR": "SA", "AM": "AS",
+        "AW": "NA", "AU": "OC", "AT": "EU", "AZ": "AS", "BS": "NA", "BH": "AS",
+        "BD": "AS", "BB": "NA", "BY": "EU", "BE": "EU", "BZ": "NA", "BJ": "AF",
+        "BM": "NA", "BT": "AS", "BO": "SA", "BQ": "NA", "BA": "EU", "BW": "AF",
+        "BR": "SA", "IO": "AS", "BN": "AS", "BG": "EU", "BF": "AF", "BI": "AF",
+        "CV": "AF", "KH": "AS", "CM": "AF", "CA": "NA", "KY": "NA", "CF": "AF",
+        "TD": "AF", "CL": "SA", "CN": "AS", "CX": "AS", "CC": "AS", "CO": "SA",
+        "KM": "AF", "CG": "AF", "CD": "AF", "CK": "OC", "CR": "NA", "CI": "AF",
+        "HR": "EU", "CU": "NA", "CW": "NA", "CY": "AS", "CZ": "EU", "DK": "EU",
+        "DJ": "AF", "DM": "NA", "DO": "NA", "EC": "SA", "EG": "AF", "SV": "NA",
+        "GQ": "AF", "ER": "AF", "EE": "EU", "SZ": "AF", "ET": "AF", "FK": "SA",
+        "FO": "EU", "FJ": "OC", "FI": "EU", "FR": "EU", "GF": "SA", "PF": "OC",
+        "GA": "AF", "GM": "AF", "GE": "AS", "DE": "EU", "GH": "AF", "GI": "EU",
+        "GR": "EU", "GL": "NA", "GD": "NA", "GP": "NA", "GU": "OC", "GT": "NA",
+        "GG": "EU", "GN": "AF", "GW": "AF", "GY": "SA", "HT": "NA", "VA": "EU",
+        "HN": "NA", "HK": "AS", "HU": "EU", "IS": "EU", "IN": "AS", "ID": "AS",
+        "IR": "AS", "IQ": "AS", "IE": "EU", "IM": "EU", "IL": "AS", "IT": "EU",
+        "JM": "NA", "JP": "AS", "JE": "EU", "JO": "AS", "KZ": "AS", "KE": "AF",
+        "KI": "OC", "KP": "AS", "KR": "AS", "KW": "AS", "KG": "AS", "LA": "AS",
+        "LV": "EU", "LB": "AS", "LS": "AF", "LR": "AF", "LY": "AF", "LI": "EU",
+        "LT": "EU", "LU": "EU", "MO": "AS", "MG": "AF", "MW": "AF", "MY": "AS",
+        "MV": "AS", "ML": "AF", "MT": "EU", "MH": "OC", "MQ": "NA", "MR": "AF",
+        "MU": "AF", "YT": "AF", "MX": "NA", "FM": "OC", "MD": "EU", "MC": "EU",
+        "MN": "AS", "ME": "EU", "MS": "NA", "MA": "AF", "MZ": "AF", "MM": "AS",
+        "NA": "AF", "NR": "OC", "NP": "AS", "NL": "EU", "NC": "OC", "NZ": "OC",
+        "NI": "NA", "NE": "AF", "NG": "AF", "NU": "OC", "NF": "OC", "MK": "EU",
+        "MP": "OC", "NO": "EU", "OM": "AS", "PK": "AS", "PW": "OC", "PS": "AS",
+        "PA": "NA", "PG": "OC", "PY": "SA", "PE": "SA", "PH": "AS", "PN": "OC",
+        "PL": "EU", "PT": "EU", "PR": "NA", "QA": "AS", "RE": "AF", "RO": "EU",
+        "RU": "EU", "RW": "AF", "BL": "NA", "SH": "AF", "KN": "NA", "LC": "NA",
+        "MF": "NA", "PM": "NA", "VC": "NA", "WS": "OC", "SM": "EU", "ST": "AF",
+        "SA": "AS", "SN": "AF", "RS": "EU", "SC": "AF", "SL": "AF", "SG": "AS",
+        "SX": "NA", "SK": "EU", "SI": "EU", "SB": "OC", "SO": "AF", "ZA": "AF",
+        "SS": "AF", "ES": "EU", "LK": "AS", "SD": "AF", "SR": "SA", "SJ": "EU",
+        "SE": "EU", "CH": "EU", "SY": "AS", "TW": "AS", "TJ": "AS", "TZ": "AF",
+        "TH": "AS", "TL": "AS", "TG": "AF", "TK": "OC", "TO": "OC", "TT": "NA",
+        "TN": "AF", "TR": "AS", "TM": "AS", "TC": "NA", "TV": "OC", "UG": "AF",
+        "UA": "EU", "AE": "AS", "GB": "EU", "US": "NA", "UM": "OC", "UY": "SA",
+        "UZ": "AS", "VU": "OC", "VE": "SA", "VN": "AS", "VG": "NA", "VI": "NA",
+        "WF": "OC", "EH": "AF", "YE": "AS", "ZM": "AF", "ZW": "AF",
+    }
+    return [{"key": f"continent:{cc}", "value": cont} for cc, cont in sorted(mapping.items())]
+
+
+def _eu_kvs_entries():
+    """EU member country codes for KVS."""
+    eu_countries = [
+        "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR",
+        "DE", "GR", "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL",
+        "PL", "PT", "RO", "SK", "SI", "ES", "SE",
+    ]
+    return [{"key": f"eu:{cc}", "value": "1"} for cc in eu_countries]
+
+
+# ── outputs.tf generation ────────────────────────────────────────────────────
+
+def generate_outputs_tf(ir):
+    san = ir["metadata"]["sanitized_name"]
+    lines = [
+        f'output "distribution_id" {{',
+        f'  value = module.cdn_{san}.distribution_id',
+        f'}}',
+        f'',
+        f'output "distribution_domain_name" {{',
+        f'  value = module.cdn_{san}.distribution_domain_name',
+        f'}}',
+    ]
+    return "\n".join(lines) + "\n"
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: cdn-generate-tf-scaffold.py <output_dir>", file=sys.stderr)
+        sys.exit(1)
+
+    output_dir = sys.argv[1]
+    final_dir = os.path.join(output_dir, "ir", "final")
+    shared_dir = os.path.join(output_dir, "shared")
+    tf_domains_dir = os.path.join(output_dir, "terraform", "domains")
+
+    manifest = load_manifest(shared_dir)
+
+    json_files = sorted(f for f in os.listdir(final_dir) if f.endswith(".json"))
+    if not json_files:
+        print("ERROR: no finalized IR files found", file=sys.stderr)
+        sys.exit(1)
+
+    for filename in json_files:
+        hostname = filename.replace(".json", "")
+        ir = load_ir(final_dir, hostname)
+        san = ir["metadata"]["sanitized_name"]
+        domain_dir = os.path.join(tf_domains_dir, san)
+        func_dir = os.path.join(domain_dir, "functions")
+        os.makedirs(func_dir, exist_ok=True)
+
+        origins, domain_to_origin_id = collect_origins(ir)
+
+        # main.tf
+        main_tf = generate_main_tf(ir, manifest, domain_to_origin_id, origins)
+        _write(os.path.join(domain_dir, "main.tf"), main_tf)
+
+        # functions.tf
+        functions_tf = generate_functions_tf(ir)
+        _write(os.path.join(domain_dir, "functions.tf"), functions_tf)
+
+        # outputs.tf
+        outputs_tf = generate_outputs_tf(ir)
+        _write(os.path.join(domain_dir, "outputs.tf"), outputs_tf)
+
+        # kvs.tf + kvs-data.json (conditional)
+        kvs_req = ir["metadata"].get("kvs_requirements", {})
+        if any(kvs_req.values()):
+            kvs_tf = generate_kvs_tf(ir)
+            _write(os.path.join(domain_dir, "kvs.tf"), kvs_tf)
+            kvs_data = generate_kvs_data(ir)
+            _write(os.path.join(domain_dir, "kvs-data.json"), kvs_data)
+
+        file_count = 3 + (2 if any(kvs_req.values()) else 0)
+        print(f"OK: {hostname} → {file_count} scaffold files in terraform/domains/{san}/")
+
+    print(f"\n{'='*60}")
+    print(f"Generated scaffold for {len(json_files)} domains")
+
+
+def _write(path, content):
+    with open(path, "w") as f:
+        f.write(content)
+
+
+if __name__ == "__main__":
+    main()
