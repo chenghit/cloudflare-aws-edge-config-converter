@@ -38,8 +38,8 @@ Determine what the user wants from their message. There are two dimensions:
 
 **Dimension 1 — Scope (what to process):**
 - **WAF only**: user mentions WAF, security rules, firewall, rate limiting, IP rules
-- **CDN only**: user mentions CDN, cache, origin rules, CloudFront distributions, redirects, URL rewrites, header transforms
-- **Everything**: user says "convert everything", "full migration", "all configs", or mentions Cloudflare config without specifying a type
+- **CDN only**: user mentions CDN, cache, origin rules, CloudFront, redirects, URL rewrites, header transforms
+- **Everything**: user says "convert everything", "full migration", "all configs", or mentions Cloudflare config without specifying a type **and** without mentioning a specific AWS target service (e.g., CloudFront → CDN only, WAF → WAF only)
 
 **Dimension 2 — Depth (how far to go):**
 - **Analyze**: user says "analyze", "分析" → run analyzer + validator only, stop before generator/converter
