@@ -39,7 +39,7 @@ def main():
             continue
         for rule in s.get("rules", []):
             conv = rule.get("convertibility", "yes")
-            if conv in ("partial", "no"):
+            if conv == "partial":
                 partial_rules.append({
                     "name": rule.get("name", ""),
                     "convertibility": conv,

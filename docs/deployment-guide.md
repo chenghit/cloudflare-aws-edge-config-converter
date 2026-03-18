@@ -95,22 +95,7 @@ This creates all deduplicated CloudFront cache policies, origin request policies
 and response headers policies. Domain modules look up these policies by name
 using `data` sources — they must exist before any domain is deployed.
 
-#### Step 2: Deploy Lambda@Edge functions (if any)
-
-If any domain has a `lambda/` directory, you must deploy those Lambda functions
-to AWS **before** applying the domain's Terraform. Lambda@Edge has special
-requirements:
-
-- Must be deployed in **us-east-1** (Lambda@Edge is a global service but
-  functions must be created in N. Virginia)
-- The Terraform output uses `REPLACE_WITH_DEPLOYED_LAMBDA_ARN` placeholders —
-  after deploying each Lambda, replace the placeholder in `main.tf` with the
-  actual ARN (including version number, e.g.,
-  `arn:aws:lambda:us-east-1:123456789:function:my-func:1`)
-
-If no domain has a `lambda/` directory, skip this step.
-
-#### Step 3: Deploy each domain
+#### Step 2: Deploy each domain
 
 Each domain is an independent root module. Deploy them in any order:
 
@@ -124,22 +109,31 @@ terraform apply
 Repeat for each domain. Domains are independent — deploying or changing one
 does not affect others.
 
-#### Step 4: Seed KVS data (if any)
+Lambda@Edge origin-response functions (for default cache TTL and conditional
+cache rules) are fully automated — the scaffold generates IAM role, archive,
+Lambda function, and `qualified_arn` references in `main.tf`. No manual ARN
+replacement needed.
+
+Lambda@Edge origin-request functions (rare — only when CFF exceeds 10KB and
+origin_override ops are split) require a manual step: after `terraform apply`,
+add the origin-request association to `main.tf` as described in the comment
+at the top of `origin_request_handler.js`.
+
+#### Step 3: Seed KVS data (if any)
 
 If a domain has `kvs-data.json`, the KVS store is created by Terraform but the
-data must be seeded separately. Use the AWS CLI:
+data must be seeded separately. Each domain with KVS has a generated
+`seed-kvs.py` script:
 
 ```bash
-# For each entry in kvs-data.json:
-aws cloudfront-keyvaluestore put-key \
-  --kvs-arn <kvs_arn_from_terraform_output> \
-  --key "redirect:example.com/old-path" \
-  --value "301|0|https://example.com/new-path"
+cd cloudflare-to-aws-cdn/terraform/domains/cdn_example_com
+python3 seed-kvs.py
 ```
 
-Or write a script to iterate over `kvs-data.json` entries.
+The script reads `kvs-data.json` and writes entries in batches of 50 via the
+`update-keys` API. Requires `boto3` (`pip install boto3`) and AWS credentials.
 
-#### Step 5: Update DNS
+#### Step 4: Update DNS
 
 After verifying each CloudFront distribution is working:
 

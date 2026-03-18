@@ -88,16 +88,7 @@ terraform apply
 
 这会创建所有去重后的 CloudFront cache policies、origin request policies 和 response headers policies。域名 module 通过 `data` source 按名称查找这些 policies——所以必须在部署任何域名之前先部署它们。
 
-#### 第 2 步：部署 Lambda@Edge 函数（如果有的话）
-
-如果某个域名有 `lambda/` 目录，你得先把那些 Lambda 函数部署到 AWS，**然后**再 apply 该域名的 Terraform。Lambda@Edge 有特殊要求：
-
-- 必须部署在 **us-east-1**（Lambda@Edge 是全局服务，但函数必须在 N. Virginia 创建）
-- Terraform 输出里用了 `REPLACE_WITH_DEPLOYED_LAMBDA_ARN` 占位符——部署完每个 Lambda 后，把 `main.tf` 里的占位符替换成实际 ARN（要带版本号，比如 `arn:aws:lambda:us-east-1:123456789:function:my-func:1`）
-
-如果没有域名有 `lambda/` 目录，跳过这步。
-
-#### 第 3 步：部署各域名
+#### 第 2 步：部署各域名
 
 每个域名是独立的 root module，部署顺序随意：
 
@@ -110,21 +101,22 @@ terraform apply
 
 每个域名重复上面的步骤。域名之间互相独立——部署或修改一个不影响其他的。
 
-#### 第 4 步：灌入 KVS 数据（如果有的话）
+Lambda@Edge origin-response 函数（用于默认缓存 TTL 和条件性缓存规则）是全自动的——scaffold 生成了 IAM role、archive、Lambda 函数和 `main.tf` 中的 `qualified_arn` 引用。不需要手动替换 ARN。
 
-如果某个域名有 `kvs-data.json`，KVS store 由 Terraform 创建，但数据需要单独灌入。用 AWS CLI：
+Lambda@Edge origin-request 函数（少见——仅当 CFF 超过 10KB 且 origin_override 操作被拆分时）需要手动步骤：`terraform apply` 后，按 `origin_request_handler.js` 文件头部的注释将 origin-request association 添加到 `main.tf`。
+
+#### 第 3 步：灌入 KVS 数据（如果有的话）
+
+如果某个域名有 `kvs-data.json`，KVS store 由 Terraform 创建，但数据需要单独灌入。每个有 KVS 的域名都有生成好的 `seed-kvs.py` 脚本：
 
 ```bash
-# 对 kvs-data.json 里的每条记录：
-aws cloudfront-keyvaluestore put-key \
-  --kvs-arn <kvs_arn_from_terraform_output> \
-  --key "redirect:example.com/old-path" \
-  --value "301|0|https://example.com/new-path"
+cd cloudflare-to-aws-cdn/terraform/domains/cdn_example_com
+python3 seed-kvs.py
 ```
 
-或者写个脚本遍历 `kvs-data.json` 里的条目。
+脚本读取 `kvs-data.json`，通过 `update-keys` API 按 50 条一批写入。需要 `boto3`（`pip install boto3`）和 AWS 凭证。
 
-#### 第 5 步：更新 DNS
+#### 第 4 步：更新 DNS
 
 确认每个 CloudFront distribution 正常工作后：
 
