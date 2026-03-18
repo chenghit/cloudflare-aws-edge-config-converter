@@ -278,22 +278,43 @@ block per condition entry, in list order. Do NOT merge conditions into a single
 
 ```javascript
 // origin_override: <description>
-// condition 1
-if (<condition_from_conditions[0].match>) {
+if (<condition>) {
   cf.updateRequestOrigin({
-    domainName: "<conditions[0].origin.domain>",
-  });
-}
-// condition 2
-if (<condition_from_conditions[1].match>) {
-  cf.updateRequestOrigin({
-    domainName: "<conditions[1].origin.domain>",
+    domainName: "<params.origin_host>",
   });
 }
 ```
 
-Omit `customOriginConfig` entirely if port/protocol match the existing origin
-(i.e., only `domainName` changes). Omit `originPath` if empty string.
+If `params.origin_port` is present, add `customOriginConfig`:
+```javascript
+if (<condition>) {
+  cf.updateRequestOrigin({
+    domainName: "<params.origin_host>",
+    customOriginConfig: {
+      port: <params.origin_port>,
+      protocol: "https",
+      sslProtocols: ["TLSv1.2"]
+    }
+  });
+}
+```
+
+If `params.sni` is present, add `sni`:
+```javascript
+if (<condition>) {
+  cf.updateRequestOrigin({
+    domainName: "<params.origin_host>",
+    sni: "<params.sni>"
+  });
+}
+```
+
+If `params.host_header` is present, also set the Host header:
+```javascript
+request.headers.host = {value: "<params.host_header>"};
+```
+
+Omit `customOriginConfig` entirely if no port override (only `domainName` changes).
 See `references/cloudfront/runtime2-guide.md` for full `updateRequestOrigin()` API.
 
 **4. bulk_redirects** — if `kvs_requirements` is non-empty AND bulk_redirect ops exist:
