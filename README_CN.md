@@ -153,6 +153,28 @@ cloudflare-to-aws-cdn/
 </details>
 
 <details>
+<summary>预计转换时间</summary>
+
+转换时间取决于规则/域名数量、LLM API 延迟和并行批次大小。以下基准使用项目自带的 `examples/cloudflare-configs/`（1 个 zone、7 个代理域名、约 30 条各类规则），模型 `claude-sonnet-4.6-1m`，Anthropic API：
+
+| 流程 | 并行批次大小 2 | 并行批次大小 4 |
+|------|--------------|--------------|
+| WAF | ~15 分钟 | ~10 分钟 |
+| CDN | ~32 分钟 | ~20 分钟 |
+
+时间分布：
+- **WAF**：分析器 A2+A3（~5 分钟）、校验器 V1-V4（~5 分钟）、Terraform 生成器（~3 分钟）、terraform validate（~2 分钟）。Python 脚本（A1、合并、计数、切分、README）总计 <1 秒。
+- **CDN**：Python 脚本 Stage 3–7.6 总计 <1 秒。Stage 8 JS 生成（7 域名、批次 2 约 15 分钟）和 Stage 9 JS 校验（~10 分钟）占主要时间。DNS 解析和输入校验各约 2 分钟。
+
+影响因素：
+- **并行批次大小**是最大的调节杠杆。批次 4（Kiro CLI 最大值）可将 CDN Stage 8+9 时间减半。编辑 `cloudflare-aws-converter/SKILL.md`，搜索 "batch size" 修改数字。
+- **LLM API 延迟**因服务商、区域和时段而异。Anthropic 直连 API 通常比 AWS Bedrock 快。
+- **域名数量**对 CDN Stage 8+9 线性增长（每个域名一次 subagent 调用）。50 个域名、批次 2 ≈ 25 批 × 每批约 2 分钟 ≈ Stage 8 约 50 分钟。
+- **规则复杂度**影响单个 subagent 耗时。重定向/重写规则多或表达式复杂的域名 JS 生成更慢。
+
+</details>
+
+<details>
 <summary>ACM 证书</summary>
 
 CloudFront 要求 TLS 证书位于 **us-east-1**。运行前申请：

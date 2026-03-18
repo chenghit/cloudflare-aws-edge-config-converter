@@ -155,6 +155,28 @@ Shared policies → Lambda@Edge (if any) → each domain independently → KVS d
 </details>
 
 <details>
+<summary>Expected conversion time</summary>
+
+Conversion time depends on the number of rules/domains, LLM API latency, and parallel batch size. Benchmark with the included `examples/cloudflare-configs/` (1 zone, 7 proxied domains, ~30 rules across all types), using `claude-sonnet-4.6-1m` on Anthropic API:
+
+| Pipeline | Parallel batch size 2 | Parallel batch size 4 |
+|----------|----------------------|----------------------|
+| WAF | ~15 min | ~10 min |
+| CDN | ~32 min | ~20 min |
+
+Where the time goes:
+- **WAF**: Analyzer A2+A3 (~5 min), Validator V1-V4 (~5 min), Terraform generator (~3 min), terraform validate (~2 min). Python scripts (A1, merge, count, chunk, README) finish in <1 second total.
+- **CDN**: Python scripts Stages 3–7.6 finish in <1 second total. Stage 8 JS generation (~15 min for 7 domains at batch size 2) and Stage 9 JS validation (~10 min) dominate. DNS parsing and input validation are ~2 min each.
+
+Factors that affect conversion time:
+- **Parallel batch size** is the biggest lever. Batch size 4 (Kiro CLI max) cuts CDN Stage 8+9 time nearly in half. Edit `cloudflare-aws-converter/SKILL.md` — search for "batch size" and change the number.
+- **LLM API latency** varies by provider, region, and time of day. Anthropic direct API is typically faster than AWS Bedrock.
+- **Number of domains** scales linearly for CDN Stages 8+9 (each domain is one subagent call). 50 domains at batch size 2 ≈ 25 batches × ~2 min each ≈ ~50 min for Stage 8 alone.
+- **Rule complexity** affects individual subagent duration. Domains with many redirect/rewrite rules or complex expressions take longer for JS generation.
+
+</details>
+
+<details>
 <summary>ACM certificates</summary>
 
 CloudFront requires TLS certificates in **us-east-1**. Provision before running:
