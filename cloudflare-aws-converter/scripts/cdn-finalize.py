@@ -230,7 +230,7 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         lines.append("| Domain | Cache Behavior | Description | Reason |")
         lines.append("|--------|---------------|-------------|--------|")
         for hostname, pp, desc, reason in nc_rows:
-            lines.append(f"| {hostname} | `{pp}` | {desc[:50]} | {reason[:80]} |")
+            lines.append(f"| {hostname} | `{pp}` | {desc} | {reason} |")
     else:
         lines.append("No non-convertible items.")
 
