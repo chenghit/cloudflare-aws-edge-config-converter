@@ -176,6 +176,7 @@ def make_empty_ir(domain_config):
                 "needs_continent": False,
                 "needs_eu": False,
                 "needs_error_pages": False,
+                "needs_ip_lists": False,
             },
             "kvs_data": [],
             "custom_error_responses": [],
@@ -479,10 +480,38 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         "params": result.get("params", {}),
     }
 
+    # Generate KVS entries for in_kvs conditions (IP list lookup)
+    _collect_kvs_ip_entries(ir, op_entry.get("condition"))
+
     if is_response:
         beh["viewer_response_ops"].append(op_entry)
     else:
         beh["viewer_request_ops"].append(op_entry)
+
+
+def _collect_kvs_ip_entries(ir, condition):
+    """Generate KVS entries for in_kvs conditions (IP list → KVS exists())."""
+    if condition is None:
+        return
+    if "logic" in condition:
+        for p in condition.get("parts", []):
+            _collect_kvs_ip_entries(ir, p)
+        return
+    if condition.get("op") == "in_kvs":
+        list_name = condition["value"]
+        ips = condition.pop("kvs_ips", [])
+        if not ips:
+            return
+        # Deduplicate: skip if this list was already collected
+        prefix = f"ip:{list_name}:"
+        if any(e["key"].startswith(prefix) for e in ir["metadata"]["kvs_data"]):
+            return
+        ir["metadata"]["kvs_requirements"]["needs_ip_lists"] = True
+        for ip in ips:
+            ir["metadata"]["kvs_data"].append({
+                "key": f"{prefix}{ip}",
+                "value": "1",
+            })
 
 
 def _try_split_or_cache_paths(raw_expression):

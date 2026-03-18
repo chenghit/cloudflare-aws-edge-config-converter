@@ -269,6 +269,32 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "request a CloudFront ORP headers quota increase via AWS Support.",
     ]
 
+    # WAF + Custom Header pattern guidance (if CIDR-related non_convertible items exist)
+    has_cidr_nc = any("CIDR" in reason for _, _, _, reason in nc_rows)
+    if has_cidr_nc:
+        lines += [
+            "", "---", "",
+            "## WAF + Custom Header Pattern",
+            "",
+            "Some rules reference IP lists with CIDR ranges, which CloudFront Functions "
+            "cannot match (CFF only has access to the viewer's single IP address via "
+            "`event.viewer.ip`). Use this pattern to handle CIDR-based IP matching:",
+            "",
+            "1. Create an AWS WAF IP set containing the CIDR ranges",
+            "2. Create a WAF rule with **Count** action that matches the IP set "
+            "and adds a custom header (e.g., `x-waf-ip-match: blocklist1`)",
+            "3. Associate the WAF Web ACL with the CloudFront distribution",
+            "4. In the CloudFront Function, check `request.headers['x-waf-ip-match']` "
+            "and execute the corresponding logic (redirect, block, etc.)",
+            "",
+            "WAF evaluates before CloudFront Functions, so the custom header is "
+            "available when the CFF runs. The Count action ensures the request is "
+            "not terminated by WAF — it only labels the request for CFF to act on.",
+            "",
+            "This pattern also supports IPv4/IPv6 mixed lists and CIDR notation, "
+            "which are native to AWS WAF IP sets (up to 10,000 entries per set).",
+        ]
+
     if has_s3:
         lines += [
             "", "---", "",

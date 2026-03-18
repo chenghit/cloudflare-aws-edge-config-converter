@@ -228,6 +228,7 @@ if (country) {
 | `ne` | `!== value` |
 | `gt`, `ge`, `lt`, `le` | `>`, `>=`, `<`, `<=` (numeric comparison) |
 | `in` | `[...values].includes(accessor)` |
+| `in_kvs` | `await kvsHandle.exists('ip:' + value + ':' + event.viewer.ip)` — IP list stored in KVS, one entry per IP. `value` is the list name. |
 | `contains` | `accessor.includes(value)` |
 | `starts_with` | `accessor.startsWith(value)` |
 | `ends_with` | `accessor.endsWith(value)` |

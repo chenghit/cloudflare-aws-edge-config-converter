@@ -51,7 +51,11 @@ def _condition_uses_ip_src(condition):
 
 
 def _check_ip_list(list_name, ip_lists):
-    """Check an IP list for CIDR and size. Returns (ips, non_convertible_reason)."""
+    """Check an IP list for CIDR. Returns (ips, non_convertible_reason).
+
+    Pure IPs (no CIDR) of any size are accepted — they will be stored in KVS
+    and matched via kvsHandle.exists(). CIDR ranges cannot be matched in CFF.
+    """
     ips = ip_lists.get(list_name, [])
     if not ips:
         return ips, f"IP list '{list_name}' is empty or not found"
@@ -59,18 +63,18 @@ def _check_ip_list(list_name, ip_lists):
     if has_cidr:
         return ips, (
             f"IP list '{list_name}' contains CIDR ranges; CFF event.viewer.ip "
-            "cannot perform CIDR matching. Consider Lambda@Edge or AWS WAF IP set"
-        )
-    if len(ips) > 50:
-        return ips, (
-            f"IP list '{list_name}' has {len(ips)} entries (>50); "
-            "too large for CloudFront Function 10KB limit"
+            "cannot perform CIDR matching. Use AWS WAF IP set with Count action "
+            "+ custom header to pass match result to CloudFront Function. "
+            "See 'WAF + Custom Header Pattern' in conversion_report.md"
         )
     return ips, None
 
 
 def _resolve_ip_list_in_condition(condition, ip_lists):
-    """Resolve $list_name references in condition. Returns (condition, non_conv_reason)."""
+    """Resolve $list_name references in condition. Returns (condition, non_conv_reason).
+
+    For pure IP lists, replaces in_list with in_kvs op (KVS-based lookup).
+    """
     if condition is None:
         return condition, None
     if "logic" in condition:
@@ -86,7 +90,8 @@ def _resolve_ip_list_in_condition(condition, ip_lists):
         ips, reason = _check_ip_list(list_name, ip_lists)
         if reason:
             return None, reason
-        return {**condition, "op": "in", "value": ips}, None
+        # Use KVS exists() for IP list matching
+        return {**condition, "op": "in_kvs", "value": list_name, "kvs_ips": ips}, None
     return condition, None
 
 
