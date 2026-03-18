@@ -141,6 +141,8 @@ def dedup_policies(all_irs):
                 if full_hash in hash_to_id:
                     pid = hash_to_id[full_hash]
                     manifest[pid]["count"] += 1
+                    if hostname not in manifest[pid]["used_by"]:
+                        manifest[pid]["used_by"].append(hostname)
                 else:
                     prefix = full_hash[:8]
                     if prefix in prefix_counts:
@@ -155,6 +157,7 @@ def dedup_policies(all_irs):
                         "type": orig_key,
                         "count": 1,
                         "sample_hostname": hostname,
+                        "used_by": [hostname],
                         "config": policy,
                     }
 
