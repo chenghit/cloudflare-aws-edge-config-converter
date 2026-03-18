@@ -36,8 +36,14 @@ CDN pipeline 把以下 Cloudflare 规则类型转换为 CloudFront 等价物：
 
 | 设置 | 规则类型 | 原因 | 替代方案 |
 |---------|-----------|--------|-------------|
+| `ip.src` / `ip.src in` 条件 | Cache Rules、Compression Rules | CloudFront Functions 无法控制缓存或压缩决策 | AWS WAF IP 规则 |
+| `ip.src in $list_name`（含 CIDR） | 所有规则类型 | CFF `event.viewer.ip` 是单个 IP，无法做 CIDR 匹配 | AWS WAF IP set + Count action + 自定义 header（见 conversion_report.md 中的 WAF + Custom Header Pattern） |
 | `serve_stale` (SWR/SIE) | Cache Rules | CloudFront cache policy 没有对应项 | Origin `Cache-Control: stale-while-revalidate`（有限支持） |
 | `origin_error_page_passthru` | Cache Rules | 需要 Lambda@Edge 拦截 origin 错误 | Lambda@Edge origin-response |
+| 自定义错误 + inline content > 1 KB | Custom Error Rules | 超过 CloudFront KVS 1024 字符 value 限制 | 将错误页面部署为 origin 上的静态文件 + `response_page_path` |
+| 自定义错误 + inline content + response-phase 条件 | Custom Error Rules | CFF viewer-response 在 4xx+ 时不执行 | 将错误页面部署为 origin 上的静态文件 |
+| 自定义错误 + 不支持的状态码 | Custom Error Rules | CloudFront 只支持：400、403、404、405、414、416、500–504 | Lambda@Edge origin-response |
+| 自定义错误 + 动态 headers/逻辑 | Custom Error Rules | CFF 和 L@E viewer-response 在 4xx+ 时不执行 | Lambda@Edge origin-response |
 | 仅 query string 的 rewrite | URL Rewrite | CloudFront Functions 无法单独修改 query strings | Lambda@Edge |
 | `browser_check` | Configuration | CloudFront 没有对应项 | AWS WAF Bot Control |
 | `minify` (HTML/CSS/JS) | Configuration | CloudFront 原生不支持 | Origin 端压缩 |
@@ -47,6 +53,23 @@ CDN pipeline 把以下 Cloudflare 规则类型转换为 CloudFront 等价物：
 | 含不可映射 CF 变量的动态值 | Request/Response Header Transform | CloudFront Functions 无法计算所有 Cloudflare 表达式 | 手动检查 |
 | 非 path 表达式的 Cloud Connector | Cloud Connector | CloudFront cache behaviors 只能按 path pattern 匹配 | 手动配置 origin |
 | 不允许/只读的 response headers | Response Header Transform | CloudFront 限制修改某些 headers（`Via`、`X-Amz-Cf-*` 等） | N/A |
+
+### CloudFront Function 大小限制
+
+CloudFront Functions 压缩后有 10 KB 大小限制。当域名的 `viewer_request.js` 超过此限制时：
+
+1. 如果函数包含 `origin_override` 操作，这些操作会被拆分到 Lambda@Edge origin-request handler，减小 CFF 大小。
+2. 如果拆分后 CFF 仍超过 10 KB，最低优先级的操作会被移除并标记为 `non_convertible`。这些操作**不会**升级到 Lambda@Edge viewer-request——viewer 事件只使用 CloudFront Functions。
+
+### CloudFront 配额限制
+
+| 资源 | 限制 | 超出时的处理 |
+|----------|-------|---------------------------|
+| 每个 distribution 的 cache behaviors | 75 | Pipeline 报错——需减少 Cloudflare 规则 |
+| Cache policy headers (whitelist) | 10 | 标记为 non_convertible |
+| Cache policy cookies (whitelist) | 10 | 标记为 non_convertible |
+| Cache policy query strings (whitelist) | 10 | 标记为 non_convertible |
+| Origin request policy headers | 10 | 标记为 non_convertible |
 
 ### 没有 CloudFront 对应项的 Cloudflare 匹配字段
 
@@ -59,7 +82,10 @@ CDN pipeline 把以下 Cloudflare 规则类型转换为 CloudFront 等价物：
 
 ### Regex 限制
 
-CloudFront path patterns 只支持 `*` 和 `?` 通配符——不支持 regex。当 Cloudflare 规则用了无法映射为通配符的 regex path 表达式时，pipeline 会把它分配到默认的 `"*"` behavior，并加一条 `non_convertible` 备注。
+CloudFront path patterns 只支持 `*` 和 `?` 通配符——不支持 regex。当 Cloudflare 规则用了无法映射为通配符的 regex path 表达式时：
+
+- **Cache Rules**：路由到 Lambda@Edge origin-response，在运行时计算 regex 并设置 `Cache-Control` header。
+- **其他规则类型**（redirect、rewrite、header transform）：分配到默认 `"*"` behavior，原始表达式保留为 `raw_expression` 供 CloudFront Function JS 生成使用。
 
 ### 不可转换项的处理方式
 
@@ -94,5 +120,5 @@ AI 生成的配置在上生产前必须人工审查。重点关注：
 ### 本工具不配置的功能
 
 - **CloudFront access logging**——涉及 S3 bucket、日志格式、共享还是按域名分等决策，超出迁移范围。
-- **Lambda@Edge 部署**——工具会生成 Lambda 代码，但用的是 `REPLACE_WITH_DEPLOYED_LAMBDA_ARN` 占位符。你得先部署 Lambda 函数，填好 ARN，再 `terraform apply`。
+- **Lambda@Edge origin-request 部署**——当 CFF 超过 10 KB 且 origin_override 操作被拆分到 Lambda@Edge 时，生成的 `origin_request_handler.js` 文件头部包含需要手动添加到 `main.tf` 的条目。这只适用于 CFF 大小溢出触发拆分的域名——大多数域名不需要。Lambda@Edge origin-response 是全自动的（IAM role、archive、Lambda 函数和 `main.tf` 中的 `qualified_arn` 引用都由 scaffold 生成）。
 - **DNS 切换**——工具会生成 CloudFront distributions，但不会动 DNS 记录。确认配置没问题后，你自己更新 DNS 指向 CloudFront。
