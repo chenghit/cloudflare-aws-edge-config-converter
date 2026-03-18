@@ -279,6 +279,25 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
                 f"(limit 5 MB). Approaching limit — monitor after deployment."
             )
 
+    # CORS credentials + wildcard check
+    for pid, entry in manifest.items():
+        if entry["type"] != "response_headers_policy":
+            continue
+        cors = entry["config"].get("cors")
+        if not cors or not isinstance(cors, dict):
+            continue
+        if cors.get("Access-Control-Allow-Credentials") == "true":
+            origins = cors.get("Access-Control-Allow-Origin", "")
+            headers = cors.get("Access-Control-Allow-Headers", "")
+            if origins == "*" or headers == "*":
+                used = ", ".join(entry.get("used_by", [entry.get("sample_hostname", "?")]))
+                all_warnings.append(
+                    f"CORS policy {pid} (used by {used}): credentials=true with wildcard "
+                    f"origin/headers. CloudFront does not allow this per HTTP spec. "
+                    f"Wildcards were replaced with defaults — review and update with "
+                    f"your actual allowed origins/headers in policies.tf."
+                )
+
     if all_warnings:
         for w in all_warnings:
             lines.append(f"- {w}")
