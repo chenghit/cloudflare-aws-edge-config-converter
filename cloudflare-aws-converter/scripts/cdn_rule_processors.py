@@ -512,14 +512,41 @@ def process_custom_error_rule(rule, ip_lists, phase):
             if p.get("field") == "response_code":
                 response_code = p.get("value")
 
-    # Path 4: inline content → non_convertible
+    # Path 4: inline content
     if content:
-        return _make_non_convertible(
-            rule,
-            "CloudFront custom error response cannot serve inline content; "
-            "error page must be a static file on origin. Consider deploying "
-            "the error page as a static file and using response_page_path"
-        )
+        # 4a: expression uses response-phase fields → non_convertible
+        #     (CFF viewer-response does not execute on 4xx+)
+        if _expression_uses_response_fields(cond, raw_expr):
+            return _make_non_convertible(
+                rule,
+                "Custom error rule with inline content and response-phase condition "
+                "(http.response.code) cannot be converted; CFF viewer-response does not "
+                "execute on 4xx+ responses. Deploy error page as static file on origin"
+            )
+        # 4b: content exceeds KVS 1KB value limit → non_convertible
+        if len(content) > 1024:
+            return _make_non_convertible(
+                rule,
+                f"Inline content is {len(content)} characters, exceeds CloudFront KVS "
+                "1024-character value limit. Deploy error page as static file on origin "
+                "and use custom error response with response_page_path"
+            )
+        # 4c: request-phase only + content ≤ 1KB → serve via CFF + KVS
+        effective_code = response_code or status_code or 500
+        kvs_key = f"error:{rule.get('id', '')[:8]}"
+        return {
+            "type": "serve_error_inline",
+            "cf_source_rule": rule.get("id", ""),
+            "description": rule.get("description", ""),
+            "condition": cond,
+            "raw_expression": raw_expr,
+            "params": {
+                "status_code": effective_code,
+                "content": content,
+                "content_type": content_type or "text/plain",
+                "kvs_key": kvs_key,
+            },
+        }
 
     # Path 3: unsupported status code
     effective_code = response_code or status_code
@@ -628,6 +655,19 @@ def process_bulk_redirect_items(redirect_items, list_name):
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+def _expression_uses_response_fields(cond, raw_expr):
+    """Check if expression references response-phase fields (http.response.code)."""
+    if raw_expr and "http.response" in raw_expr:
+        return True
+    if cond is None:
+        return False
+    if cond.get("field") == "response_code":
+        return True
+    if "logic" in cond:
+        return any(p.get("field") == "response_code" for p in cond.get("parts", []))
+    return False
+
 
 def _make_non_convertible(rule, reason):
     return {

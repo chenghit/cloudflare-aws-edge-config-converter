@@ -175,6 +175,7 @@ def make_empty_ir(domain_config):
                 "needs_redirects": False,
                 "needs_continent": False,
                 "needs_eu": False,
+                "needs_error_pages": False,
             },
             "kvs_data": [],
             "custom_error_responses": [],
@@ -407,6 +408,15 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
                 "name": params["name"], "value": params["value"], "operation": params["operation"],
             })
         return
+
+    if rtype == "serve_error_inline":
+        # Inline error page served via CFF + KVS
+        params = result.get("params", {})
+        kvs_key = params.get("kvs_key", "")
+        content = params.get("content", "")
+        ir["metadata"]["kvs_requirements"]["needs_error_pages"] = True
+        ir["metadata"]["kvs_data"].append({"key": kvs_key, "value": content})
+        # Fall through to viewer_request_ops placement below
 
     if rtype == "cache_setting":
         # Cache rules with raw_expression: try OR path split first

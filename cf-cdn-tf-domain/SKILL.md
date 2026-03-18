@@ -131,6 +131,9 @@ async function handler(event) {
   // --- SECTION 5: header mutations ---
   // (generated code here)
 
+  // --- SECTION 6: serve_error_inline ---
+  // (generated code here — return synthetic response from KVS)
+
   return request;
 }
 ```
@@ -399,6 +402,32 @@ if (country) {
 **Header value substitution**: If any `set_header` op has a value containing
 `"Cloudflare"`, replace with `"CloudFront"` in the generated JS.
 Example: `request.headers['x-cdn'] = {value: 'CloudFront'};`
+
+**6. serve_error_inline** — for each op where type == "serve_error_inline":
+
+Return a synthetic response with body loaded from KVS. The `params` contain:
+- `status_code`: HTTP status code to return
+- `content_type`: Content-Type header value
+- `kvs_key`: KVS key where the inline content is stored
+
+```javascript
+// serve_error_inline: return error page from KVS
+if (<condition>) {
+  const body = await kvsHandle.get('<kvs_key>');
+  return {
+    statusCode: <status_code>,
+    statusDescription: 'Custom Error',
+    headers: {
+      'content-type': { value: '<content_type>' }
+    },
+    body: { encoding: 'text', data: body }
+  };
+}
+```
+
+This requires `import cf from 'cloudfront'` and `const kvsHandle = cf.kvs()` —
+same as bulk_redirects. If the function already has KVS initialization (from
+bulk_redirects or continent/EU lookups), reuse the existing `kvsHandle`.
 
 **`CloudFront-Viewer-Address` format**: Value is `ip:port`. To extract IP only:
 ```javascript
