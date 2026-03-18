@@ -15,6 +15,6 @@
    find yourdomain.com -name "*.txt" -exec sed -i '' 's/c\.example\.com/yourdomain.com/g' {} +
    ```
    Linux 上使用 `sed -i` 而不是 `sed -i ''`。
-2. 确保在 `us-east-1` 有 `*.yourdomain.com` 的有效 ACM 证书，或在 CSV 中留空让 Terraform 自动查找。
+2. 确保在 `us-east-1` 有 `*.yourdomain.com` 的有效 ACM 证书，为工具提供证书 ARN 或在 CSV 中留空让 Terraform 自动查找。
 
 `account/` 目录（IP 列表、批量重定向列表）不包含域名相关数据，无需修改。

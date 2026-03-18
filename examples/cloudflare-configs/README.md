@@ -15,6 +15,6 @@ However, if you want to actually deploy the generated CloudFront distributions t
    find yourdomain.com -name "*.txt" -exec sed -i '' 's/c\.example\.com/yourdomain.com/g' {} +
    ```
    On Linux, use `sed -i` instead of `sed -i ''`.
-2. Make sure you have a valid ACM certificate for `*.yourdomain.com` in `us-east-1`, or leave the cert ARN blank in the CSV to let Terraform auto-discover it.
+2. Make sure you have a valid ACM certificate for `*.yourdomain.com` in `us-east-1`, provide the cert ARN to the tool or leave it blank in the CSV to let Terraform auto-discover it.
 
 The `account/` directory (IP lists, bulk redirect lists) does not contain domain-specific data and does not need modification.
