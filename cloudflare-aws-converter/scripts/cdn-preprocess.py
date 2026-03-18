@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdn_expr_parser import (
     parse_expression, extract_orp_headers, extract_orp_headers_from_raw,
     extract_kvs_triggers, extract_host_filter, extract_path_pattern_single,
+    split_or,
 )
 from cdn_rule_processors import (
     process_redirect_rule, process_rewrite_rule, process_config_rule,
@@ -408,9 +409,16 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         return
 
     if rtype == "cache_setting":
-        # Cache rules with raw_expression can't determine path pattern →
-        # mark as non_convertible (CFF can't control caching conditionally)
+        # Cache rules with raw_expression: try OR path split first
         if result.get("raw_expression") and not result.get("condition"):
+            or_paths = _try_split_or_cache_paths(result["raw_expression"])
+            if or_paths:
+                for path in or_paths:
+                    beh = find_or_create_behavior(ir, path, domain_config, origin_content)
+                    _apply_cache_setting(beh, result)
+                return
+            # Cannot split → mark as non_convertible
+            # (PR 2 will change this to L@E origin-response)
             default_beh = ir["cache_behaviors"][0]
             default_beh["non_convertible"].append({
                 "cf_source_rule": result.get("cf_source_rule", ""),
@@ -473,6 +481,27 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         beh["viewer_response_ops"].append(op_entry)
     else:
         beh["viewer_request_ops"].append(op_entry)
+
+
+def _try_split_or_cache_paths(raw_expression):
+    """Try to split an OR expression into individual path patterns for cache rules.
+
+    Returns a list of CloudFront path patterns if ALL OR branches are path-based,
+    or None if any branch cannot be parsed as a path condition.
+    """
+    parts = split_or(raw_expression)
+    if len(parts) < 2:
+        return None
+    paths = []
+    for part in parts:
+        cond, raw = parse_expression(part)
+        if raw is not None or cond is None:
+            return None  # branch can't be parsed
+        pp = extract_path_pattern_single(cond)
+        if not pp or pp == "*":
+            return None  # branch doesn't yield a specific path
+        paths.append(pp)
+    return paths
 
 
 def _extract_path_from_result(result, cond, expr):

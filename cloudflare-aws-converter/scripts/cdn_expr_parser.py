@@ -298,6 +298,31 @@ def _has_or(expr):
     return False
 
 
+def split_or(expr):
+    """Split 'A or B or C' at the top level (not inside parens).
+
+    Exported for use by preprocess (cache rule OR path splitting).
+    """
+    depth = 0
+    tokens = []
+    current = []
+    for ch in expr:
+        if ch == "(":
+            depth += 1
+            current.append(ch)
+        elif ch == ")":
+            depth -= 1
+            current.append(ch)
+        else:
+            current.append(ch)
+        s = "".join(current)
+        if depth == 0 and s.endswith(" or "):
+            tokens.append(s[:-4].strip())
+            current = []
+    tokens.append("".join(current).strip())
+    return [t for t in tokens if t]
+
+
 def parse_expression(expression):
     """Parse a Cloudflare expression string.
 
