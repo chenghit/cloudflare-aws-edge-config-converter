@@ -1,16 +1,11 @@
-[English](./README.md)
-
 # 示例
 
 ## Cloudflare 配置
 
-`cloudflare-configs/` 包含从真实 zone 导出的示例 Cloudflare 配置（已移除敏感数据）。
+`cloudflare-configs/` 包含用于测试迁移工具的 Cloudflare 示例配置。涵盖 7 个代理域名、34 条 CDN 规则 + 8 条 WAF 规则，覆盖 12 种规则类型，包括正则表达式、OR 条件、地理路由、CORS、批量重定向和内联错误页面。
 
-- `account/` — 账号级配置（IP 列表等）
-- `c.example.com/` — 示例域名的 zone 级配置
-  > **注意**：这里用 `c.example.com` 作为 apex domain（测试时没有可用的真实 TLD）。在你自己的账号中，通常是 `example.com` 这样的域名。
-
-可以用这些示例在没有自己 Cloudflare 备份的情况下测试转换。
+- `account/` — 账号级配置（IP 列表、批量重定向列表）
+- `c.example.com/` — Zone 级配置
 
 ## 使用方法
 
@@ -24,3 +19,20 @@ kiro-cli chat
 Convert Cloudflare security rules in ./examples/cloudflare-configs/ to AWS WAF
 Convert CDN configuration in ./examples/cloudflare-configs/ to CloudFront Terraform
 ```
+
+## 部署前须知
+
+示例配置使用 `c.example.com` 作为 zone 名称，子域名为 `cdn.c.example.com`、`www.c.example.com` 等。如果只是运行转换流程、查看生成的 Terraform/JS 输出，可以直接使用，无需修改。
+
+但如果要将生成的 CloudFront 分配实际部署到 AWS，必须将域名替换为你拥有的真实公网域名：
+
+1. 重命名 zone 目录并替换所有域名引用：
+   ```bash
+   cd examples/cloudflare-configs
+   mv c.example.com yourdomain.com
+   find yourdomain.com -name "*.txt" -exec sed -i '' 's/c\.example\.com/yourdomain.com/g' {} +
+   ```
+   Linux 上使用 `sed -i` 而不是 `sed -i ''`。
+2. 确保在 `us-east-1` 有 `*.yourdomain.com` 的有效 ACM 证书，为工具提供证书 ARN 或在 CSV 中留空让 Terraform 自动查找。
+
+`account/` 目录不包含域名相关数据，无需修改。
