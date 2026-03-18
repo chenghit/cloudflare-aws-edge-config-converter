@@ -295,7 +295,9 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
                     f"CORS policy {pid} (used by {used}): credentials=true with wildcard "
                     f"origin/headers. CloudFront does not allow this per HTTP spec. "
                     f"Wildcards were replaced with defaults — review and update with "
-                    f"your actual allowed origins/headers in policies.tf."
+                    f"your actual allowed origins/headers in policies.tf. "
+                    f"If you need wildcard origin with credentials, use CloudFront Functions "
+                    f"viewer-response to set CORS headers instead of Response Headers Policy."
                 )
 
     if all_warnings:
