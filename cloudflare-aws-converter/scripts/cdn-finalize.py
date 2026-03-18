@@ -367,6 +367,27 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
 
     step_n = 5 if domains_with_kvs else 4
     lines += [
+        f"### {step_n}. Validate deployment",
+        "",
+        "Each domain has a `test-cdn-rules.py` script for post-deployment validation.",
+        "Run it against the CloudFront distribution domain name:",
+        "",
+        "```bash",
+    ]
+    for m in domain_list:
+        san = m["sanitized_name"]
+        lines.append(f"cd cloudflare-to-aws-cdn/terraform/domains/{san} && python3 test-cdn-rules.py <distribution-domain>")
+    lines += [
+        "```",
+        "",
+        "The script tests redirects, error pages, bulk redirects, and response headers "
+        "using curl. Items requiring manual testing (IP-based rules, geo conditions, "
+        "origin overrides) are listed as SKIP with instructions.",
+        "",
+    ]
+
+    step_n += 1
+    lines += [
         f"### {step_n}. DNS cutover",
         "",
         "Update DNS records to point to CloudFront distributions:",
