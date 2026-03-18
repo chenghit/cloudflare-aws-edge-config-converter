@@ -310,11 +310,12 @@ Generates `test-cdn-rules.py` per domain for post-deployment validation. Proceed
 
 **Stage 8: Per-Domain JS Generation** (parallelizable — invoke once per domain)
 1. For each domain `{domain}`, invoke `cf-cdn-tf-domain` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. You MUST use tools to read IR files and write JS output — do NOT skip tool calls. The Cloudflare backup directory is {config_path}. Generate JavaScript files for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json. Terraform scaffold files (main.tf, functions.tf, etc.) have already been generated at cloudflare-to-aws-cdn/terraform/domains/. Only generate JS files (viewer_request.js, viewer_response.js, Lambda@Edge handlers if needed). If Lambda@Edge files are generated, update functions.tf by replacing the LAMBDA_EDGE_PLACEHOLDER comment with L@E resource blocks. Do NOT modify main.tf. Generate output files in {user_language}."`
-2. **Verify output** (CRITICAL — run this exact script, do not simplify):
+2. **Verify output** (CRITICAL — run this exact script, do NOT simplify or omit the lambda check):
    ```bash
-   for d in <space-separated list of sanitized domain names>; do
-     echo -n "$d/functions: "; ls cloudflare-to-aws-cdn/terraform/domains/$d/functions/ 2>/dev/null | tr '\n' ' '; echo
-     echo -n "$d/lambda: "; ls cloudflare-to-aws-cdn/terraform/domains/$d/lambda/ 2>/dev/null | tr '\n' ' '; echo
+   for d in cloudflare-to-aws-cdn/terraform/domains/*/; do
+     san=$(basename "$d")
+     echo -n "$san/functions: "; ls "$d/functions/" 2>/dev/null | tr '\n' ' '; echo
+     echo -n "$san/lambda: "; ls "$d/lambda/" 2>/dev/null | tr '\n' ' '; echo
    done
    ```
    For each domain:
@@ -324,7 +325,7 @@ Generates `test-cdn-rules.py` per domain for post-deployment validation. Proceed
 3. Wait for all domains to complete.
 
 **Stage 9: CloudFront Function JS Validation** (parallelizable — invoke once per domain)
-1. For each domain `{domain}` that has a `functions/` directory, invoke `cf-cdn-js-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-js-validator/SKILL.md and follow its workflow. You MUST use tools to read JS files and write validation report. The Cloudflare backup directory is {config_path}. Validate all CloudFront Function JavaScript files for domain {domain} (the skill will derive the sanitized directory name from the hostname). Output a validation report to cloudflare-to-aws-cdn/ir/validation/js/{domain}-v3.json. Generate output files in {user_language}."`
+1. For each domain `{domain}` that has a `functions/` directory, invoke `cf-cdn-js-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-js-validator/SKILL.md and follow its workflow. You MUST use tools to read JS files and write validation report. The Cloudflare backup directory is {config_path}. Validate all CloudFront Function AND Lambda@Edge JavaScript files for domain {domain} — check both the functions/ and lambda/ directories (the skill will derive the sanitized directory name from the hostname). Output a validation report to cloudflare-to-aws-cdn/ir/validation/js/{domain}-v3.json. Generate output files in {user_language}."`
 2. **Verify output**: check that `cloudflare-to-aws-cdn/ir/validation/js/{domain}-v3.json` exists. If missing → re-invoke once.
 3. Check the `overall_status` field in the written JSON report:
    - `"PASS"` → domain JS is valid
