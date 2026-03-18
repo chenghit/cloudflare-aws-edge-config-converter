@@ -38,12 +38,12 @@ kiro-cli chat
 
 - **Kiro CLI** >= 1.24 — [安装文档](https://kiro.dev/docs/getting-started/installation/)。⚠️ 不推荐使用 Kiro IDE（不支持 subagent 中的 `skill://` 资源绑定）。
 - **Terraform** >= 1.8.0，AWS Provider >= 6.x — [安装 Terraform](https://developer.hashicorp.com/terraform/install)。注意：`terraform validate`（WAF 生成后自动运行）首次运行需要联网下载 AWS provider（约 300MB）。
-- **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF 用 Python 做 IP 列表/访问规则分析，以及辅助脚本做 count 校验和 JSON 切分。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.5）——这些替代了 LLM subagent，实现确定性的亚秒级处理。macOS 和大多数 Linux 发行版已预装。无需第三方包（仅用标准库）。
+- **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF 用 Python 做 IP 列表/访问规则分析，以及辅助脚本做 count 校验和 JSON 切分。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）——这些替代了 LLM subagent，实现确定性的亚秒级处理。macOS 和大多数 Linux 发行版已预装。无需第三方包（仅用标准库）。
 - **模型**：最低 `claude-sonnet-4.6-1m`。在 Kiro 中通过 `/model` 切换。
   - **WAF 迁移**：≤ 100 条规则用 `claude-sonnet-4.6-1m`，> 100 条用 `claude-opus-4.6-1m`。"规则"= WAF Custom Rules + Rate Limiting Rules + IP Access Rules 总数。WAF pipeline 最多支持约 200 条 CF 规则；超过此数建议先在 Cloudflare 端简化规则或手动迁移。瓶颈在于 Terraform generator 的输出量——AWS WAF 要求将使用顶层 OR 逻辑或混合 IPv4/IPv6 IP 列表的 Cloudflare 规则拆分为多条 AWS WAF 规则（例如，一条有 3 个 OR 分支和混合 IP 的规则会变成 6 条 AWS WAF 规则）。典型拆分比例约 2x；简单 zone 约 1.5x，包含大量 OR + 混合 IP 规则的复杂 zone 可达 3x。每条 AWS WAF 规则约产生 150 output tokens 的 HCL：
     - Sonnet 4.6 最大输出：64K tokens → 约 200 条 AWS WAF 规则（约 100 条 CF 规则）
     - Opus 4.6 最大输出：128K tokens → 约 400 条 AWS WAF 规则（约 200 条 CF 规则）
-  - **CDN 迁移**：无论域名数量，统一使用 `claude-sonnet-4.6-1m`。CDN Stage 3–7.5 是 Python 脚本（无 LLM 开销）。剩余的 LLM 阶段（DNS 解析、输入校验、JS 生成、JS 校验）每个域名独立处理，单次生成约 200 行输出，远低于 Sonnet 的 64K output 上限。token 容量不需要 Opus，但如果 Sonnet 对复杂 Cloudflare 表达式（regex_replace、带捕获组的 wildcard_replace）生成的 JavaScript 有误，可以考虑切换到 Opus。
+  - **CDN 迁移**：无论域名数量，统一使用 `claude-sonnet-4.6-1m`。CDN Stage 3–7.6 是 Python 脚本（无 LLM 开销）。剩余的 LLM 阶段（DNS 解析、输入校验、JS 生成、JS 校验）每个域名独立处理，单次生成约 200 行输出，远低于 Sonnet 的 64K output 上限。token 容量不需要 Opus，但如果 Sonnet 对复杂 Cloudflare 表达式（regex_replace、带捕获组的 wildcard_replace）生成的 JavaScript 有误，可以考虑切换到 Opus。
 - **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。运行前申请通配符证书（如 `*.example.com`），或在 CSV 中留空让 Terraform 自动查找已签发的证书。
 - **输入格式**：仅支持 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 导出。不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)——详见 [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)
 
@@ -71,9 +71,9 @@ kiro-cli chat
 
 **WAF 流程**（4 阶段）：**分析 IP 列表（Python）** → 分析自定义规则 + 速率限制（2 个 LLM 批次）→ 合并 + 校验（并行）→ 生成 Terraform → terraform validate
 
-**CDN 流程**（4 个 LLM 阶段 + 6 个 Python 脚本）：解析 DNS → 校验用户输入 → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → 生成每域名 JS → 校验 JS
+**CDN 流程**（4 个 LLM 阶段 + 7 个 Python 脚本）：解析 DNS → 校验用户输入 → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → 生成每域名 JS → 校验 JS
 
-CDN Stage 3–7.5 是确定性 Python 脚本，替代了原来的 LLM subagent。它们负责规则解析、字段映射、表达式分析、缓存行为组装、策略去重、IR 校验、共享策略生成和每域名 Terraform 骨架——全是查表和结构化操作，不需要 LLM 判断。这使得 Stage 3–7.5 瞬间完成（任意域名数量 <1 秒）、完全可复现，并省去了每个 zone 约 30 分钟的 LLM 处理时间。剩余的 LLM 阶段（8–9）负责 JS 代码生成和校验，这些确实需要语言模型能力。
+CDN Stage 3–7.6 是确定性 Python 脚本，替代了原来的 LLM subagent。它们负责规则解析、字段映射、表达式分析、缓存行为组装、策略去重、IR 校验、共享策略生成和每域名 Terraform 骨架——全是查表和结构化操作，不需要 LLM 判断。这使得 Stage 3–7.6 瞬间完成（任意域名数量 <1 秒）、完全可复现，并省去了每个 zone 约 30 分钟的 LLM 处理时间。Stage 7.6 生成每域名的部署后验证测试脚本。剩余的 LLM 阶段（8–9）负责 JS 代码生成和校验，这些确实需要语言模型能力。
 
 ```mermaid
 flowchart TD
@@ -89,7 +89,8 @@ flowchart TD
     CDN5 --> CDN6["🐍 V2 校验"]
     CDN6 -->|通过| CDN7["🐍 共享策略"]
     CDN7 --> CDN75["🐍 TF 骨架"]
-    CDN75 --> CDN8["TF 域名 × N"]
+    CDN75 --> CDN76["🐍 测试脚本"]
+    CDN76 --> CDN8["TF 域名 × N"]
     CDN8 --> CDN9["JS 校验 × N"]
     CDN9 -->|通过| CDN_Done([CDN Terraform + JS ✅])
 
@@ -188,7 +189,7 @@ cd cloudflare-aws-edge-config-converter
 
 > **使用其他 Agent 工具？** 安装脚本和所有 SKILL.md 文件默认使用 `~/.kiro/skills/` 作为 skill 安装目录（Kiro CLI 约定）。如需配合其他 agent 工具使用，需要：(1) 修改 `install.sh` / `uninstall.sh` 中的目标目录；(2) 在所有 SKILL.md 文件中将 `~/.kiro/skills/` 全局替换为你的 agent 工具的 skill 路径——subagent 之间通过绝对安装路径互相引用。
 
-高级用户可通过 `/agent swap <subagent-name>` 单独运行各流程阶段。可用 subagent：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。CDN Stage 3–7.5 为 Python 脚本（非 subagent），直接通过 `python3` 运行。
+高级用户可通过 `/agent swap <subagent-name>` 单独运行各流程阶段。可用 subagent：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。CDN Stage 3–7.6 为 Python 脚本（非 subagent），直接通过 `python3` 运行。
 
 ## Subagent 权限与安全
 

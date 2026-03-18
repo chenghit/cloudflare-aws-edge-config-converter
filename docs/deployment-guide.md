@@ -133,7 +133,21 @@ python3 seed-kvs.py
 The script reads `kvs-data.json` and writes entries in batches of 50 via the
 `update-keys` API. Requires `boto3` (`pip install boto3`) and AWS credentials.
 
-#### Step 4: Update DNS
+#### Step 4: Validate deployment
+
+Each domain has a generated `test-cdn-rules.py` script for post-deployment
+validation. Run it against the CloudFront distribution domain:
+
+```bash
+cd cloudflare-to-aws-cdn/terraform/domains/cdn_example_com
+python3 test-cdn-rules.py d111111abcdef8.cloudfront.net
+```
+
+The script tests redirects, error pages, bulk redirects, and response headers
+using curl. Items that require manual testing (IP-based rules, geo conditions,
+origin overrides) are listed as SKIP with instructions.
+
+#### Step 5: Update DNS
 
 After verifying each CloudFront distribution is working:
 

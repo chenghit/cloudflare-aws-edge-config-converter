@@ -116,7 +116,18 @@ python3 seed-kvs.py
 
 脚本读取 `kvs-data.json`，通过 `update-keys` API 按 50 条一批写入。需要 `boto3`（`pip install boto3`）和 AWS 凭证。
 
-#### 第 4 步：更新 DNS
+#### 第 4 步：验证部署
+
+每个域名都有生成好的 `test-cdn-rules.py` 脚本用于部署后验证。用 CloudFront distribution 域名运行：
+
+```bash
+cd cloudflare-to-aws-cdn/terraform/domains/cdn_example_com
+python3 test-cdn-rules.py d111111abcdef8.cloudfront.net
+```
+
+脚本使用 curl 测试重定向、错误页面、批量重定向和响应头。需要手动测试的项目（IP 规则、地理条件、origin 切换）会列为 SKIP 并附带说明。
+
+#### 第 5 步：更新 DNS
 
 确认每个 CloudFront distribution 正常工作后：
 
