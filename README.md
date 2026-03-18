@@ -149,7 +149,7 @@ Shared policies → Lambda@Edge (if any) → each domain independently → KVS d
 
 - **Design target:** Tested with up to 50 proxied domains per zone. Larger zones should work — each subagent processes one domain in isolation.
 - **Single zone per run.** Multiple zones detected → orchestrator asks you to pick one.
-- **Parallel batch size: 2** (default). Conservative for Anthropic Tier 1 (50 RPM) and AWS Bedrock default quotas. Increase by editing `cloudflare-aws-converter/SKILL.md` if your quota allows. Tier 2+ or Bedrock with approved increase can use batch size 4 (Kiro CLI max).
+- **Parallel batch size: 2** (default). Conservative for Anthropic Tier 1 (50 RPM) and AWS Bedrock default quotas. To increase: open `cloudflare-aws-converter/SKILL.md`, search for `batch size 2` in the "Important Rules" section near the bottom, change `2` to `4` (Kiro CLI max). Tier 2+ or Bedrock with approved quota increase can safely use 4.
 - **KVS quota:** Default 50 per account (soft limit). [Request increase](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html) if > 50 domains use bulk redirects.
 
 </details>

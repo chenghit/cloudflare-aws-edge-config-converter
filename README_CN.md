@@ -147,7 +147,7 @@ cloudflare-to-aws-cdn/
 
 - **设计目标：** 已测试最多 50 个代理域名。更大的 zone 也应该可以工作——每个 subagent 独立处理一个域名。
 - **单 zone 运行。** 检测到多个 zone → 编排器要求你选择一个。
-- **并行批次大小：2**（默认）。适合 Anthropic Tier 1（50 RPM）和 AWS Bedrock 默认配额。如配额更高，可编辑 `cloudflare-aws-converter/SKILL.md` 增加。Tier 2+ 或 Bedrock 已提额可用批次大小 4（Kiro CLI 最大值）。
+- **并行批次大小：2**（默认）。适合 Anthropic Tier 1（50 RPM）和 AWS Bedrock 默认配额。修改方法：打开 `cloudflare-aws-converter/SKILL.md`，搜索底部 "Important Rules" 部分的 `batch size 2`，将 `2` 改为 `4`（Kiro CLI 最大值）。Tier 2+ 或 Bedrock 已提额可安全使用 4。
 - **KVS 配额：** 默认 50 个/账号（软限制）。如 > 50 个域名使用批量重定向，请[申请提额](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html)。
 
 </details>
