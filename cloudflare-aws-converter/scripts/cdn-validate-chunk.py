@@ -107,10 +107,13 @@ def validate_domain(ir, filename):
     # Check 8: KVS requirements consistency
     kvs_req = ir.get("metadata", {}).get("kvs_requirements", {})
     kvs_data = ir.get("metadata", {}).get("kvs_data", [])
-    if kvs_req.get("needs_redirects") and not kvs_data:
-        errors.append("Check8: kvs_requirements.needs_redirects is true but kvs_data is empty")
-    if not kvs_req.get("needs_redirects") and kvs_data:
-        errors.append("Check8: kvs_data is non-empty but kvs_requirements.needs_redirects is false")
+    has_any_kvs_flag = any(kvs_req.values())
+    if has_any_kvs_flag and not kvs_data:
+        errors.append("Check8: kvs_requirements has active flags but kvs_data is empty")
+    if kvs_req.get("needs_redirects") and not any(e.get("key", "").startswith("redirect:") for e in kvs_data):
+        errors.append("Check8: needs_redirects is true but no redirect: entries in kvs_data")
+    if kvs_req.get("needs_error_pages") and not any(e.get("key", "").startswith("error:") for e in kvs_data):
+        errors.append("Check8: needs_error_pages is true but no error: entries in kvs_data")
 
     # Check 9: metadata required fields
     metadata = ir.get("metadata", {})
