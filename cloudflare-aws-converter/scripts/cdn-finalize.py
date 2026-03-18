@@ -250,6 +250,32 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     if skipped_domains:
         for sd in skipped_domains:
             all_warnings.append(f"Domain skipped: {sd.get('hostname', '?')} — {sd.get('reason', '?')}")
+
+    # KVS size estimation per domain
+    for ir in all_irs:
+        hostname = ir["metadata"]["hostname"]
+        kvs_data = ir["metadata"].get("kvs_data", [])
+        if not kvs_data and not ir["metadata"].get("kvs_requirements", {}).get("needs_continent"):
+            continue
+        # Estimate: each entry = key bytes + value bytes + ~20 bytes overhead
+        total_bytes = sum(len(e.get("key", "")) + len(e.get("value", "")) + 20 for e in kvs_data)
+        # Continent/EU mappings add ~3KB
+        kvs_req = ir["metadata"].get("kvs_requirements", {})
+        if kvs_req.get("needs_continent"):
+            total_bytes += 3000
+        if kvs_req.get("needs_eu"):
+            total_bytes += 300
+        if total_bytes > 4_000_000:
+            all_warnings.append(
+                f"KVS for {hostname}: estimated {total_bytes / 1_000_000:.1f} MB "
+                f"(limit 5 MB). Reduce bulk redirects or request KVS quota increase."
+            )
+        elif total_bytes > 3_000_000:
+            all_warnings.append(
+                f"KVS for {hostname}: estimated {total_bytes / 1_000_000:.1f} MB "
+                f"(limit 5 MB). Approaching limit — monitor after deployment."
+            )
+
     if all_warnings:
         for w in all_warnings:
             lines.append(f"- {w}")
