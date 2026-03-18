@@ -108,7 +108,7 @@ Skip this step if `cloudflare-to-aws-cdn/` already exists (resuming a previous r
 
 **CRITICAL: Every subagent query MUST start with a skill-loading instruction.** Subagents may not automatically load their skill file when invoked via `use_subagent`. Prefix every query with:
 
-`"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/{subagent-name}/SKILL.md and follow its workflow. "`
+`"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/{subagent-name}/SKILL.md and follow its workflow. You MUST use tools to read input files and write output files — do NOT generate output from memory or skip tool calls. "`
 
 Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analyzer`, `cf-cdn-dns-parser`).
 
@@ -209,15 +209,20 @@ Proceed to Step 4.
 Stages 3–6 are deterministic Python scripts (no LLM). Stages 1, 2, 7, 8, 9 are LLM subagents.
 
 **Stage 1: DNS Parsing**
-1. Invoke `cf-cdn-dns-parser` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-dns-parser/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Parse DNS.txt to identify all proxied domains. Detect any Cloudflare for SaaS configurations. Group domains by apex domain for ACM certificate planning. Write dns_manifest.yaml and user_input_template.csv to the cloudflare-to-aws-cdn/ output directory. Generate output files in {user_language}."`
-2. Check the response:
-   - If `dns_manifest.yaml` and `user_input_template.csv` were written successfully → **pause and tell the user**:
+1. Invoke `cf-cdn-dns-parser` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-dns-parser/SKILL.md and follow its workflow. You MUST use tools (glob, fs_read, fs_write) to read DNS.txt and write output files — do NOT generate output from memory. The Cloudflare backup directory is {config_path}. Parse DNS.txt to identify all proxied domains. Detect any Cloudflare for SaaS configurations. Group domains by apex domain for ACM certificate planning. Write dns_manifest.yaml and user_input_template.csv to the cloudflare-to-aws-cdn/ output directory. Generate output files in {user_language}."`
+2. **Verify output files exist** (CRITICAL — subagents may skip tool calls):
+   ```bash
+   ls cloudflare-to-aws-cdn/dns_manifest.yaml cloudflare-to-aws-cdn/user_input_template.csv
+   ```
+   - If both files exist → **pause and tell the user**:
      > "DNS parsing complete. I found N proxied domains. Please fill in `cloudflare-to-aws-cdn/user_input_template.csv` with your ACM certificate ARNs (or leave blank for auto-lookup), then save it as `cloudflare-to-aws-cdn/user_input.csv`. Let me know when it's ready to proceed."
+   - If either file is missing → **re-invoke the subagent once** with the same query. If the second attempt also fails to produce files → stop and tell the user: "DNS parser failed to write output files after 2 attempts. Please file a GitHub issue."
    - Wait for the user to confirm before continuing.
 
 **Stage 2: Input Validation**
-1. Invoke `cf-cdn-input-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-input-validator/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Validate cloudflare-to-aws-cdn/user_input.csv against cloudflare-to-aws-cdn/dns_manifest.yaml. On success, write cloudflare-to-aws-cdn/domain_scope.json. Report any validation errors with remediation hints. Generate output files in {user_language}."`
-2. Check the `---RESULT---` block:
+1. Invoke `cf-cdn-input-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-input-validator/SKILL.md and follow its workflow. You MUST use tools to read and write files. The Cloudflare backup directory is {config_path}. Validate cloudflare-to-aws-cdn/user_input.csv against cloudflare-to-aws-cdn/dns_manifest.yaml. On success, write cloudflare-to-aws-cdn/domain_scope.json. Report any validation errors with remediation hints. Generate output files in {user_language}."`
+2. **Verify output**: run `ls cloudflare-to-aws-cdn/domain_scope.json`. If missing after subagent claims PASS → re-invoke once.
+3. Check the `---RESULT---` block:
    - `STATUS: PASS` → proceed to Stage 3
    - `STATUS: ERRORS` → show the user the list of errors and ask them to fix `user_input.csv`, then re-invoke Stage 2
    - `STATUS: CANNOT_FIX` → stop and tell the user which fields require manual correction
@@ -285,12 +290,14 @@ python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-tf-scaffold
 Generates main.tf, functions.tf, outputs.tf, kvs.tf, kvs-data.json for each domain. These are deterministic template files — no LLM needed. Proceed to Stage 8.
 
 **Stage 8: Per-Domain JS Generation** (parallelizable — invoke once per domain)
-1. For each domain `{domain}`, invoke `cf-cdn-tf-domain` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Generate JavaScript files for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json. Terraform scaffold files (main.tf, functions.tf, etc.) have already been generated at cloudflare-to-aws-cdn/terraform/domains/. Only generate JS files (viewer_request.js, viewer_response.js, Lambda@Edge handlers if needed). If Lambda@Edge files are generated, update functions.tf by replacing the LAMBDA_EDGE_PLACEHOLDER comment with L@E resource blocks. Do NOT modify main.tf. Generate output files in {user_language}."`
-2. Wait for all domain Terraform generators to complete.
+1. For each domain `{domain}`, invoke `cf-cdn-tf-domain` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. You MUST use tools to read IR files and write JS output — do NOT skip tool calls. The Cloudflare backup directory is {config_path}. Generate JavaScript files for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json. Terraform scaffold files (main.tf, functions.tf, etc.) have already been generated at cloudflare-to-aws-cdn/terraform/domains/. Only generate JS files (viewer_request.js, viewer_response.js, Lambda@Edge handlers if needed). If Lambda@Edge files are generated, update functions.tf by replacing the LAMBDA_EDGE_PLACEHOLDER comment with L@E resource blocks. Do NOT modify main.tf. Generate output files in {user_language}."`
+2. **Verify output**: for each domain, check that `functions/` directory was created under the domain's terraform directory. If missing after subagent claims completion → re-invoke once for that domain.
+3. Wait for all domains to complete.
 
 **Stage 9: CloudFront Function JS Validation** (parallelizable — invoke once per domain)
-1. For each domain `{domain}` that has a `functions/` directory, invoke `cf-cdn-js-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-js-validator/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Validate all CloudFront Function JavaScript files for domain {domain} (the skill will derive the sanitized directory name from the hostname). Output a validation report to cloudflare-to-aws-cdn/ir/validation/js/{domain}-v3.json. Generate output files in {user_language}."`
-2. Check the `overall_status` field in the written JSON report:
+1. For each domain `{domain}` that has a `functions/` directory, invoke `cf-cdn-js-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-js-validator/SKILL.md and follow its workflow. You MUST use tools to read JS files and write validation report. The Cloudflare backup directory is {config_path}. Validate all CloudFront Function JavaScript files for domain {domain} (the skill will derive the sanitized directory name from the hostname). Output a validation report to cloudflare-to-aws-cdn/ir/validation/js/{domain}-v3.json. Generate output files in {user_language}."`
+2. **Verify output**: check that `cloudflare-to-aws-cdn/ir/validation/js/{domain}-v3.json` exists. If missing → re-invoke once.
+3. Check the `overall_status` field in the written JSON report:
    - `"PASS"` → domain JS is valid
    - `"FAIL"` → **auto-retry once** with the following procedure:
      a. Use `fs_read` to read `cloudflare-to-aws-cdn/ir/validation/js/{hostname}-v3.json` and extract the failed checks (entries where `status == "FAIL"`).
