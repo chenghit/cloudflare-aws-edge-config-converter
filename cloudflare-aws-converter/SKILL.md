@@ -294,6 +294,14 @@ python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-tf-scaffold
 ```
 Generates main.tf, functions.tf, outputs.tf, kvs.tf, kvs-data.json for each domain. These are deterministic template files — no LLM needed.
 
+**Stage 7.5b: Terraform Validate** (shared policies only)
+1. Validate shared policies:
+   ```bash
+   cd cloudflare-to-aws-cdn/terraform/shared && terraform init -backend=false && terraform validate
+   ```
+2. If validation fails → stop pipeline and report errors. These are Python script bugs — the user should file a GitHub issue.
+3. If validation passes → proceed to Stage 7.6.
+
 **Stage 7.6: Generate Test Scripts** (Python script, no LLM)
 ```bash
 python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-tests.py "cloudflare-to-aws-cdn"

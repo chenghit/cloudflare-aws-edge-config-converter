@@ -149,12 +149,17 @@ def gen_orp(pid, config):
 # ── Response headers policy ──────────────────────────────────────────────────
 
 def gen_rhp(pid, config):
-    lines = []
-    w = lines.append
     sec = config.get("security_headers", {})
     custom = config.get("custom_headers", [])
     cors = config.get("cors")
     remove = config.get("remove_headers", [])
+
+    # Skip empty RHP — Terraform requires at least one config block
+    if not sec and not custom and not cors and not remove:
+        return None
+
+    lines = []
+    w = lines.append
 
     w(f'resource "aws_cloudfront_response_headers_policy" "{hcl_id(pid)}" {{')
     w(f'  name = "cfcdn-rhp-{pid}"')
@@ -183,7 +188,10 @@ def gen_rhp(pid, config):
             w('    content_type_options { override = true }')
         if "X-Frame-Options" in sec:
             val = sec["X-Frame-Options"].upper()
-            w(f'    frame_options {{ frame_option = "{val}"; override = true }}')
+            w(f'    frame_options {{')
+            w(f'      frame_option = "{val}"')
+            w(f'      override     = true')
+            w(f'    }}')
         if "Strict-Transport-Security" in sec:
             w('    strict_transport_security {')
             w('      access_control_max_age_sec = 31536000')
@@ -192,11 +200,21 @@ def gen_rhp(pid, config):
             w('      override                   = true')
             w('    }')
         if "Referrer-Policy" in sec:
-            w(f'    referrer_policy {{ referrer_policy = "{sec["Referrer-Policy"]}"; override = true }}')
+            w(f'    referrer_policy {{')
+            w(f'      referrer_policy = "{sec["Referrer-Policy"]}"')
+            w(f'      override        = true')
+            w(f'    }}')
         if "X-XSS-Protection" in sec:
-            w('    xss_protection { mode_block = true; override = true; protection = true }')
+            w('    xss_protection {')
+            w('      mode_block  = true')
+            w('      override    = true')
+            w('      protection  = true')
+            w('    }')
         if "Content-Security-Policy" in sec:
-            w(f'    content_security_policy {{ content_security_policy = "{sec["Content-Security-Policy"]}"; override = true }}')
+            w(f'    content_security_policy {{')
+            w(f'      content_security_policy = "{sec["Content-Security-Policy"]}"')
+            w(f'      override                = true')
+            w(f'    }}')
         w('  }')
 
     # Custom headers
@@ -226,13 +244,15 @@ def gen_rhp(pid, config):
 
 # ── Outputs ──────────────────────────────────────────────────────────────────
 
-def gen_outputs(policies):
+def gen_outputs(policies, skipped_pids=None):
+    if skipped_pids is None:
+        skipped_pids = set()
     lines = []
     w = lines.append
 
     cache = {pid: v for pid, v in policies.items() if v["type"] == "cache_policy"}
     orp = {pid: v for pid, v in policies.items() if v["type"] == "origin_request_policy"}
-    rhp = {pid: v for pid, v in policies.items() if v["type"] == "response_headers_policy"}
+    rhp = {pid: v for pid, v in policies.items() if v["type"] == "response_headers_policy" and pid not in skipped_pids}
 
     w('output "cache_policy_ids" {')
     w('  value = {')
@@ -294,6 +314,7 @@ def main():
     )
 
     counts = {"cache_policy": 0, "origin_request_policy": 0, "response_headers_policy": 0}
+    skipped_pids = set()
 
     for pid in sorted(policies):
         entry = policies[pid]
@@ -306,9 +327,13 @@ def main():
         elif ptype == "origin_request_policy":
             sections.append(gen_orp(pid, config))
         elif ptype == "response_headers_policy":
-            sections.append(gen_rhp(pid, config))
+            result = gen_rhp(pid, config)
+            if result:
+                sections.append(result)
+            else:
+                skipped_pids.add(pid)
 
-    sections.append(gen_outputs(policies))
+    sections.append(gen_outputs(policies, skipped_pids))
 
     with open(out_path, "w") as f:
         f.write("\n\n".join(sections) + "\n")
