@@ -38,7 +38,7 @@ kiro-cli chat
 
 - **Kiro CLI** >= 1.24 — [安装文档](https://kiro.dev/docs/getting-started/installation/)。⚠️ 不推荐使用 Kiro IDE（不支持 subagent 中的 `skill://` 资源绑定）。
 - **Terraform** >= 1.8.0，AWS Provider >= 6.x — [安装 Terraform](https://developer.hashicorp.com/terraform/install)。注意：`terraform validate`（WAF 生成后自动运行）首次运行需要联网下载 AWS provider（约 300MB）。
-- **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF 用 Python 做 IP 列表/访问规则分析，以及辅助脚本做 count 校验和 JSON 切分。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）——这些替代了 LLM subagent，实现确定性的亚秒级处理。macOS 和大多数 Linux 发行版已预装。无需第三方包（仅用标准库）。
+- **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF 用 Python 做 IP 列表/访问规则分析，以及辅助脚本做 count 校验和 JSON 切分。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）——这些替代了 LLM subagent，实现确定性的亚秒级处理。macOS 和大多数 Linux 发行版已预装。转换流程无需第三方包（仅用标准库）。**部署阶段**：有 KVS 的 CDN 域名（批量重定向、IP 列表、错误页面）会生成 `seed-kvs.py` 脚本，需要 `boto3`——部署前运行 `pip install boto3` 安装。
 - **模型**：最低 `claude-sonnet-4.6-1m`。在 Kiro 中通过 `/model` 切换。
   - **WAF 迁移**：≤ 100 条规则用 `claude-sonnet-4.6-1m`，> 100 条用 `claude-opus-4.6-1m`。"规则"= WAF Custom Rules + Rate Limiting Rules + IP Access Rules 总数。WAF pipeline 最多支持约 200 条 CF 规则；超过此数建议先在 Cloudflare 端简化规则或手动迁移。瓶颈在于 Terraform generator 的输出量——AWS WAF 要求将使用顶层 OR 逻辑或混合 IPv4/IPv6 IP 列表的 Cloudflare 规则拆分为多条 AWS WAF 规则（例如，一条有 3 个 OR 分支和混合 IP 的规则会变成 6 条 AWS WAF 规则）。典型拆分比例约 2x；简单 zone 约 1.5x，包含大量 OR + 混合 IP 规则的复杂 zone 可达 3x。每条 AWS WAF 规则约产生 150 output tokens 的 HCL：
     - Sonnet 4.6 最大输出：64K tokens → 约 200 条 AWS WAF 规则（约 100 条 CF 规则）

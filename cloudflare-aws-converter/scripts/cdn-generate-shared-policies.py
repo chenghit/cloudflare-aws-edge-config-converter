@@ -174,11 +174,14 @@ def gen_rhp(pid, config):
         origins = cors.get("Access-Control-Allow-Origin", "*")
         origin_list = [o.strip() for o in origins.split(",")]
         # CloudFront: * not allowed for origins when credentials=true
-        if allow_creds and origin_list == ["*"]:
-            origin_list = ["https://example.com"]
-            w('    # WARNING: You MUST replace https://example.com with your actual origin domain(s).')
-            w('    # Cloudflare allowed credentials=true with wildcard origin, but CloudFront')
-            w('    # requires explicit origins per HTTP spec. Example: ["https://app.example.com"]')
+        if allow_creds and "*" in origin_list:
+            origin_list = [o for o in origin_list if o != "*"] or ["https://example.com"]
+            if origin_list == ["https://example.com"]:
+                w('    # WARNING: You MUST replace https://example.com with your actual origin domain(s).')
+                w('    # Cloudflare allowed credentials=true with wildcard origin, but CloudFront')
+                w('    # requires explicit origins per HTTP spec. Example: ["https://app.example.com"]')
+            else:
+                w('    # NOTE: Wildcard * removed from origins (credentials=true). Verify remaining origins.')
         w(f'    access_control_allow_origins {{ items = {hcl_list(origin_list)} }}')
 
         methods = cors.get("Access-Control-Allow-Methods", "GET, HEAD")
@@ -191,8 +194,8 @@ def gen_rhp(pid, config):
         allow_headers = cors.get("Access-Control-Allow-Headers", "*")
         header_list = [h.strip() for h in allow_headers.split(",")]
         # CloudFront: * not allowed for headers when credentials=true
-        if allow_creds and header_list == ["*"]:
-            header_list = ["Authorization", "Content-Type", "Origin", "Accept", "X-Requested-With"]
+        if allow_creds and "*" in header_list:
+            header_list = [h for h in header_list if h != "*"] or ["Authorization", "Content-Type", "Origin", "Accept", "X-Requested-With"]
             w('    # NOTE: Wildcard headers replaced with common set (credentials=true).')
             w('    # Add any additional headers your application requires.')
         w(f'    access_control_allow_headers {{ items = {hcl_list(header_list)} }}')

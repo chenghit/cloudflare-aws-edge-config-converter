@@ -135,6 +135,17 @@ def dedup_policies(all_irs):
                 if orig_key not in beh:
                     continue
                 policy = normalize_policy(beh[orig_key])
+
+                # Skip empty RHP — no Terraform resource needed
+                if orig_key == "response_headers_policy":
+                    if (not policy.get("security_headers") and
+                        not policy.get("custom_headers") and
+                        not policy.get("cors") and
+                        not policy.get("remove_headers")):
+                        del beh[orig_key]
+                        beh[ref_key] = None
+                        continue
+
                 policy_json = json.dumps(policy, sort_keys=True, separators=(",", ":"))
                 full_hash = hashlib.sha256(policy_json.encode()).hexdigest()
 
@@ -289,7 +300,7 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         if cors.get("Access-Control-Allow-Credentials") == "true":
             origins = cors.get("Access-Control-Allow-Origin", "")
             headers = cors.get("Access-Control-Allow-Headers", "")
-            if origins == "*" or headers == "*":
+            if "*" in origins or "*" in headers:
                 used = ", ".join(entry.get("used_by", [entry.get("sample_hostname", "?")]))
                 all_warnings.append(
                     f"CORS policy {pid} (used by {used}): credentials=true with wildcard "
@@ -378,6 +389,8 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     if domains_with_kvs:
         lines += [
             "### 4. Seed KVS data",
+            "",
+            "**Requires `boto3`**: `pip install boto3` (not included in stdlib).",
             "",
             "After `terraform apply`, seed each domain's KVS with its data:",
             "",

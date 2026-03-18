@@ -619,7 +619,7 @@ def generate_outputs_tf(ir):
         f'}}',
         f'',
         f'output "distribution_domain_name" {{',
-        f'  value = module.cdn_{san}.distribution_domain_name',
+        f'  value = module.cdn_{san}.domain_name',
         f'}}',
     ]
     return "\n".join(lines) + "\n"
