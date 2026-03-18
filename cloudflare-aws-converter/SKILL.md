@@ -198,7 +198,7 @@ Check the `---RESULT---` block:
 
 ---
 
-#### CDN full pipeline (5 LLM stages + 4 Python scripts — runs when user wants Terraform output for CloudFront):
+#### CDN full pipeline (4 LLM stages + 6 Python scripts — runs when user wants Terraform output for CloudFront):
 
 Stages 3–6 are deterministic Python scripts (no LLM). Stages 1, 2, 7, 8, 9 are LLM subagents.
 
@@ -305,8 +305,6 @@ Generates main.tf, functions.tf, outputs.tf, kvs.tf, kvs-data.json for each doma
 ### Step 4: Report results
 
 After all subagents complete, summarize what was done and where output files were generated.
-
-For "Everything" scope, report results for each pipeline separately.
 
 **For the CDN full pipeline**, include a summary table showing:
 - Number of domains processed successfully
