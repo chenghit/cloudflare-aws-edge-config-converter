@@ -198,12 +198,25 @@ def validate_domain(ir, filename):
     if origin_resp is not None:
         if not isinstance(origin_resp, dict):
             errors.append("Check15: lambda_edge.origin_response is not an object")
-        elif origin_resp.get("type") != "default_cache":
-            errors.append(f"Check15: lambda_edge.origin_response.type is '{origin_resp.get('type')}', expected 'default_cache'")
-        elif "custom_ttl_map" not in origin_resp:
-            errors.append("Check15: lambda_edge.origin_response missing custom_ttl_map")
-        elif not isinstance(origin_resp.get("custom_ttl_map"), dict):
-            errors.append("Check15: lambda_edge.origin_response.custom_ttl_map is not an object")
+        else:
+            resp_type = origin_resp.get("type")
+            if resp_type == "default_cache":
+                if "custom_ttl_map" not in origin_resp:
+                    errors.append("Check15: lambda_edge.origin_response missing custom_ttl_map")
+                elif not isinstance(origin_resp.get("custom_ttl_map"), dict):
+                    errors.append("Check15: lambda_edge.origin_response.custom_ttl_map is not an object")
+            elif resp_type == "conditional_cache":
+                ccr = origin_resp.get("conditional_cache_rules")
+                if not isinstance(ccr, list) or len(ccr) == 0:
+                    errors.append("Check15: conditional_cache type but conditional_cache_rules is empty or not a list")
+            elif resp_type not in ("default_cache", "conditional_cache"):
+                errors.append(f"Check15: lambda_edge.origin_response.type is '{resp_type}', expected 'default_cache' or 'conditional_cache'")
+            else:
+                errors.append("Check15: lambda_edge.origin_response missing type")
+            # Validate conditional_cache_rules entries if present
+            for i, rule in enumerate(origin_resp.get("conditional_cache_rules", [])):
+                if not rule.get("raw_expression"):
+                    errors.append(f"Check15: conditional_cache_rules[{i}] missing raw_expression")
 
     return errors, warnings
 

@@ -577,7 +577,30 @@ If the IR metadata has `lambda_edge.origin_response.type == "default_cache"`:
    comment, keep `const ttl = 7200;`). An empty map means custom-TTL extensions
    are handled by independent cache behaviors (≤20 threshold), so the Lambda
    only needs the default 7200s for remaining extensions.
-4. Write to `lambda/default_cache_origin_response.js`.
+4. If `conditional_cache_rules` is present (non-empty array), add conditional
+   Cache-Control logic **before** the extension-based TTL logic. For each rule:
+   - Translate `raw_expression` to a JS condition (use Node.js regex for
+     `matches` operator, string methods for `contains`/`starts_with`/etc.)
+   - If the condition matches, set `response.headers['cache-control']` to
+     `[{key: 'Cache-Control', value: '<cache_control>'}]` and skip the
+     extension-based TTL logic
+   - If `cache_control` is `null`, do nothing (let origin header pass through)
+   - If `status_code_ttl` is present, also check `response.status` and override
+     Cache-Control for matching status codes
+   Example for checkUpdate rule (`cache_control: "max-age=300"`):
+   ```javascript
+   const uri = request.uri;
+   // conditional cache rules (evaluated before extension-based TTL)
+   if (/\/v2\/[^/]+\/checkUpdate$/.test(uri)) {
+     response.headers['cache-control'] = [{key: 'Cache-Control', value: 'max-age=300'}];
+     callback(null, response);
+     return;
+   }
+   ```
+5. If `type` is `"conditional_cache"` (no `custom_ttl_map`), generate a simpler
+   handler that only processes conditional_cache_rules — no extension-based TTL
+   logic needed.
+6. Write to `lambda/default_cache_origin_response.js`.
 
 Note: The scaffold has already generated the full Lambda@Edge infrastructure
 for origin-response (IAM role, archive_file, aws_lambda_function, and

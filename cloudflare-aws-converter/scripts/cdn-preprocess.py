@@ -417,16 +417,8 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
                     beh = find_or_create_behavior(ir, path, domain_config, origin_content)
                     _apply_cache_setting(beh, result)
                 return
-            # Cannot split → mark as non_convertible
-            # (PR 2 will change this to L@E origin-response)
-            default_beh = ir["cache_behaviors"][0]
-            default_beh["non_convertible"].append({
-                "cf_source_rule": result.get("cf_source_rule", ""),
-                "description": result.get("description", ""),
-                "reason": "Cache rule expression too complex to determine path pattern; "
-                          "CloudFront cache behaviors require explicit path patterns. "
-                          "Consider splitting into simpler rules or configuring manually",
-            })
+            # Cannot split → route to L@E origin-response conditional cache rule
+            _add_conditional_cache_rule(ir, result)
             return
         path = _extract_path_from_result(result, cond, expr)
         # For extension-based cache rules with multiple extensions,
@@ -629,6 +621,47 @@ def _process_managed_transforms(ir, managed_transforms, default_beh):
             )
 
 
+def _add_conditional_cache_rule(ir, result):
+    """Route a raw_expression cache rule to L@E origin-response.
+
+    Creates or extends lambda_edge.origin_response with conditional_cache_rules.
+    The L@E handler will evaluate the raw_expression at runtime and set
+    Cache-Control headers accordingly.
+    """
+    params = result.get("params", {})
+    entry = {
+        "raw_expression": result["raw_expression"],
+        "cf_source_rule": result.get("cf_source_rule", ""),
+        "description": result.get("description", ""),
+    }
+    if params.get("bypass"):
+        entry["cache_control"] = "no-store"
+    elif "edge_ttl_override" in params:
+        entry["cache_control"] = f"max-age={params['edge_ttl_override']}"
+    elif params.get("edge_ttl_respect_origin"):
+        entry["cache_control"] = None  # let origin header pass through
+    else:
+        entry["cache_control"] = None
+
+    if params.get("status_code_ttl"):
+        entry["status_code_ttl"] = params["status_code_ttl"]
+
+    le = ir["metadata"]["lambda_edge"]
+    if le["origin_response"] is None:
+        le["origin_response"] = {
+            "type": "conditional_cache",
+            "conditional_cache_rules": [],
+        }
+    if "conditional_cache_rules" not in le["origin_response"]:
+        le["origin_response"]["conditional_cache_rules"] = []
+    le["origin_response"]["conditional_cache_rules"].append(entry)
+
+    # Ensure default behavior cache policy allows L@E Cache-Control to take effect
+    default_beh = ir["cache_behaviors"][0]
+    default_beh["cache_policy"]["ttl"]["min"] = 0
+    default_beh["cache_policy"]["ttl"]["max"] = 31536000
+
+
 # Cloudflare default cached extensions (~70 types)
 # Source: https://developers.cloudflare.com/cache/concepts/default-cache-behavior/
 CLOUDFLARE_DEFAULT_CACHED_EXTENSIONS = {
@@ -698,16 +731,22 @@ def _process_default_cache_behavior(ir, hostname, domain_config, origin_content,
             beh["cache_policy"]["ttl"]["default"] = ttl
 
         # L@E with empty map — handles remaining ~70 extensions at default 7200s
+        existing_ccr = (ir["metadata"]["lambda_edge"].get("origin_response") or {}).get("conditional_cache_rules", [])
         ir["metadata"]["lambda_edge"]["origin_response"] = {
             "type": "default_cache",
             "custom_ttl_map": {},
         }
+        if existing_ccr:
+            ir["metadata"]["lambda_edge"]["origin_response"]["conditional_cache_rules"] = existing_ccr
     else:
         # Path 3 (>20 custom): consolidate into L@E custom_ttl_map
+        existing_ccr = (ir["metadata"]["lambda_edge"].get("origin_response") or {}).get("conditional_cache_rules", [])
         ir["metadata"]["lambda_edge"]["origin_response"] = {
             "type": "default_cache",
             "custom_ttl_map": custom_ttl_map,
         }
+        if existing_ccr:
+            ir["metadata"]["lambda_edge"]["origin_response"]["conditional_cache_rules"] = existing_ccr
 
 
 def _extract_extensions_from_condition(condition):
