@@ -175,9 +175,10 @@ def gen_rhp(pid, config):
         origin_list = [o.strip() for o in origins.split(",")]
         # CloudFront: * not allowed for origins when credentials=true
         if allow_creds and origin_list == ["*"]:
-            origin_list = ["https://*"]  # user must replace with actual origins
-            w('    # WARNING: Access-Control-Allow-Origin: * is not allowed with credentials=true.')
-            w('    # Replace with your actual origin domains.')
+            origin_list = ["https://example.com"]
+            w('    # WARNING: You MUST replace https://example.com with your actual origin domain(s).')
+            w('    # Cloudflare allowed credentials=true with wildcard origin, but CloudFront')
+            w('    # requires explicit origins per HTTP spec. Example: ["https://app.example.com"]')
         w(f'    access_control_allow_origins {{ items = {hcl_list(origin_list)} }}')
 
         methods = cors.get("Access-Control-Allow-Methods", "GET, HEAD")
