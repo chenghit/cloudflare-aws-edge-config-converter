@@ -157,7 +157,7 @@ Shared policies → Lambda@Edge (if any) → each domain independently → KVS d
 <details>
 <summary>Expected conversion time</summary>
 
-Conversion time depends on the number of rules/domains, LLM API latency, and parallel batch size. Benchmark with the included `examples/cloudflare-configs/` (1 zone, 7 proxied domains, ~30 rules across all types), using `claude-sonnet-4.6-1m` on Anthropic API:
+Conversion time depends on the number of rules/domains, LLM API latency, and parallel batch size. Benchmark with the included `examples/cloudflare-configs/` (1 zone, 7 proxied domains, 34 CDN rules + 8 WAF rules across 12 rule types — including regex expressions, OR conditions, geo-based routing, CORS, bulk redirects, and inline error pages), using `claude-sonnet-4.6-1m` on Anthropic API:
 
 | Pipeline | Parallel batch size 2 | Parallel batch size 4 |
 |----------|----------------------|----------------------|

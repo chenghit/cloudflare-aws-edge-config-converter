@@ -155,7 +155,7 @@ cloudflare-to-aws-cdn/
 <details>
 <summary>预计转换时间</summary>
 
-转换时间取决于规则/域名数量、LLM API 延迟和并行批次大小。以下基准使用项目自带的 `examples/cloudflare-configs/`（1 个 zone、7 个代理域名、约 30 条各类规则），模型 `claude-sonnet-4.6-1m`，Anthropic API：
+转换时间取决于规则/域名数量、LLM API 延迟和并行批次大小。以下基准使用项目自带的 `examples/cloudflare-configs/`（1 个 zone、7 个代理域名、34 条 CDN 规则 + 8 条 WAF 规则，覆盖 12 种规则类型——包括正则表达式、OR 条件、地理路由、CORS、批量重定向和内联错误页面），模型 `claude-sonnet-4.6-1m`，Anthropic API：
 
 | 流程 | 并行批次大小 2 | 并行批次大小 4 |
 |------|--------------|--------------|
