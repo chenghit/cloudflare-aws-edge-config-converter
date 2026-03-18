@@ -4,18 +4,17 @@ This directory contains sample Cloudflare configurations for testing the migrati
 
 ## Before You Deploy
 
-These example configs use `c.example.com` as the apex domain. If you only want to run the conversion pipeline and inspect the generated Terraform/JS output, you can use them as-is — no changes needed.
+These example configs use `c.example.com` as the zone (apex domain), with subdomains like `cdn.c.example.com`, `www.c.example.com`, etc. If you only want to run the conversion pipeline and inspect the generated Terraform/JS output, you can use them as-is — no changes needed.
 
 However, if you want to actually deploy the generated CloudFront distributions to AWS, you must replace the domain names with a real public domain you own:
 
-1. Rename the zone directory: `c.example.com` → `c.yourdomain.com`
-2. Replace `example.com` with `yourdomain.com` in all `.txt` files under the zone directory:
+1. Rename the zone directory and replace all domain references:
    ```bash
    cd examples/cloudflare-configs
    mv c.example.com c.yourdomain.com
-   find c.yourdomain.com -name "*.txt" -exec sed -i '' 's/example\.com/yourdomain.com/g' {} +
+   find c.yourdomain.com -name "*.txt" -exec sed -i '' 's/c\.example\.com/c.yourdomain.com/g' {} +
    ```
    On Linux, use `sed -i` instead of `sed -i ''`.
-3. Make sure you have a valid ACM certificate for `*.yourdomain.com` in `us-east-1`, or leave the cert ARN blank in the CSV to let Terraform auto-discover it.
+2. Make sure you have a valid ACM certificate for `*.c.yourdomain.com` in `us-east-1`, or leave the cert ARN blank in the CSV to let Terraform auto-discover it.
 
 The `account/` directory (IP lists, bulk redirect lists) does not contain domain-specific data and does not need modification.
