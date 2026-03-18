@@ -204,9 +204,9 @@ Proceed to Step 4.
 
 ---
 
-#### CDN full pipeline (4 LLM stages + 6 Python scripts — runs when user wants Terraform output for CloudFront):
+#### CDN full pipeline (4 LLM stages + 7 Python scripts — runs when user wants Terraform output for CloudFront):
 
-Stages 3–6 are deterministic Python scripts (no LLM). Stages 1, 2, 7, 8, 9 are LLM subagents.
+Stages 3–7.6 are deterministic Python scripts (no LLM). Stages 1, 2, 8, 9 are LLM subagents.
 
 **Stage 1: DNS Parsing**
 1. Invoke `cf-cdn-dns-parser` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-dns-parser/SKILL.md and follow its workflow. You MUST use tools (glob, fs_read, fs_write) to read DNS.txt and write output files — do NOT generate output from memory. The Cloudflare backup directory is {config_path}. Parse DNS.txt to identify all proxied domains. Detect any Cloudflare for SaaS configurations. Group domains by apex domain for ACM certificate planning. Write dns_manifest.yaml and user_input_template.csv to the cloudflare-to-aws-cdn/ output directory. Generate output files in {user_language}."`

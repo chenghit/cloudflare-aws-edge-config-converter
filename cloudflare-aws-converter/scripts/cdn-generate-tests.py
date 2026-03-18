@@ -227,7 +227,7 @@ def _derive_test_path(cond, path_pattern):
             if op == "starts_with":
                 return value + "test"
             if op == "ends_with":
-                return "/test" + value
+                return "/test/" + value.lstrip("/")
     return _path_from_pattern(path_pattern)
 
 
