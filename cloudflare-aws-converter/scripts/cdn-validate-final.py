@@ -99,7 +99,7 @@ def main():
         print("Usage: cdn-validate-final.py <output_dir>", file=sys.stderr)
         sys.exit(2)
 
-    output_dir = sys.argv[1]
+    output_dir = os.path.expanduser(sys.argv[1])
     final_dir = os.path.join(output_dir, "ir", "final")
     val_dir = os.path.join(output_dir, "ir", "validation", "final")
     manifest_path = os.path.join(output_dir, "shared", "dedup_manifest.json")

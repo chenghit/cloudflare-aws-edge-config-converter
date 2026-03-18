@@ -258,7 +258,7 @@ def main():
         sys.exit(1)
 
     config_path = os.path.expanduser(sys.argv[1])
-    output_dir = sys.argv[2]
+    output_dir = os.path.expanduser(sys.argv[2])
 
     if not os.path.isdir(config_path):
         print(f"ERROR: config path not found: {config_path}", file=sys.stderr)

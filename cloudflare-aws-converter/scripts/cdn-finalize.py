@@ -419,7 +419,7 @@ def main():
         print("Usage: cdn-finalize.py <output_dir> [skipped_domains_json]", file=sys.stderr)
         sys.exit(1)
 
-    output_dir = sys.argv[1]
+    output_dir = os.path.expanduser(sys.argv[1])
     skipped_domains = []
     if len(sys.argv) >= 3 and os.path.exists(sys.argv[2]):
         with open(sys.argv[2]) as f:

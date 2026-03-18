@@ -632,7 +632,7 @@ def main():
         print("Usage: cdn-generate-tf-scaffold.py <output_dir>", file=sys.stderr)
         sys.exit(1)
 
-    output_dir = sys.argv[1]
+    output_dir = os.path.expanduser(sys.argv[1])
     final_dir = os.path.join(output_dir, "ir", "final")
     shared_dir = os.path.join(output_dir, "shared")
     tf_domains_dir = os.path.join(output_dir, "terraform", "domains")

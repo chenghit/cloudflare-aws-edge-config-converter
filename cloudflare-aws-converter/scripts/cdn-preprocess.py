@@ -814,8 +814,8 @@ def main():
               file=sys.stderr)
         sys.exit(2)
 
-    config_path = sys.argv[1]
-    output_dir = sys.argv[2]
+    config_path = os.path.expanduser(sys.argv[1])
+    output_dir = os.path.expanduser(sys.argv[2])
     single_domain = None
     if "--domain" in sys.argv:
         idx = sys.argv.index("--domain")

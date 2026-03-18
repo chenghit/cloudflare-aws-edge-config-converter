@@ -18,7 +18,7 @@ def main():
         print("Usage: waf-generate-readme.py <output_dir>", file=sys.stderr)
         sys.exit(1)
 
-    output_dir = sys.argv[1]
+    output_dir = os.path.expanduser(sys.argv[1])
     ir_path = os.path.join(output_dir, "waf_ir.json")
 
     if not os.path.exists(ir_path):

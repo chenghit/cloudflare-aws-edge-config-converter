@@ -9,7 +9,7 @@ Only uses Python standard library (json, os, sys).
 """
 import json, sys, os
 
-config_path = sys.argv[1]
+config_path = os.path.expanduser(sys.argv[1])
 waf_dir = sys.argv[2]
 
 # --- Source counts (ground truth from Cloudflare config files) ---

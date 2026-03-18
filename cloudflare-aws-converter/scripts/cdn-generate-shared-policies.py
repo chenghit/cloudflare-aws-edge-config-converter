@@ -265,7 +265,7 @@ def main():
         print("Usage: cdn-generate-shared-policies.py <output_dir>", file=sys.stderr)
         sys.exit(1)
 
-    output_dir = sys.argv[1]
+    output_dir = os.path.expanduser(sys.argv[1])
     manifest_path = os.path.join(output_dir, "shared", "dedup_manifest.json")
     out_path = os.path.join(output_dir, "terraform", "shared", "policies.tf")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)

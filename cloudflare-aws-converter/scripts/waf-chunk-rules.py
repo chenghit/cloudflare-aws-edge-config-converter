@@ -12,8 +12,8 @@ Prints the chunk file paths to stdout (one per line) for the orchestrator.
 """
 import json, sys, os, math
 
-config_path = sys.argv[1]
-output_dir = sys.argv[2]
+config_path = os.path.expanduser(sys.argv[1])
+output_dir = os.path.expanduser(sys.argv[2])
 chunk_size = int(sys.argv[3])
 
 # Find WAF-Custom-Rules.txt

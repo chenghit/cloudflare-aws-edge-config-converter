@@ -399,7 +399,7 @@ def main():
         print("Usage: cdn-generate-tests.py <output_dir>", file=sys.stderr)
         sys.exit(1)
 
-    output_dir = sys.argv[1]
+    output_dir = os.path.expanduser(sys.argv[1])
     final_dir = os.path.join(output_dir, "ir", "final")
     tf_dir = os.path.join(output_dir, "terraform", "domains")
 
