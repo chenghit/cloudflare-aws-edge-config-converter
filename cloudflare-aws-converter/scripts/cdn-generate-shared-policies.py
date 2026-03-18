@@ -182,6 +182,9 @@ def gen_rhp(pid, config):
 
         methods = cors.get("Access-Control-Allow-Methods", "GET, HEAD")
         method_list = [m.strip() for m in methods.split(",")]
+        # CloudFront requires explicit method names, not wildcard
+        if "*" in method_list:
+            method_list = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
         w(f'    access_control_allow_methods {{ items = {hcl_list(method_list)} }}')
 
         allow_headers = cors.get("Access-Control-Allow-Headers", "*")
