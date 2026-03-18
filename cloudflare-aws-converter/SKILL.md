@@ -310,7 +310,17 @@ Generates `test-cdn-rules.py` per domain for post-deployment validation. Proceed
 
 **Stage 8: Per-Domain JS Generation** (parallelizable — invoke once per domain)
 1. For each domain `{domain}`, invoke `cf-cdn-tf-domain` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. You MUST use tools to read IR files and write JS output — do NOT skip tool calls. The Cloudflare backup directory is {config_path}. Generate JavaScript files for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json. Terraform scaffold files (main.tf, functions.tf, etc.) have already been generated at cloudflare-to-aws-cdn/terraform/domains/. Only generate JS files (viewer_request.js, viewer_response.js, Lambda@Edge handlers if needed). If Lambda@Edge files are generated, update functions.tf by replacing the LAMBDA_EDGE_PLACEHOLDER comment with L@E resource blocks. Do NOT modify main.tf. Generate output files in {user_language}."`
-2. **Verify output**: for each domain, check that `functions/` directory was created under the domain's terraform directory. If the domain's IR has `lambda_edge.origin_response` non-null, also check that `lambda/` directory exists (origin-request L@E is determined at runtime by tf-domain, so `lambda/` may also appear for CFF size overflow — verify after generation). If missing after subagent claims completion → re-invoke once for that domain.
+2. **Verify output** (CRITICAL — run this exact script, do not simplify):
+   ```bash
+   for d in <space-separated list of sanitized domain names>; do
+     echo -n "$d/functions: "; ls cloudflare-to-aws-cdn/terraform/domains/$d/functions/ 2>/dev/null | tr '\n' ' '; echo
+     echo -n "$d/lambda: "; ls cloudflare-to-aws-cdn/terraform/domains/$d/lambda/ 2>/dev/null | tr '\n' ' '; echo
+   done
+   ```
+   For each domain:
+   - `functions/` must contain at least `*_viewer_request.js`. If missing → re-invoke once.
+   - If the domain's IR has `lambda_edge.origin_response` non-null, `lambda/` must contain `default_cache_origin_response.js`. If missing → re-invoke once.
+   - If `lambda/origin_request_handler.js` exists (CFF overflow), verify `functions.tf` contains `origin_request` (PLACEHOLDER was replaced). If not → re-invoke once.
 3. Wait for all domains to complete.
 
 **Stage 9: CloudFront Function JS Validation** (parallelizable — invoke once per domain)
