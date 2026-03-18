@@ -290,6 +290,50 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
                 f"(limit 5 MB). Approaching limit — monitor after deployment."
             )
 
+    # CloudFront quota checks
+    policy_counts = {"cache_policy": 0, "origin_request_policy": 0, "response_headers_policy": 0}
+    for entry in manifest.values():
+        t = entry["type"]
+        if t in policy_counts:
+            policy_counts[t] += 1
+    for ptype, limit, label in [
+        ("cache_policy", 20, "Custom cache policies"),
+        ("origin_request_policy", 20, "Custom origin request policies"),
+        ("response_headers_policy", 20, "Custom response headers policies"),
+    ]:
+        count = policy_counts[ptype]
+        if count > limit:
+            all_warnings.append(f"{label}: {count} (default quota: {limit}). Request quota increase before deploying.")
+        elif count > limit * 0.8:
+            all_warnings.append(f"{label}: {count} (default quota: {limit}). Approaching limit.")
+
+    # Per-policy item quotas
+    for pid, entry in manifest.items():
+        cfg = entry["config"]
+        used = ", ".join(entry.get("used_by", [entry.get("sample_hostname", "?")]))
+        if entry["type"] == "cache_policy":
+            qs = cfg.get("query_strings_list", [])
+            if isinstance(qs, list) and len(qs) > 10:
+                all_warnings.append(f"Cache policy {pid} (used by {used}): {len(qs)} query strings (quota: 10).")
+        elif entry["type"] == "response_headers_policy":
+            ch = cfg.get("custom_headers", [])
+            if isinstance(ch, list) and len(ch) > 10:
+                all_warnings.append(f"RHP {pid} (used by {used}): {len(ch)} custom headers (quota: 10).")
+
+    for ir in all_irs:
+        hostname = ir["metadata"]["hostname"]
+        beh_count = len(ir["cache_behaviors"])
+        if beh_count > 75:
+            all_warnings.append(f"{hostname}: {beh_count} cache behaviors (default quota: 75). Request quota increase.")
+        elif beh_count > 60:
+            all_warnings.append(f"{hostname}: {beh_count} cache behaviors (default quota: 75). Approaching limit.")
+
+    cff_count = len(all_irs) * 2  # viewer_request + viewer_response per domain
+    if cff_count > 100:
+        all_warnings.append(f"CloudFront Functions: ~{cff_count} (default quota: 100). Request quota increase.")
+    elif cff_count > 80:
+        all_warnings.append(f"CloudFront Functions: ~{cff_count} (default quota: 100). Approaching limit.")
+
     # CORS credentials + wildcard check
     for pid, entry in manifest.items():
         if entry["type"] != "response_headers_policy":
