@@ -98,11 +98,16 @@ output directory structure and copy static Terraform modules:
 bash ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-init.sh "$(pwd)"
 ```
 
-This creates `cloudflare-to-aws-cdn/` under the current working directory (where all
+This creates `cloudflare-to-aws-cdn/` under the **current working directory** (where all
 skills expect it) and copies the CloudFront distribution Terraform module. Subagents
 can then write directly to their output paths without needing to create directories.
 
-Skip this step if `cloudflare-to-aws-cdn/` already exists (resuming a previous run).
+**IMPORTANT**: The output directory is always `$(pwd)/cloudflare-to-aws-cdn/`, NOT inside
+the Cloudflare config backup directory. Do NOT look for or use `cloudflare-to-aws-cdn/`
+under the config path — that would be a leftover from a previous run in a different
+working directory.
+
+Skip this step if `cloudflare-to-aws-cdn/` already exists **in the current working directory** (resuming a previous run).
 
 ### Step 3: Invoke subagents
 
