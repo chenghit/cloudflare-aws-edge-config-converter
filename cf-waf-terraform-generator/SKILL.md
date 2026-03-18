@@ -203,17 +203,9 @@ Create `locals.ip_set_arns` map and call module twice:
 - [ ] Challenge actions correctly mapped
 - [ ] All managed rules use `override_action { count {} }`
 
-### 5. Generate Deployment README
+### 5. Return Result
 
-Create `README_aws-waf-terraform-deployment.md` with:
-- Prerequisites: Terraform >= 1.8.0, AWS Provider >= 6.2.0
-- Deployment steps: `cd cloudflare-to-aws-waf`, `export AWS_PROFILE=your-profile`, `terraform init`, `terraform plan` (review changes), `terraform apply`
-- CloudFront association instructions
-- Two Web ACLs: website (challenge enabled) vs api-and-file (challenge disabled)
-- IP sets quota note
-- Non-converted rules from `non_convertible_notes` (rule name, field, reason, AWS equivalent, manual action)
-
-### 6. Return Result
+Note: The deployment README is generated separately by `waf-generate-readme.py` (called by the orchestrator after this skill completes). Do NOT generate `README_aws-waf-terraform-deployment.md`.
 
 ```
 ---RESULT---
@@ -222,7 +214,6 @@ OUTPUT_FILES:
   - cloudflare-to-aws-waf/ip_sets.tf
   - cloudflare-to-aws-waf/main.tf
   - cloudflare-to-aws-waf/modules/waf/main.tf
-  - cloudflare-to-aws-waf/README_aws-waf-terraform-deployment.md
 ---END---
 ```
 

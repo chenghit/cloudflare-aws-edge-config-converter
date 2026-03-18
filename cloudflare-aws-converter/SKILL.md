@@ -192,9 +192,15 @@ Check the `---RESULT---` block:
 
 **Step 3b: Terraform validate**
 1. Run: `cd cloudflare-to-aws-waf && terraform init -backend=false && terraform validate`
-2. If validation passes → proceed to Step 4.
+2. If validation passes → proceed to Step 3c.
 3. If validation fails → re-invoke generator with error details: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/SKILL.md and follow its workflow. Generate AWS WAF Terraform configuration from the validated IR JSON. IMPORTANT: The previous generation had terraform validate errors. Fix these specific issues and regenerate all affected files: {terraform_validate_error_output}. Generate output files in {user_language}."`
 4. Run terraform validate again. If it fails a second time → stop and tell the user: "Terraform validation failed after retry. Please manually fix the errors in cloudflare-to-aws-waf/ and run `terraform validate` to verify. Errors: {error_output}"
+
+**Step 3c: Generate deployment README** (Python script, no LLM)
+```bash
+python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-generate-readme.py "cloudflare-to-aws-waf"
+```
+Proceed to Step 4.
 
 ---
 
