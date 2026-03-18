@@ -321,6 +321,68 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
             "which are native to AWS WAF IP sets (up to 10,000 entries per set).",
         ]
 
+    # Deployment steps
+    domains_with_kvs = [ir["metadata"]["hostname"] for ir in all_irs
+                        if any(ir["metadata"].get("kvs_requirements", {}).values())]
+    domains_with_le = [ir["metadata"]["hostname"] for ir in all_irs
+                       if ir["metadata"].get("lambda_edge", {}).get("origin_response")]
+    domain_list = [ir["metadata"] for ir in all_irs]
+
+    lines += [
+        "", "---", "",
+        "## Deployment Steps",
+        "",
+        "### 1. Set AWS credentials",
+        "```bash",
+        "export AWS_PROFILE=<your-profile-name>",
+        "```",
+        "",
+        "### 2. Deploy shared policies",
+        "```bash",
+        "cd cloudflare-to-aws-cdn/terraform/shared",
+        "terraform init && terraform apply",
+        "```",
+        "",
+        "### 3. Deploy each domain",
+        "```bash",
+    ]
+    for m in domain_list:
+        san = m["sanitized_name"]
+        lines.append(f"cd cloudflare-to-aws-cdn/terraform/domains/{san} && terraform init && terraform apply")
+    lines += ["```", ""]
+
+    if domains_with_kvs:
+        lines += [
+            "### 4. Seed KVS data",
+            "",
+            "After `terraform apply`, seed each domain's KVS with its data:",
+            "",
+            "```bash",
+        ]
+        for m in domain_list:
+            if any(m.get("kvs_requirements", {}).values()):
+                san = m["sanitized_name"]
+                lines.append(f"cd cloudflare-to-aws-cdn/terraform/domains/{san} && python3 seed-kvs.py")
+        lines += ["```", ""]
+
+    step_n = 5 if domains_with_kvs else 4
+    lines += [
+        f"### {step_n}. DNS cutover",
+        "",
+        "Update DNS records to point to CloudFront distributions:",
+        "",
+    ]
+    for m in domain_list:
+        lines.append(f"- `{m['hostname']}` → CNAME to CloudFront distribution domain name")
+    lines += [
+        "",
+        "Get each distribution's domain name:",
+        "```bash",
+        "cd cloudflare-to-aws-cdn/terraform/domains/<domain> && terraform output distribution_domain_name",
+        "```",
+        "",
+    ]
+
     if has_s3:
         lines += [
             "", "---", "",

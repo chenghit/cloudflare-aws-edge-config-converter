@@ -466,6 +466,79 @@ def generate_kvs_tf(ir):
 
 # ── kvs-data.json generation ─────────────────────────────────────────────────
 
+def generate_seed_kvs_script(ir):
+    """Generate seed-kvs.py script for populating KVS data after terraform apply."""
+    san = ir["metadata"]["sanitized_name"]
+    return f'''#!/usr/bin/env python3
+"""Seed KVS data for {ir["metadata"]["hostname"]}.
+
+Run after 'terraform apply' to populate the KeyValueStore.
+Requires: boto3 (pip install boto3), AWS credentials configured.
+
+Usage:
+    python3 seed-kvs.py
+"""
+import json, subprocess, sys, time
+
+def get_kvs_arn():
+    result = subprocess.run(
+        ["terraform", "output", "-raw", "{san}_kvs_arn"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print("ERROR: terraform output failed. Run 'terraform apply' first.", file=sys.stderr)
+        sys.exit(1)
+    return result.stdout.strip()
+
+def main():
+    try:
+        import boto3
+        from botocore.exceptions import ClientError
+    except ImportError:
+        print("ERROR: boto3 required. Install with: pip install boto3", file=sys.stderr)
+        sys.exit(1)
+
+    kvs_arn = get_kvs_arn()
+    with open("kvs-data.json") as f:
+        entries = json.load(f)["data"]
+
+    if not entries:
+        print("No KVS data to seed.")
+        return
+
+    client = boto3.client("cloudfront-keyvaluestore")
+    etag = client.describe_key_value_store(KvsARN=kvs_arn)["ETag"]
+
+    batch_size = 50
+    total = len(entries)
+    for i in range(0, total, batch_size):
+        batch = entries[i:i + batch_size]
+        puts = [{{"Key": e["key"], "Value": e["value"]}} for e in batch]
+        for attempt in range(5):
+            try:
+                resp = client.update_keys(KvsARN=kvs_arn, IfMatch=etag, Puts=puts)
+                etag = resp["ETag"]
+                print(f"  Batch {{i // batch_size + 1}}/{{(total + batch_size - 1) // batch_size}}: {{len(batch)}} keys")
+                break
+            except ClientError as e:
+                code = e.response["Error"]["Code"]
+                if code == "ConflictException":
+                    etag = client.describe_key_value_store(KvsARN=kvs_arn)["ETag"]
+                elif code in ("ThrottlingException", "InternalServerException"):
+                    time.sleep(2 ** attempt)
+                else:
+                    raise
+        else:
+            print(f"ERROR: batch {{i // batch_size + 1}} failed after 5 retries", file=sys.stderr)
+            sys.exit(1)
+
+    print(f"Done: {{total}} keys seeded into KVS")
+
+if __name__ == "__main__":
+    main()
+'''
+
+
 def generate_kvs_data(ir):
     kvs_data = ir["metadata"].get("kvs_data", [])
     # Add continent/EU mappings if needed
@@ -593,15 +666,17 @@ def main():
         outputs_tf = generate_outputs_tf(ir)
         _write(os.path.join(domain_dir, "outputs.tf"), outputs_tf)
 
-        # kvs.tf + kvs-data.json (conditional)
+        # kvs.tf + kvs-data.json + seed-kvs.py (conditional)
         kvs_req = ir["metadata"].get("kvs_requirements", {})
         if any(kvs_req.values()):
             kvs_tf = generate_kvs_tf(ir)
             _write(os.path.join(domain_dir, "kvs.tf"), kvs_tf)
             kvs_data = generate_kvs_data(ir)
             _write(os.path.join(domain_dir, "kvs-data.json"), kvs_data)
+            seed_script = generate_seed_kvs_script(ir)
+            _write(os.path.join(domain_dir, "seed-kvs.py"), seed_script)
 
-        file_count = 3 + (2 if any(kvs_req.values()) else 0)
+        file_count = 3 + (3 if any(kvs_req.values()) else 0)
         print(f"OK: {hostname} → {file_count} scaffold files in terraform/domains/{san}/")
 
     print(f"\n{'='*60}")
