@@ -166,16 +166,31 @@ def gen_rhp(pid, config):
 
     # CORS
     if cors and isinstance(cors, dict):
+        allow_creds = cors.get("Access-Control-Allow-Credentials") == "true"
         w('')
         w('  cors_config {')
-        w(f'    access_control_allow_credentials = {"true" if cors.get("Access-Control-Allow-Credentials") == "true" else "false"}')
+        w(f'    access_control_allow_credentials = {"true" if allow_creds else "false"}')
+
         origins = cors.get("Access-Control-Allow-Origin", "*")
-        w(f'    access_control_allow_origins {{ items = ["{origins}"] }}')
+        origin_list = [o.strip() for o in origins.split(",")]
+        # CloudFront: * not allowed for origins when credentials=true
+        if allow_creds and origin_list == ["*"]:
+            origin_list = ["https://*"]  # user must replace with actual origins
+            w('    # WARNING: Access-Control-Allow-Origin: * is not allowed with credentials=true.')
+            w('    # Replace with your actual origin domains.')
+        w(f'    access_control_allow_origins {{ items = {hcl_list(origin_list)} }}')
+
         methods = cors.get("Access-Control-Allow-Methods", "GET, HEAD")
         method_list = [m.strip() for m in methods.split(",")]
         w(f'    access_control_allow_methods {{ items = {hcl_list(method_list)} }}')
+
         allow_headers = cors.get("Access-Control-Allow-Headers", "*")
         header_list = [h.strip() for h in allow_headers.split(",")]
+        # CloudFront: * not allowed for headers when credentials=true
+        if allow_creds and header_list == ["*"]:
+            header_list = ["Authorization", "Content-Type", "Origin", "Accept", "X-Requested-With"]
+            w('    # NOTE: Wildcard headers replaced with common set (credentials=true).')
+            w('    # Add any additional headers your application requires.')
         w(f'    access_control_allow_headers {{ items = {hcl_list(header_list)} }}')
         w(f'    origin_override = true')
         w('  }')
