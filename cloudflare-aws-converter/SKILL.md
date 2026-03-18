@@ -135,7 +135,7 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
    ```
    Check exit code: 0 = OK, 1 = error (stop pipeline).
 
-   **A2**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. Analyze batch A2: WAF Custom Rules. The Cloudflare backup directory is {config_path}. Generate output files in {user_language}."`
+   **A2**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. You MUST use tools to read config files and write output JSON — do NOT skip tool calls. Analyze batch A2: WAF Custom Rules. The Cloudflare backup directory is {config_path}. Generate output files in {user_language}."`
 
    **Extract skip labels** (between A2 and A3):
    ```bash
@@ -144,7 +144,7 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
    - If exit code 1 → re-invoke A2 once. If second attempt also fails → stop and report.
    - If exit code 0 → capture the stdout line (e.g., `http_ratelimit=true all_remaining_custom_rules=true http_request_firewall_managed=true`)
 
-   **A3**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. Analyze batch A3: Rate Limiting Rules. Skip labels from custom rules: {skip_labels}. The Cloudflare backup directory is {config_path}. Generate output files in {user_language}."`
+   **A3**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/SKILL.md and follow its workflow. You MUST use tools to read config files and write output JSON — do NOT skip tool calls. Analyze batch A3: Rate Limiting Rules. Skip labels from custom rules: {skip_labels}. The Cloudflare backup directory is {config_path}. Generate output files in {user_language}."`
 
 3. If any batch fails → stop and report the error. Do not proceed to Stage 2.
 
@@ -168,17 +168,17 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-waf-analy
 
 Dispatch all validation batches in parallel (respecting batch size 2):
 
-- **V1**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. Mode: V1 (IP Lists + IP Access Rules). The Cloudflare backup directory is {config_path}. This is validation round {validation_round}. Generate output files in {user_language}."`
+- **V1**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. You MUST use tools to read IR and config files and write validation reports. Mode: V1 (IP Lists + IP Access Rules). The Cloudflare backup directory is {config_path}. This is validation round {validation_round}. Generate output files in {user_language}."`
 
-- **V2** (one per chunk): `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. Mode: V2 (Custom Rules chunk). The Cloudflare backup directory is {config_path}. Chunk file: cloudflare-to-aws-waf/chunks/custom-rules-{start}-{end}.json (positions {start}-{end}). This is validation round {validation_round}. Generate output files in {user_language}."`
+- **V2** (one per chunk): `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. You MUST use tools to read IR and config files and write validation reports. Mode: V2 (Custom Rules chunk). The Cloudflare backup directory is {config_path}. Chunk file: cloudflare-to-aws-waf/chunks/custom-rules-{start}-{end}.json (positions {start}-{end}). This is validation round {validation_round}. Generate output files in {user_language}."`
 
-- **V3**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. Mode: V3 (Rate Limiting Rules). The Cloudflare backup directory is {config_path}. This is validation round {validation_round}. Generate output files in {user_language}."`
+- **V3**: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. You MUST use tools to read IR and config files and write validation reports. Mode: V3 (Rate Limiting Rules). The Cloudflare backup directory is {config_path}. This is validation round {validation_round}. Generate output files in {user_language}."`
 
 Wait for all batches to complete.
 
 **Step 2c: V4 Global validation**
 
-Invoke: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. Mode: V4 (Global validation). This is validation round {validation_round}. Generate output files in {user_language}."`
+Invoke: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md and follow its workflow. You MUST use tools to read IR files and write validation reports. Mode: V4 (Global validation). This is validation round {validation_round}. Generate output files in {user_language}."`
 
 Check the `---RESULT---` block:
 - `STATUS: PASS` → if depth is "analyze", proceed to Step 4. If depth is "convert", proceed to Stage 3.
@@ -186,14 +186,14 @@ Check the `---RESULT---` block:
 - `STATUS: CANNOT_FIX` → stop and tell the user which issues require manual intervention.
 
 **Stage 3: Generate Terraform** (only if depth is "convert")
-1. Invoke `cf-waf-terraform-generator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/SKILL.md and follow its workflow. Generate AWS WAF Terraform configuration from the validated IR JSON. Generate output files in {user_language}."`
+1. Invoke `cf-waf-terraform-generator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/SKILL.md and follow its workflow. You MUST use tools to read IR and write Terraform files — do NOT skip tool calls. Generate AWS WAF Terraform configuration from the validated IR JSON. Generate output files in {user_language}."`
 2. Check the `---RESULT---` block:
    - `STATUS: COMPLETE` → proceed to Step 3b.
 
 **Step 3b: Terraform validate**
 1. Run: `cd cloudflare-to-aws-waf && terraform init -backend=false && terraform validate`
 2. If validation passes → proceed to Step 3c.
-3. If validation fails → re-invoke generator with error details: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/SKILL.md and follow its workflow. Generate AWS WAF Terraform configuration from the validated IR JSON. IMPORTANT: The previous generation had terraform validate errors. Fix these specific issues and regenerate all affected files: {terraform_validate_error_output}. Generate output files in {user_language}."`
+3. If validation fails → re-invoke generator with error details: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/SKILL.md and follow its workflow. You MUST use tools to read IR and write Terraform files — do NOT skip tool calls. Generate AWS WAF Terraform configuration from the validated IR JSON. IMPORTANT: The previous generation had terraform validate errors. Fix these specific issues and regenerate all affected files: {terraform_validate_error_output}. Generate output files in {user_language}."`
 4. Run terraform validate again. If it fails a second time → stop and tell the user: "Terraform validation failed after retry. Please manually fix the errors in cloudflare-to-aws-waf/ and run `terraform validate` to verify. Errors: {error_output}"
 
 **Step 3c: Generate deployment README** (Python script, no LLM)
@@ -287,7 +287,13 @@ Check exit code:
 ```bash
 python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-tf-scaffold.py "cloudflare-to-aws-cdn"
 ```
-Generates main.tf, functions.tf, outputs.tf, kvs.tf, kvs-data.json for each domain. These are deterministic template files — no LLM needed. Proceed to Stage 8.
+Generates main.tf, functions.tf, outputs.tf, kvs.tf, kvs-data.json for each domain. These are deterministic template files — no LLM needed.
+
+**Stage 7.6: Generate Test Scripts** (Python script, no LLM)
+```bash
+python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-tests.py "cloudflare-to-aws-cdn"
+```
+Generates `test-cdn-rules.py` per domain for post-deployment validation. Proceed to Stage 8.
 
 **Stage 8: Per-Domain JS Generation** (parallelizable — invoke once per domain)
 1. For each domain `{domain}`, invoke `cf-cdn-tf-domain` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. You MUST use tools to read IR files and write JS output — do NOT skip tool calls. The Cloudflare backup directory is {config_path}. Generate JavaScript files for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json. Terraform scaffold files (main.tf, functions.tf, etc.) have already been generated at cloudflare-to-aws-cdn/terraform/domains/. Only generate JS files (viewer_request.js, viewer_response.js, Lambda@Edge handlers if needed). If Lambda@Edge files are generated, update functions.tf by replacing the LAMBDA_EDGE_PLACEHOLDER comment with L@E resource blocks. Do NOT modify main.tf. Generate output files in {user_language}."`
@@ -306,7 +312,7 @@ Generates main.tf, functions.tf, outputs.tf, kvs.tf, kvs-data.json for each doma
         rm -rf cloudflare-to-aws-cdn/terraform/domains/{sanitized}/functions/ cloudflare-to-aws-cdn/terraform/domains/{sanitized}/lambda/
         python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-tf-scaffold.py "cloudflare-to-aws-cdn"
         ```
-     c. Re-invoke `cf-cdn-tf-domain` with the error hint: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. The Cloudflare backup directory is {config_path}. Generate JavaScript files for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json. IMPORTANT: A previous generation attempt produced JavaScript validation errors. Pay special attention to these issues: {failed_checks}. Generate all JS files from scratch — do NOT read any existing JS files. Generate output files in {user_language}."`
+     c. Re-invoke `cf-cdn-tf-domain` with the error hint: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. You MUST use tools to read IR files and write JS output — do NOT skip tool calls. The Cloudflare backup directory is {config_path}. Generate JavaScript files for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json. IMPORTANT: A previous generation attempt produced JavaScript validation errors. Pay special attention to these issues: {failed_checks}. Generate all JS files from scratch — do NOT read any existing JS files. Generate output files in {user_language}."`
      d. Re-invoke `cf-cdn-js-validator` for this domain.
      e. If the second attempt also FAILs → mark this domain as `JS_VALIDATION_FAILED` (record the errors), continue processing other domains.
 3. Once all domains have completed (PASS or JS_VALIDATION_FAILED), proceed to Step 4 (final reporting).
