@@ -66,3 +66,35 @@
    - JSON parse error in Cloudflare config → check if CloudflareBackup export is complete
    - Zone directory not found → verify the config path points to the CloudflareBackup root (containing `account/` and zone subdirectories)
 5. To retry a single domain: `python3 cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`
+
+## CloudFront Console Cannot Edit Cache Behavior
+
+**Problem**: Clicking on a cache behavior in the CloudFront console shows "Your CloudFront distribution behavior configuration page failed to load"
+
+**Cause**: The distribution status is still `InProgress` (deploying to edge locations). The console cannot load the behavior edit page until deployment completes.
+
+**Solution**:
+1. Check distribution status: `aws cloudfront get-distribution --id <DIST_ID> --query 'Distribution.Status'`
+2. Wait for status to become `Deployed`. This typically takes 5–15 minutes, longer for distributions with many cache behaviors or Lambda@Edge associations.
+3. Or wait with: `aws cloudfront wait distribution-deployed --id <DIST_ID>`
+
+## Lambda@Edge IAM Role Not Destroyed
+
+**Problem**: `terraform apply` fails with `EntityAlreadyExists: Role with name cfcdn-<domain>-lambda-edge already exists` after a previous `terraform destroy`
+
+**Cause**: Lambda@Edge functions are replicated to CloudFront edge locations. When you destroy a distribution, AWS asynchronously cleans up these replicas — this can take several hours. The IAM role cannot be deleted while replicas still reference it, so `terraform destroy` may fail to delete the role (silently or with a timeout error).
+
+**Solution**:
+1. Import the existing role into Terraform state:
+   ```bash
+   cd cloudflare-to-aws-cdn/terraform/domains/<sanitized_domain>
+   terraform import aws_iam_role.<sanitized_domain>_lambda_edge cfcdn-<sanitized_domain>-lambda-edge
+   ```
+   Where `<sanitized_domain>` is the directory name under `domains/` (dots and hyphens replaced with underscores, e.g., `ext_c_letsmakeit_link` for `ext.c.letsmakeit.link`).
+   Then re-run `terraform apply`.
+2. Or wait a few hours for replicas to be cleaned up, then manually delete:
+   ```bash
+   aws iam detach-role-policy --role-name cfcdn-<sanitized_domain>-lambda-edge --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+   aws iam delete-role --role-name cfcdn-<sanitized_domain>-lambda-edge
+   ```
+   Then re-run `terraform apply`.

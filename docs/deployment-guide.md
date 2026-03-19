@@ -174,3 +174,7 @@ After verifying each CloudFront distribution is working:
 - **CloudFront KVS has a default quota of 50 stores per account.** If you have
   more than 50 domains using bulk redirects, [request a quota increase](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html)
   before deploying.
+- **Lambda@Edge IAM roles may survive `terraform destroy`.** Edge replicas are
+  cleaned up asynchronously (can take hours). If you destroy and re-deploy,
+  you may need to `terraform import` the existing role. See
+  [Troubleshooting](./troubleshooting.md#lambda-at-edge-iam-role-not-destroyed).

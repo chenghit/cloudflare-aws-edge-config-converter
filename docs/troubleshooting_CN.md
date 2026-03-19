@@ -66,3 +66,35 @@
    - Cloudflare 配置 JSON 解析错误 → 检查 CloudflareBackup 导出是否完整
    - Zone 目录未找到 → 确认配置路径指向 CloudflareBackup 根目录（包含 `account/` 和 zone 子目录）
 5. 重试单个域名：`python3 cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`
+
+## CloudFront Console 无法编辑 Cache Behavior
+
+**问题**：在 CloudFront console 点击某个 cache behavior 时显示 "Your CloudFront distribution behavior configuration page failed to load"
+
+**原因**：Distribution 状态还是 `InProgress`（正在部署到边缘节点）。部署完成前 console 无法加载 behavior 编辑页面。
+
+**解决方案**：
+1. 检查 distribution 状态：`aws cloudfront get-distribution --id <DIST_ID> --query 'Distribution.Status'`
+2. 等状态变成 `Deployed`。通常需要 5–15 分钟，cache behavior 多或有 Lambda@Edge 关联的会更久。
+3. 或者用命令等待：`aws cloudfront wait distribution-deployed --id <DIST_ID>`
+
+## Lambda@Edge IAM Role 未被 Destroy
+
+**问题**：`terraform apply` 报错 `EntityAlreadyExists: Role with name cfcdn-<domain>-lambda-edge already exists`，之前已经跑过 `terraform destroy`
+
+**原因**：Lambda@Edge 函数会被复制到 CloudFront 边缘节点。销毁 distribution 后，AWS 异步清理这些副本——可能需要几个小时。副本存在期间 IAM role 无法删除，所以 `terraform destroy` 可能删除 role 失败（静默失败或超时报错）。
+
+**解决方案**：
+1. 把已有 role import 到 Terraform state：
+   ```bash
+   cd cloudflare-to-aws-cdn/terraform/domains/<sanitized_domain>
+   terraform import aws_iam_role.<sanitized_domain>_lambda_edge cfcdn-<sanitized_domain>-lambda-edge
+   ```
+   其中 `<sanitized_domain>` 是 `domains/` 下的目录名（点和横线替换为下划线，例如 `ext.c.letsmakeit.link` 对应 `ext_c_letsmakeit_link`）。
+   然后重新 `terraform apply`。
+2. 或者等几个小时让副本清理完，然后手动删除：
+   ```bash
+   aws iam detach-role-policy --role-name cfcdn-<sanitized_domain>-lambda-edge --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+   aws iam delete-role --role-name cfcdn-<sanitized_domain>-lambda-edge
+   ```
+   然后重新 `terraform apply`。

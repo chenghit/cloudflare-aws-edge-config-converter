@@ -143,3 +143,4 @@ python3 test-cdn-rules.py d111111abcdef8.cloudfront.net
 - **共享 module（`modules/cloudfront_distribution/`）别改。** 它是通用 wrapper——所有域名特定配置都在各域名的 `main.tf` 里。
 - **CloudFront Functions 有 10KB 大小限制。** 超了的话，pipeline 会把 origin_override 逻辑拆到 Lambda@Edge origin-request。剩余 viewer 逻辑如果还是放不下，会标记为 non-convertible。检查每个域名的 `lambda/` 目录看有没有 origin event handler。
 - **CloudFront KVS 默认配额是每账户 50 个 store。** 如果超过 50 个域名用了 bulk redirects，部署前先[申请配额提升](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html)。
+- **Lambda@Edge IAM role 可能在 `terraform destroy` 后残留。** 边缘副本是异步清理的（可能需要几小时）。如果销毁后重新部署，可能需要 `terraform import` 已有 role。详见[故障排除](./troubleshooting_CN.md)。
