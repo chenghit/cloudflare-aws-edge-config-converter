@@ -76,6 +76,12 @@ Use case: Manage Cloudflare via Terraform (continue using Cloudflare)
 NOT for:  Migrate from Cloudflare to AWS
 ```
 
+## Data Format Dependency
+
+Beyond file discovery, the conversion pipeline has Python scripts (Stages 3–7.6 in the CDN pipeline, plus WAF IP analysis) that parse and transform configuration data. These scripts are built specifically for the data structure produced by CloudflareBackup — which mirrors the raw JSON responses from Cloudflare's REST API. Field names, nesting, expression syntax, and array structures all follow the Cloudflare API schema directly.
+
+The pipeline has not been designed or tested against cf-terraforming's HCL output, Terraform state files, or any other backup format. Supporting a different input format would require rewriting the ingestion layer in the preprocessing scripts (`cdn-preprocess.py`, `waf-analyze-ip.py`) that parse raw Cloudflare data into the pipeline's intermediate representation. Downstream scripts that operate on the IR would not need changes.
+
 ## The Bottom Line
 
-The incompatibility is not about HCL parsing (AI handles that fine) or data quality. It's about **file structure predictability** — the foundation that makes automated skill-based workflows possible.
+The incompatibility is not about HCL parsing (AI handles that fine) or data quality. It's about **file structure predictability** and **data format dependency** — the foundation that makes automated skill-based workflows possible.

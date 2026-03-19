@@ -76,6 +76,12 @@ cf-terraforming 是为**用 Terraform 管理 Cloudflare** 设计的——不是�
 不适用：从 Cloudflare 迁移到 AWS
 ```
 
+## 数据格式依赖
+
+除了文件发现之外，转换 pipeline 中有多个 Python 脚本（CDN pipeline 的 Stage 3–7.6，以及 WAF IP 分析）负责解析和转换配置数据。这些脚本完全针对 CloudflareBackup 产生的数据结构设计——即 Cloudflare REST API 的原始 JSON 响应格式。字段名、嵌套结构、表达式语法、数组结构都直接遵循 Cloudflare API schema。
+
+Pipeline 没有针对 cf-terraforming 的 HCL 输出、Terraform state 文件或任何其他备份格式做设计或测试。支持不同的输入格式意味着需要重写预处理脚本（`cdn-preprocess.py`、`waf-analyze-ip.py`）中将 Cloudflare 原始数据解析为 pipeline 中间表示的部分。操作 IR 的下游脚本不需要改动。
+
 ## 总结
 
-不兼容的原因不是 HCL 解析（AI 处理得很好）或数据质量。而是**文件结构的可预测性**——这是基于 skill 的自动化工作流的基础。
+不兼容的原因不是 HCL 解析（AI 处理得很好）或数据质量。而是**文件结构的可预测性**和**数据格式的依赖**——这是基于 skill 的自动化工作流的基础。
