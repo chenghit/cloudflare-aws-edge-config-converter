@@ -179,9 +179,19 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
 
     # Custom ORP for geo/device headers
     if orp_headers:
+        desc_parts = []
+        geo_h = [h for h in orp_headers if 'Country' in h or 'City' in h or 'Latitude' in h or 'Longitude' in h or 'Region' in h or 'Postal' in h or 'Metro' in h]
+        dev_h = [h for h in orp_headers if 'Mobile' in h or 'Desktop' in h or 'Tablet' in h or 'SmartTV' in h or 'IOS' in h or 'Android' in h]
+        if geo_h:
+            desc_parts.append('geo')
+        if dev_h:
+            desc_parts.append('device')
+        if not desc_parts:
+            desc_parts.append('CloudFront')
+        desc = ' + '.join(desc_parts) + ' headers'
         w(f'resource "aws_cloudfront_origin_request_policy" "custom_orp_{san}" {{')
         w(f'  name    = "cfcdn-orp-custom-{san}"')
-        w(f'  comment = "Custom ORP for {hostname} - forwards geo/device headers to CFF"')
+        w(f'  comment = "Custom ORP for {hostname} - forwards {desc} to origin"')
         w('')
         w('  headers_config {')
         w('    header_behavior = "allViewerAndWhitelistCloudFront"')
