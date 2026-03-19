@@ -146,6 +146,16 @@ def dedup_policies(all_irs):
                         beh[ref_key] = None
                         continue
 
+                # Skip all-none ORP — omitting ORP is equivalent
+                if orig_key == "origin_request_policy":
+                    fwd = policy.get("forward", {})
+                    if (fwd.get("headers") == "none" and
+                        fwd.get("cookies") == "none" and
+                        fwd.get("query_strings") == "none"):
+                        del beh[orig_key]
+                        beh[ref_key] = None
+                        continue
+
                 policy_json = json.dumps(policy, sort_keys=True, separators=(",", ":"))
                 full_hash = hashlib.sha256(policy_json.encode()).hexdigest()
 
