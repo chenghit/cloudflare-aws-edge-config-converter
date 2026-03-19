@@ -355,6 +355,39 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
                     f"viewer-response to set CORS headers instead of Response Headers Policy."
                 )
 
+    # CFF associated with behaviors that have no path-specific ops
+    cff_no_ops = []
+    for ir in all_irs:
+        hostname = ir["metadata"]["hostname"]
+        has_global_ops = (ir["metadata"].get("kvs_requirements", {}).get("needs_bulk_redirects")
+                         or any(b.get("viewer_request_ops") for b in ir["cache_behaviors"]))
+        if not has_global_ops:
+            continue
+        no_ops_behs = [b["path_pattern"] for b in ir["cache_behaviors"]
+                       if not b.get("viewer_request_ops") and not b.get("viewer_response_ops")
+                       and b["path_pattern"] != "default"]
+        if no_ops_behs:
+            cff_no_ops.append((hostname, no_ops_behs))
+    if cff_no_ops:
+        domains_str = ", ".join(h for h, _ in cff_no_ops)
+        # Show sample paths from first domain
+        sample = cff_no_ops[0][1]
+        paths = ", ".join(f"`{p}`" for p in sample[:5])
+        if len(sample) > 5:
+            paths += f" (+{len(sample) - 5} more)"
+        all_warnings.append(
+            f"CFF global association ({len(cff_no_ops)} domains: {domains_str}): "
+            f"cache behaviors with no path-specific rules (e.g. {paths}) "
+            f"still have CloudFront Functions associated. "
+            f"In Cloudflare, bulk redirects and request header transforms apply zone-wide "
+            f"(all paths). In CloudFront, each cache behavior is independent — CFF must be "
+            f"explicitly associated per behavior to replicate this zone-wide scope. "
+            f"This adds CFF invocation cost ($0.10/million requests) to those behaviors. "
+            f"To remove CFF from a specific behavior, edit main.tf and delete the "
+            f"function_association block — but bulk redirects and unconditional header "
+            f"mutations will no longer apply to that path."
+        )
+
     if all_warnings:
         for w in all_warnings:
             lines.append(f"- {w}")
