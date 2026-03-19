@@ -421,9 +421,9 @@ if (country) {
 }
 ```
 
-**Header value substitution**: If any `set_header` op has a value containing
-`"Cloudflare"`, replace with `"CloudFront"` in the generated JS.
-Example: `request.headers['x-cdn'] = {value: 'CloudFront'};`
+**Header value substitution**:
+- `$viewer_ip` → `event.viewer.ip` (used by True-Client-IP managed transform). Example: `request.headers['true-client-ip'] = {value: event.viewer.ip};`
+- `"Cloudflare"` → `"CloudFront"`. Example: `request.headers['x-cdn'] = {value: 'CloudFront'};`
 
 **6. serve_error_inline** — for each op where type == "serve_error_inline":
 
