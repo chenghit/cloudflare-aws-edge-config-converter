@@ -19,7 +19,8 @@ cd cloudflare-aws-edge-config-converter
 ./install.sh
 
 # 4. Start conversion
-kiro-cli chat
+kiro-cli chat --agent cloudflare-aws-converter --trust-all-tools
+# Kiro CLI 1.24–1.27 users can also use: kiro-cli chat
 ```
 
 Then describe what you want:
@@ -36,7 +37,7 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 
 ## Prerequisites
 
-- **Kiro CLI** >= 1.24 — [Installation guide](https://kiro.dev/docs/getting-started/installation/). ⚠️ Kiro IDE is not recommended (does not support `skill://` resource binding in subagents).
+- **Kiro CLI** >= 1.24 — [Installation guide](https://kiro.dev/docs/getting-started/installation/). ⚠️ Kiro IDE is not recommended (does not support `skill://` resource binding in subagents). **Kiro CLI 1.28+ users:** A [subagent permission issue](https://github.com/kirodotdev/Kiro/issues/4751) causes shell approval prompts that block the pipeline. Add `--trust-all-tools` to work around this. See [CHANGELOG.md](./CHANGELOG.md) for details.
 - **Terraform** >= 1.8.0 with AWS Provider >= 6.x — [Install Terraform](https://developer.hashicorp.com/terraform/install). Note: `terraform validate` (run automatically after WAF generation) requires internet access on first run to download the AWS provider (~300MB).
 - **Python 3** — Required by both WAF and CDN pipeline scripts. WAF uses Python for IP list/access rule analysis and helper scripts for count validation and JSON chunking. CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–7.6) — these replaced LLM subagents for deterministic, sub-second processing. Pre-installed on macOS and most Linux distributions. No third-party packages needed for the conversion pipeline (stdlib only). **Post-conversion**: CDN domains with KVS (bulk redirects, IP lists, error pages) generate a `seed-kvs.py` script that requires `boto3` — install with `pip install boto3` before deploying.
 - **Model**: `claude-sonnet-4.6-1m` minimum. Switch with `/model` in Kiro.
@@ -217,11 +218,16 @@ For advanced users: `/agent swap <subagent-name>` to run individual pipeline sta
 
 ## Subagent Permissions and Security
 
-### Why a dedicated orchestrator agent?
+### Subagent runtime limitations (Kiro CLI 1.28+)
 
-Kiro CLI subagents run in a restricted runtime with only `read`, `write`, `shell`, and `code` tools — they do not have access to `glob` or `grep` ([docs](https://kiro.dev/docs/cli/chat/subagents/#tool-availability)). When the default Kiro agent spawns subagents, each `shell` call triggers an interactive approval prompt, blocking the pipeline ([#4751](https://github.com/kirodotdev/Kiro/issues/4751)).
+Kiro CLI subagents run in a restricted runtime with only `read`, `write`, `shell`, and `code` tools — they do not have access to `glob` or `grep` ([docs](https://kiro.dev/docs/cli/chat/subagents/#tool-availability)). Since Kiro CLI 1.28, each `shell` call inside a subagent triggers an interactive approval prompt, blocking the automated pipeline ([#4751](https://github.com/kirodotdev/Kiro/issues/4751)). Neither `trustedAgents`, `allowedTools`, nor `--trust-tools` currently suppress subagent internal tool approval ([#5071](https://github.com/kirodotdev/Kiro/issues/5071)).
 
-The `cloudflare-aws-converter` orchestrator agent solves this by declaring `trustedAgents: ["cf-*"]`, which lets all `cf-*` subagents run their `shell` calls without per-call approval. This is the only purpose of the orchestrator agent — it does not change what tools subagents can access.
+**The only working workaround is `--trust-all-tools`:**
+```bash
+kiro-cli chat --agent cloudflare-aws-converter --trust-all-tools
+```
+
+This is a Kiro CLI limitation, not a design choice of this tool. Kiro CLI 1.24–1.27 users are not affected.
 
 ### Subagent tool access
 
@@ -231,10 +237,6 @@ All subagents have the same runtime tools (`read`, `write`, `shell`, `code`). Th
 |----------|-------------|-----|
 | `cf-cdn-js-validator` | ✅ Intentionally | Runs `node --check <file>` for JS syntax validation and `wc -c` for file size checks. |
 | All other subagents | ⚠️ Incidentally | May use `ls` for directory discovery since `glob` is not available in subagent runtime. |
-
-**If your security policy requires reviewing shell commands:** The orchestrator's `trustedAgents` setting only suppresses the approval prompt — it does not grant additional capabilities. Subagents can only run `shell` commands regardless of trust settings. You can audit each subagent's SKILL.md to see what commands it might run.
-
-**To disable trust and require manual approval:** Remove the `toolsSettings.subagent.trustedAgents` field from `cloudflare-aws-converter.json`. Each `shell` call will then prompt for approval, but this will significantly slow down the pipeline.
 
 ## More Information
 

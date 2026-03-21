@@ -13,11 +13,6 @@ metadata:
 
 # cf-cdn-tf-domain
 
-## Available Tools
-
-You have these tools: `read`, `write`, `shell`, `code`. Use `read` for reading files and listing directories. Use `shell` (ls, find) when you need to discover files. Use `write` to create or edit files.
-
----
 
 Generates the complete per-domain Terraform workspace under
 `cloudflare-to-aws-cdn/terraform/domains/<sanitized-hostname>/`.

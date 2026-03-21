@@ -7,11 +7,6 @@ metadata:
 
 # Cloudflare to AWS WAF Terraform Generator
 
-## Available Tools
-
-You have these tools: `read`, `write`, `shell`, `code`. Use `read` for reading files and listing directories. Use `shell` (ls, find) when you need to discover files. Use `write` to create or edit files.
-
----
 
 Generate AWS WAF Terraform configuration from a validated IR JSON.
 

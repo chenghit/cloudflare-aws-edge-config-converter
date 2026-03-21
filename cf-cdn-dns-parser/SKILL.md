@@ -11,11 +11,6 @@ metadata:
 
 # Skill: cf-cdn-dns-parser
 
-## Available Tools
-
-You have these tools: `read`, `write`, `shell`, `code`. Use `read` for reading files and listing directories. Use `shell` (ls, find) when you need to discover files. Use `write` to create or edit files.
-
----
 
 ## Purpose
 
@@ -73,8 +68,8 @@ ask for it now:
 > "Please provide the full path to your Cloudflare backup directory (the folder
 > containing DNS.txt, Cache-Rules.txt, etc.)."
 
-Use `shell` to find the DNS export file: `find {backup_path} -name "DNS.txt" -type f`.
-Construct the `DNS.txt` path from the result.
+Use `glob` with pattern `{backup_path}/**/DNS.txt` to find the DNS export file.
+Construct the `DNS.txt` path from the glob result.
 
 Verify the file exists. If it does not, abort with:
 

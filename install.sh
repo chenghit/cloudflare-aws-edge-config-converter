@@ -62,26 +62,31 @@ cp subagents/cf-cdn-js-validator.json "$AGENTS_DIR/"
 echo ""
 echo "✅ Installation complete!"
 echo ""
-echo "Installed skills:"
-echo "  - Orchestrator: $SKILLS_DIR/SKILL.md"
-echo "  - WAF Analyzer: $SKILLS_DIR/cf-waf-analyzer/"
-echo "  - WAF Analyzer Validator: $SKILLS_DIR/cf-waf-analyzer-validator/"
-echo "  - WAF Terraform Generator: $SKILLS_DIR/cf-waf-terraform-generator/"
-echo "  - CDN DNS Parser: $SKILLS_DIR/cf-cdn-dns-parser/"
-echo "  - CDN Input Validator: $SKILLS_DIR/cf-cdn-input-validator/"
-echo "  - CDN TF Domain: $SKILLS_DIR/cf-cdn-tf-domain/"
-echo "  - CDN JS Validator: $SKILLS_DIR/cf-cdn-js-validator/"
-echo "  - CDN Python Scripts: $SKILLS_DIR/scripts/ (preprocess, validate, finalize, scaffold, shared policies)"
-echo ""
-echo "Installed agents:"
-echo "  - cloudflare-aws-converter (orchestrator — use this to start)"
-echo "  - cf-waf-analyzer"
-echo "  - cf-waf-analyzer-validator"
-echo "  - cf-waf-terraform-generator"
-echo "  - cf-cdn-dns-parser"
-echo "  - cf-cdn-input-validator"
-echo "  - cf-cdn-tf-domain"
-echo "  - cf-cdn-js-validator"
-echo ""
-echo "To start a conversion:"
-echo "  kiro-cli chat --agent cloudflare-aws-converter"
+
+# Detect Kiro CLI version and show appropriate start command
+KIRO_VERSION=""
+if command -v kiro-cli &>/dev/null; then
+  KIRO_VERSION=$(kiro-cli --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
+fi
+
+KIRO_MAJOR=$(echo "$KIRO_VERSION" | cut -d. -f1)
+KIRO_MINOR=$(echo "$KIRO_VERSION" | cut -d. -f2)
+
+if [ -n "$KIRO_MAJOR" ] && [ "$KIRO_MAJOR" -ge 1 ] && [ "$KIRO_MINOR" -ge 28 ] 2>/dev/null; then
+  echo "⚠️  Kiro CLI $KIRO_MAJOR.$KIRO_MINOR detected."
+  echo "   Version 1.28+ has a subagent permission issue (https://github.com/kirodotdev/Kiro/issues/4751)"
+  echo "   that requires --trust-all-tools to avoid shell approval prompts blocking the pipeline."
+  echo ""
+  echo "To start a conversion:"
+  echo "  kiro-cli chat --agent cloudflare-aws-converter --trust-all-tools"
+elif [ -n "$KIRO_MAJOR" ]; then
+  echo "Kiro CLI $KIRO_MAJOR.$KIRO_MINOR detected."
+  echo ""
+  echo "To start a conversion:"
+  echo "  kiro-cli chat"
+else
+  echo "To start a conversion:"
+  echo "  kiro-cli chat --agent cloudflare-aws-converter --trust-all-tools"
+  echo ""
+  echo "  Kiro CLI 1.24-1.27 users can also use: kiro-cli chat"
+fi

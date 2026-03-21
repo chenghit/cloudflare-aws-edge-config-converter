@@ -7,11 +7,6 @@ metadata:
 
 # Cloudflare WAF Analyzer Validator
 
-## Available Tools
-
-You have these tools: `read`, `write`, `shell`, `code`. Use `read` for reading files and listing directories. Use `shell` (ls, find) when you need to discover files. Use `write` to create or edit files.
-
----
 
 Validate `cloudflare-to-aws-waf/waf_ir.json` by cross-checking it against the original Cloudflare configuration files. V1/V2/V3 modes only report issues (do NOT modify waf_ir.json). V4 mode applies all fixes serially and writes the final report.
 

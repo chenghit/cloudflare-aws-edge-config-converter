@@ -19,7 +19,8 @@ cd cloudflare-aws-edge-config-converter
 ./install.sh
 
 # 4. 开始转换
-kiro-cli chat
+kiro-cli chat --agent cloudflare-aws-converter --trust-all-tools
+# Kiro CLI 1.24–1.27 用户也可以直接用：kiro-cli chat
 ```
 
 然后描述你的需求：
@@ -36,7 +37,7 @@ kiro-cli chat
 
 ## 前提条件
 
-- **Kiro CLI** >= 1.24 — [安装文档](https://kiro.dev/docs/getting-started/installation/)。⚠️ 不推荐使用 Kiro IDE（不支持 subagent 中的 `skill://` 资源绑定）。
+- **Kiro CLI** >= 1.24 — [安装文档](https://kiro.dev/docs/getting-started/installation/)。⚠️ 不推荐使用 Kiro IDE（不支持 subagent 中的 `skill://` 资源绑定）。**Kiro CLI 1.28+ 用户：** 1.28 引入的 [subagent 权限问题](https://github.com/kirodotdev/Kiro/issues/4751) 会导致 shell 审批提示阻塞 pipeline。添加 `--trust-all-tools` 解决。详见 [CHANGELOG.md](./CHANGELOG.md)。
 - **Terraform** >= 1.8.0，AWS Provider >= 6.x — [安装 Terraform](https://developer.hashicorp.com/terraform/install)。注意：`terraform validate`（WAF 生成后自动运行）首次运行需要联网下载 AWS provider（约 300MB）。
 - **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF 用 Python 做 IP 列表/访问规则分析，以及辅助脚本做 count 校验和 JSON 切分。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）——这些替代了 LLM subagent，实现确定性的亚秒级处理。macOS 和大多数 Linux 发行版已预装。转换流程无需第三方包（仅用标准库）。**部署阶段**：有 KVS 的 CDN 域名（批量重定向、IP 列表、错误页面）会生成 `seed-kvs.py` 脚本，需要 `boto3`——部署前运行 `pip install boto3` 安装。
 - **模型**：最低 `claude-sonnet-4.6-1m`。在 Kiro 中通过 `/model` 切换。
@@ -215,11 +216,16 @@ cd cloudflare-aws-edge-config-converter
 
 ## Subagent 权限与安全
 
-### 为什么需要专用编排器 agent？
+### Subagent 运行时限制（Kiro CLI 1.28+）
 
-Kiro CLI 的 subagent 运行在受限环境中，只有 `read`、`write`、`shell`、`code` 四个工具——没有 `glob` 和 `grep`（[文档](https://kiro.dev/docs/cli/chat/subagents/#tool-availability)）。当默认 Kiro agent 派发 subagent 时，每次 `shell` 调用都会弹出交互式审批提示，阻塞 pipeline（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)）。
+Kiro CLI 的 subagent 运行在受限环境中，只有 `read`、`write`、`shell`、`code` 四个工具——没有 `glob` 和 `grep`（[文档](https://kiro.dev/docs/cli/chat/subagents/#tool-availability)）。从 Kiro CLI 1.28 起，subagent 内部的每次 `shell` 调用都会弹出交互式审批提示，阻塞自动化 pipeline（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)）。`trustedAgents`、`allowedTools`、`--trust-tools` 目前都无法跳过 subagent 内部的工具审批（[#5071](https://github.com/kirodotdev/Kiro/issues/5071)）。
 
-`cloudflare-aws-converter` 编排器 agent 通过声明 `trustedAgents: ["cf-*"]` 解决这个问题，让所有 `cf-*` subagent 的 `shell` 调用无需逐次审批。这是编排器 agent 的唯一用途——它不会改变 subagent 能访问的工具。
+**唯一有效的解决方法是 `--trust-all-tools`：**
+```bash
+kiro-cli chat --agent cloudflare-aws-converter --trust-all-tools
+```
+
+这是 Kiro CLI 的限制，不是本工具的设计选择。Kiro CLI 1.24–1.27 用户不受影响。
 
 ### Subagent 工具权限
 
@@ -229,10 +235,6 @@ Kiro CLI 的 subagent 运行在受限环境中，只有 `read`、`write`、`shel
 |----------|-------------|------|
 | `cf-cdn-js-validator` | ✅ 有意使用 | 运行 `node --check <file>` 做 JS 语法校验，`wc -c` 做文件大小检查。 |
 | 其他所有 subagent | ⚠️ 附带使用 | 可能使用 `ls` 探索目录结构，因为 subagent 运行时没有 `glob`。 |
-
-**如果你的安全策略要求审查 shell 命令：** 编排器的 `trustedAgents` 设置只是跳过审批提示——不会授予额外能力。无论是否信任，subagent 都只能运行 `shell` 命令。你可以审查每个 subagent 的 SKILL.md 了解它可能运行的命令。
-
-**如需禁用信任并要求手动审批：** 从 `cloudflare-aws-converter.json` 中移除 `toolsSettings.subagent.trustedAgents` 字段。每次 `shell` 调用都会提示审批，但会显著拖慢 pipeline 执行速度。
 
 ## 更多信息
 

@@ -12,11 +12,6 @@ metadata:
 
 # cf-cdn-js-validator (Validator V3)
 
-## Available Tools
-
-You have these tools: `read`, `write`, `shell`, `code`. Use `read` for reading files and listing directories. Use `shell` for running validation commands (`node --check`, `wc -c`) and listing directories.
-
----
 
 Validates ALL JavaScript files generated for a domain's CloudFront Functions
 and Lambda@Edge handlers. This is a pure validation pass — it reports failures
