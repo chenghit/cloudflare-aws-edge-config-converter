@@ -39,6 +39,7 @@ cp -r cf-cdn-input-validator "$SKILLS_DIR/"
 cp -r cf-cdn-tf-domain "$SKILLS_DIR/"
 cp -r cf-cdn-js-validator "$SKILLS_DIR/"
 cp cloudflare-aws-converter/SKILL.md "$SKILLS_DIR/"
+cp -r cloudflare-aws-converter/references "$SKILLS_DIR/"
 cp -r cloudflare-aws-converter/scripts "$SKILLS_DIR/"
 
 # Copy subagent configurations
