@@ -217,16 +217,24 @@ For advanced users: `/agent swap <subagent-name>` to run individual pipeline sta
 
 ## Subagent Permissions and Security
 
-Most subagents only have file I/O and search permissions (`fs_read`, `fs_write`, `glob`, `grep`). One subagent requires shell execution:
+### Why a dedicated orchestrator agent?
 
-| Subagent | Has `execute_bash` | Why |
-|----------|-------------------|-----|
-| `cf-cdn-js-validator` | ✅ Yes | Runs `node --check <file>` for JavaScript syntax validation and `wc -c` for file size checks. These are the only two commands it needs — there is no way to validate JS syntax or measure byte-accurate file size with file I/O tools alone. |
-| All other subagents | ❌ No | Only need to read/write files and search text. |
+Kiro CLI subagents run in a restricted runtime with only `read`, `write`, `shell`, and `code` tools — they do not have access to `glob` or `grep` ([docs](https://kiro.dev/docs/cli/chat/subagents/#tool-availability)). When the default Kiro agent spawns subagents, each `shell` call triggers an interactive approval prompt, blocking the pipeline ([#4751](https://github.com/kirodotdev/Kiro/issues/4751)).
 
-**If your security policy flags `execute_bash`:** You can review the validator's SKILL.md to confirm it only runs `node --check` and `wc -c`. Removing `execute_bash` from `cf-cdn-js-validator.json` will disable JS syntax checking (CFF-01, LE-01) and byte-accurate size validation (CFF-06, LE-03) — the validator will skip these checks and report them as `SKIP` in the output JSON.
+The `cloudflare-aws-converter` orchestrator agent solves this by declaring `trustedAgents: ["cf-*"]`, which lets all `cf-*` subagents run their `shell` calls without per-call approval. This is the only purpose of the orchestrator agent — it does not change what tools subagents can access.
 
-**Do not use manual approval as a workaround.** Subagents run inside the orchestrator's context — when the main agent dispatches a task to a subagent, you do not see individual tool calls from that subagent in your chat. Manual approval per-call is not possible for subagent tool invocations, so removing the permission and relying on interactive approval is not a viable alternative.
+### Subagent tool access
+
+All subagents have the same runtime tools (`read`, `write`, `shell`, `code`). The `cf-cdn-js-validator` is the only subagent that intentionally uses `shell` for validation:
+
+| Subagent | Uses `shell` | Why |
+|----------|-------------|-----|
+| `cf-cdn-js-validator` | ✅ Intentionally | Runs `node --check <file>` for JS syntax validation and `wc -c` for file size checks. |
+| All other subagents | ⚠️ Incidentally | May use `ls` for directory discovery since `glob` is not available in subagent runtime. |
+
+**If your security policy requires reviewing shell commands:** The orchestrator's `trustedAgents` setting only suppresses the approval prompt — it does not grant additional capabilities. Subagents can only run `shell` commands regardless of trust settings. You can audit each subagent's SKILL.md to see what commands it might run.
+
+**To disable trust and require manual approval:** Remove the `toolsSettings.subagent.trustedAgents` field from `cloudflare-aws-converter.json`. Each `shell` call will then prompt for approval, but this will significantly slow down the pipeline.
 
 ## More Information
 

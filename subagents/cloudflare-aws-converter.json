@@ -1,0 +1,15 @@
+{
+  "name": "cloudflare-aws-converter",
+  "description": "Orchestrates Cloudflare-to-AWS conversion. Converts Cloudflare WAF rules to AWS WAF Terraform and Cloudflare CDN configurations to CloudFront Terraform. Start with: /agent swap cloudflare-aws-converter",
+  "tools": ["*"],
+  "allowedTools": ["read", "write", "shell", "code", "glob", "grep", "use_subagent", "@builtin"],
+  "toolsSettings": {
+    "subagent": {
+      "trustedAgents": ["cf-*"]
+    }
+  },
+  "resources": [
+    "skill://~/.kiro/skills/cloudflare-aws-converter/SKILL.md",
+    "file://~/.kiro/steering/SCRIPT_STANDARDS.md"
+  ]
+}

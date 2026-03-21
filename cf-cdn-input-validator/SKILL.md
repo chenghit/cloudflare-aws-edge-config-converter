@@ -13,7 +13,7 @@ metadata:
 
 ## Available Tools
 
-You have these tools: `glob`, `fs_read`, `fs_write`, `grep`. Use `glob` for directory listing and file discovery. Use `fs_read` for reading files. You do NOT have access to `execute_bash` or shell commands.
+You have these tools: `read`, `write`, `shell`, `code`. Use `read` for reading files and listing directories. Use `shell` (ls, find) when you need to discover files. Use `write` to create or edit files.
 
 ---
 

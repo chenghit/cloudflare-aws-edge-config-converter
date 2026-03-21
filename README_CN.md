@@ -215,16 +215,24 @@ cd cloudflare-aws-edge-config-converter
 
 ## Subagent 权限与安全
 
-大多数 subagent 只有文件读写和搜索权限（`fs_read`、`fs_write`、`glob`、`grep`）。只有一个 subagent 需要 shell 执行权限：
+### 为什么需要专用编排器 agent？
 
-| Subagent | 有 `execute_bash` | 原因 |
-|----------|-------------------|------|
-| `cf-cdn-js-validator` | ✅ 有 | 运行 `node --check <file>` 做 JavaScript 语法检查，以及 `wc -c` 做文件大小检查。这是它唯一需要的两个命令——仅靠文件读写工具无法完成 JS 语法校验和精确的字节大小测量。 |
-| 其他所有 subagent | ❌ 无 | 只需要读写文件和搜索文本。 |
+Kiro CLI 的 subagent 运行在受限环境中，只有 `read`、`write`、`shell`、`code` 四个工具——没有 `glob` 和 `grep`（[文档](https://kiro.dev/docs/cli/chat/subagents/#tool-availability)）。当默认 Kiro agent 派发 subagent 时，每次 `shell` 调用都会弹出交互式审批提示，阻塞 pipeline（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)）。
 
-**如果你的安全策略对 `execute_bash` 有告警：** 你可以查看该 validator 的 SKILL.md 确认它只运行 `node --check` 和 `wc -c`。从 `cf-cdn-js-validator.json` 中移除 `execute_bash` 会导致 JS 语法检查（CFF-01、LE-01）和精确文件大小校验（CFF-06、LE-03）被禁用——validator 会跳过这些检查并在输出 JSON 中标记为 `SKIP`。
+`cloudflare-aws-converter` 编排器 agent 通过声明 `trustedAgents: ["cf-*"]` 解决这个问题，让所有 `cf-*` subagent 的 `shell` 调用无需逐次审批。这是编排器 agent 的唯一用途——它不会改变 subagent 能访问的工具。
 
-**不要尝试用手动审批来替代。** Subagent 运行在编排器的上下文中——当主 agent 将任务分派给 subagent 时，你在聊天界面中看不到该 subagent 的具体工具调用。对 subagent 的工具调用无法逐个手动审批，因此移除权限后依赖交互式审批并不可行。
+### Subagent 工具权限
+
+所有 subagent 拥有相同的运行时工具（`read`、`write`、`shell`、`code`）。`cf-cdn-js-validator` 是唯一有意使用 `shell` 做校验的 subagent：
+
+| Subagent | 使用 `shell` | 原因 |
+|----------|-------------|------|
+| `cf-cdn-js-validator` | ✅ 有意使用 | 运行 `node --check <file>` 做 JS 语法校验，`wc -c` 做文件大小检查。 |
+| 其他所有 subagent | ⚠️ 附带使用 | 可能使用 `ls` 探索目录结构，因为 subagent 运行时没有 `glob`。 |
+
+**如果你的安全策略要求审查 shell 命令：** 编排器的 `trustedAgents` 设置只是跳过审批提示——不会授予额外能力。无论是否信任，subagent 都只能运行 `shell` 命令。你可以审查每个 subagent 的 SKILL.md 了解它可能运行的命令。
+
+**如需禁用信任并要求手动审批：** 从 `cloudflare-aws-converter.json` 中移除 `toolsSettings.subagent.trustedAgents` 字段。每次 `shell` 调用都会提示审批，但会显著拖慢 pipeline 执行速度。
 
 ## 更多信息
 

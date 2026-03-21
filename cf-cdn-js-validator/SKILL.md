@@ -14,7 +14,7 @@ metadata:
 
 ## Available Tools
 
-You have these tools: `glob`, `fs_read`, `fs_write`, `grep`, `execute_bash`. Use `glob` for directory listing and file discovery. Use `fs_read` for reading files. Use `execute_bash` for running validation commands.
+You have these tools: `read`, `write`, `shell`, `code`. Use `read` for reading files and listing directories. Use `shell` for running validation commands (`node --check`, `wc -c`) and listing directories.
 
 ---
 
