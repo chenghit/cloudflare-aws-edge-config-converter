@@ -4,6 +4,12 @@
 
 This tool reads [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) exports and generates ready-to-deploy Terraform for AWS WAF and CloudFront — including cache policies, CloudFront Functions, Lambda@Edge, and KVS data.
 
+> **⚠️ Kiro CLI 1.28.0 is incompatible with this tool.** Version 1.28.0 (released 2026-03-20) had two bugs that broke subagent pipelines: shell approval blocking ([#4751](https://github.com/kirodotdev/Kiro/issues/4751)) and subagent result return failure ([#6163](https://github.com/kirodotdev/Kiro/issues/6163)). Both were fixed in **1.28.1**. If you're on 1.28.0, upgrade:
+> ```bash
+> curl -fsSL https://cli.kiro.dev/install | bash
+> ```
+> Kiro CLI 1.24–1.27 and 1.28.1+ all work correctly.
+
 ## Quick Start
 
 ```bash

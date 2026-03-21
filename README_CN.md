@@ -4,6 +4,12 @@
 
 本工具读取 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 导出的备份文件，生成可直接部署的 AWS WAF 和 CloudFront Terraform 配置——包括缓存策略、CloudFront Functions、Lambda@Edge 和 KVS 数据。
 
+> **⚠️ Kiro CLI 1.28.0 与本工具不兼容。** 1.28.0 版本（2026-03-20 发布）存在两个导致 subagent pipeline 无法运行的 bug：shell 审批阻塞（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)）和 subagent 结果返回失败（[#6163](https://github.com/kirodotdev/Kiro/issues/6163)）。两个 bug 均已在 **1.28.1** 中修复。如果你使用的是 1.28.0，请升级：
+> ```bash
+> curl -fsSL https://cli.kiro.dev/install | bash
+> ```
+> Kiro CLI 1.24–1.27 和 1.28.1+ 均可正常使用。
+
 ## 快速开始
 
 ```bash
