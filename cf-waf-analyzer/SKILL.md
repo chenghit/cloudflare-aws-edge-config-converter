@@ -7,6 +7,12 @@ metadata:
 
 # Cloudflare WAF Config Analyzer
 
+## Available Tools
+
+You have these tools: `glob`, `fs_read`, `fs_write`, `grep`. Use `glob` for directory listing and file discovery. Use `fs_read` for reading files. You do NOT have access to `execute_bash` or shell commands.
+
+---
+
 Analyze Cloudflare security configurations and generate structured IR JSON for AWS WAF migration.
 
 **CRITICAL: When activated, your FIRST action is:**
@@ -22,7 +28,7 @@ Analyze Cloudflare security configurations and generate structured IR JSON for A
 
 ## Path Resolution
 
-Reference files in `references/` directory. User data from path provided by user.
+Reference files in `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/references/` directory. User data from path provided by user.
 
 ## Output Directory
 
@@ -40,7 +46,7 @@ cloudflare-to-aws-waf/
 
 ## Scope
 
-**⚠️ CRITICAL: ALL rate-based rules are ALWAYS convertible.** If marking as "cannot convert" due to limit < 10, you're wrong. Read `references/common-mistakes.md` Mistake 0.
+**⚠️ CRITICAL: ALL rate-based rules are ALWAYS convertible.** If marking as "cannot convert" due to limit < 10, you're wrong. Read `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/references/common-mistakes.md` Mistake 0.
 
 **In Scope:** WAF custom rules, rate limiting rules, IP access rules, IP/ASN lists
 
@@ -53,12 +59,12 @@ cloudflare-to-aws-waf/
 The orchestrator invokes this skill in 2 batches (A2 and A3). Batch A1 (IP Lists + IP Access Rules) is handled by `waf-analyze-ip.py` — this skill is NOT invoked for A1.
 
 **Batch A2 (WAF Custom Rules):**
-- Read: ALL 5 reference documents
+- Read: ALL 5 reference documents in `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/references/`
 - Process: WAF-Custom-Rules.txt, IP-Lists.txt, List-Items-*.txt
 - Output: `waf_ir_custom.json`
 
 **Batch A3 (Rate Limiting Rules):**
-- Read: `references/action-conversions.md`, `references/common-mistakes.md`, `references/non-convertible-rules.md`
+- Read: `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/references/action-conversions.md`, `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/references/common-mistakes.md`, `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/references/non-convertible-rules.md`
 - Process: Rate-limits.txt
 - Input from query: skip_labels text (e.g., `http_ratelimit=true all_remaining_custom_rules=true http_request_firewall_managed=true`)
 - Output: `waf_ir_rate.json`
@@ -189,7 +195,7 @@ Parse JSON to Cloudflare rule expressions. Process ALL rules in the file — `ma
 }
 ```
 
-Splitting rules (from `references/nesting-and-splitting.md`):
+Splitting rules (from `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer/references/nesting-and-splitting.md`):
 1. **Phase 1 — Top-level OR**: If expression has top-level OR branches, each branch becomes a separate AWS rule
 2. **Phase 2 — IPv4/IPv6**: For each branch referencing IP lists with both IPv4 and IPv6, split into two rules
 3. **Cascading count**: total = (branches with mixed IP × 2) + (branches without × 1)

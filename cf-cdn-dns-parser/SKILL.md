@@ -11,6 +11,12 @@ metadata:
 
 # Skill: cf-cdn-dns-parser
 
+## Available Tools
+
+You have these tools: `glob`, `fs_read`, `fs_write`, `grep`. Use `glob` for directory listing and file discovery. Use `fs_read` for reading files. You do NOT have access to `execute_bash` or shell commands.
+
+---
+
 ## Purpose
 
 This skill is **Step 1** of the Cloudflare → CloudFront CDN migration pipeline.
@@ -67,7 +73,8 @@ ask for it now:
 > "Please provide the full path to your Cloudflare backup directory (the folder
 > containing DNS.txt, Cache-Rules.txt, etc.)."
 
-Construct the `DNS.txt` path as: `<backup_dir>/DNS.txt`
+Use `glob` with pattern `{backup_path}/**/DNS.txt` to find the DNS export file.
+Construct the `DNS.txt` path from the glob result.
 
 Verify the file exists. If it does not, abort with:
 

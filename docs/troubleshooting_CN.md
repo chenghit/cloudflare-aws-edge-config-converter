@@ -78,6 +78,38 @@
 2. 等状态变成 `Deployed`。通常需要 5–15 分钟，cache behavior 多或有 Lambda@Edge 关联的会更久。
 3. 或者用命令等待：`aws cloudfront wait distribution-deployed --id <DIST_ID>`
 
+## Lambda@Edge 函数在 Destroy 时无法删除
+
+**问题**：`terraform destroy` 报错 `InvalidParameterValueException: Lambda was unable to delete ... because it is a replicated function`
+
+**原因**：CloudFront distribution 删除后，边缘节点上的 Lambda@Edge 副本由 AWS 异步清理。在所有副本清理完之前，Lambda 函数本身无法删除。通常需要 30–60 分钟，偶尔可能需要几个小时。
+
+**解决方案**：
+
+1. **等待后重试**（推荐）：等 30–60 分钟后重新执行 `terraform destroy`，副本会自动清理。
+
+2. **从 state 中移除，稍后自动清理**：如果不想等：
+   ```bash
+   cd cloudflare-to-aws-cdn/terraform/domains/<sanitized_domain>
+
+   # 查看剩余资源
+   terraform state list
+
+   # 从 state 中移除 Lambda 函数（AWS 会在副本清理后自动删除）
+   terraform state rm 'aws_lambda_function.<resource_name>'
+
+   # 销毁剩余资源
+   terraform destroy -auto-approve
+   ```
+   副本清理完成后 Lambda 函数会被 AWS 自动删除，无需手动操作。
+
+3. **检查副本状态**：可以查看副本是否还存在：
+   ```bash
+   aws lambda list-versions-by-function --function-name cfcdn-<sanitized_domain>-origin-response --query 'Versions[?Version!=`$LATEST`].[Version,State]'
+   ```
+
+**注意**：这是 AWS 侧的限制，不是 Terraform 或工具的 bug。通过 AWS Console 或 CLI 手动删除也会遇到同样的问题。
+
 ## Lambda@Edge IAM Role 未被 Destroy
 
 **问题**：`terraform apply` 报错 `EntityAlreadyExists: Role with name cfcdn-<domain>-lambda-edge already exists`，之前已经跑过 `terraform destroy`

@@ -78,6 +78,38 @@
 2. Wait for status to become `Deployed`. This typically takes 5–15 minutes, longer for distributions with many cache behaviors or Lambda@Edge associations.
 3. Or wait with: `aws cloudfront wait distribution-deployed --id <DIST_ID>`
 
+## Lambda@Edge Function Cannot Be Deleted During Destroy
+
+**Problem**: `terraform destroy` fails with `InvalidParameterValueException: Lambda was unable to delete ... because it is a replicated function`
+
+**Cause**: When a CloudFront distribution is deleted, Lambda@Edge replicas at edge locations are cleaned up asynchronously by AWS. Until all replicas are gone, the Lambda function itself cannot be deleted. This typically takes 30–60 minutes but can occasionally take several hours.
+
+**Solution**:
+
+1. **Wait and retry** (recommended): Wait 30–60 minutes, then re-run `terraform destroy`. The replicas will eventually be cleaned up automatically.
+
+2. **Remove from state and clean up later**: If you don't want to wait:
+   ```bash
+   cd cloudflare-to-aws-cdn/terraform/domains/<sanitized_domain>
+
+   # List remaining resources
+   terraform state list
+
+   # Remove Lambda functions from state (they'll be cleaned up by AWS automatically)
+   terraform state rm 'aws_lambda_function.<resource_name>'
+
+   # Destroy remaining resources
+   terraform destroy -auto-approve
+   ```
+   The Lambda function will be automatically deleted by AWS once all replicas are cleaned up (no manual action needed).
+
+3. **Check replica status**: You can monitor whether replicas still exist:
+   ```bash
+   aws lambda list-versions-by-function --function-name cfcdn-<sanitized_domain>-origin-response --query 'Versions[?Version!=`$LATEST`].[Version,State]'
+   ```
+
+**Note**: This is an AWS-side limitation, not a Terraform or tool bug. The same issue occurs with manual deletion via the AWS Console or CLI.
+
 ## Lambda@Edge IAM Role Not Destroyed
 
 **Problem**: `terraform apply` fails with `EntityAlreadyExists: Role with name cfcdn-<domain>-lambda-edge already exists` after a previous `terraform destroy`

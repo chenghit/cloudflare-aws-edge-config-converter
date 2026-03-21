@@ -7,6 +7,12 @@ metadata:
 
 # Cloudflare to AWS WAF Terraform Generator
 
+## Available Tools
+
+You have these tools: `glob`, `fs_read`, `fs_write`, `grep`. Use `glob` for directory listing and file discovery. Use `fs_read` for reading files. You do NOT have access to `execute_bash` or shell commands.
+
+---
+
 Generate AWS WAF Terraform configuration from a validated IR JSON.
 
 **CRITICAL: When activated, your FIRST action is:**
@@ -22,7 +28,7 @@ Generate AWS WAF Terraform configuration from a validated IR JSON.
 
 ## Path Resolution
 
-Reference files in `references/` directory. IR file in `cloudflare-to-aws-waf/` relative to current working directory.
+Reference files in `~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/references/` directory. IR file in `cloudflare-to-aws-waf/` relative to current working directory.
 
 ## Output Directory
 
@@ -98,12 +104,12 @@ Array of notes for the deployment README. Each has `rule`, `field`, `reason`, `a
 
 ### 0. Read All Reference Documents (CRITICAL - Must be first)
 
-1. `references/terraform-architecture.md` - Module structure and IP set sharing pattern
-2. `references/nesting-and-splitting.md` - Terraform nesting constraints and De Morgan's Law
-3. `references/field-conversions.md` - IP/ASN/field mapping to Terraform statements
-4. `references/action-conversions.md` - Action conversions and skip rule implementation
-5. `references/aws-managed-rules.md` - AWS managed rules Terraform templates
-6. `references/common-mistakes.md` - Common Terraform generation errors (read LAST)
+1. `~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/references/terraform-architecture.md` - Module structure and IP set sharing pattern
+2. `~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/references/nesting-and-splitting.md` - Terraform nesting constraints and De Morgan's Law
+3. `~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/references/field-conversions.md` - IP/ASN/field mapping to Terraform statements
+4. `~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/references/action-conversions.md` - Action conversions and skip rule implementation
+5. `~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/references/aws-managed-rules.md` - AWS managed rules Terraform templates
+6. `~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/references/common-mistakes.md` - Common Terraform generation errors (read LAST)
 
 ### 1. Read and Validate IR
 
@@ -219,9 +225,9 @@ OUTPUT_FILES:
 
 ## Reference
 
-- `references/terraform-architecture.md`
-- `references/nesting-and-splitting.md`
-- `references/field-conversions.md`
-- `references/action-conversions.md`
-- `references/aws-managed-rules.md`
-- `references/common-mistakes.md`
+- `~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/references/terraform-architecture.md`
+- `~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/references/nesting-and-splitting.md`
+- `~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/references/field-conversions.md`
+- `~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/references/action-conversions.md`
+- `~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/references/aws-managed-rules.md`
+- `~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/references/common-mistakes.md`

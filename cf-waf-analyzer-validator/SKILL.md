@@ -7,6 +7,12 @@ metadata:
 
 # Cloudflare WAF Analyzer Validator
 
+## Available Tools
+
+You have these tools: `glob`, `fs_read`, `fs_write`, `grep`. Use `glob` for directory listing and file discovery. Use `fs_read` for reading files. You do NOT have access to `execute_bash` or shell commands.
+
+---
+
 Validate `cloudflare-to-aws-waf/waf_ir.json` by cross-checking it against the original Cloudflare configuration files. V1/V2/V3 modes only report issues (do NOT modify waf_ir.json). V4 mode applies all fixes serially and writes the final report.
 
 **Language Adaptation**: Write output files in the language specified in the query. Default to English.
@@ -66,9 +72,9 @@ Report JSON format (V1/V2/V3):
 
 ## Reference Documents
 
-- **V1**: `references/field-conversions.md`, `references/non-convertible-rules.md`
-- **V2**: `references/action-conversions.md`, `references/field-conversions.md`, `references/non-convertible-rules.md`, `references/nesting-and-splitting.md`
-- **V3**: `references/action-conversions.md`, `references/common-mistakes.md`
+- **V1**: `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/references/field-conversions.md`, `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/references/non-convertible-rules.md`
+- **V2**: `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/references/action-conversions.md`, `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/references/field-conversions.md`, `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/references/non-convertible-rules.md`, `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/references/nesting-and-splitting.md`
+- **V3**: `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/references/action-conversions.md`, `~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/references/common-mistakes.md`
 - **V4**: No references needed
 
 ## Workflow

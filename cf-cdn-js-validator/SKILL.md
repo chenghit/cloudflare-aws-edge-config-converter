@@ -12,6 +12,12 @@ metadata:
 
 # cf-cdn-js-validator (Validator V3)
 
+## Available Tools
+
+You have these tools: `glob`, `fs_read`, `fs_write`, `grep`, `execute_bash`. Use `glob` for directory listing and file discovery. Use `fs_read` for reading files. Use `execute_bash` for running validation commands.
+
+---
+
 Validates ALL JavaScript files generated for a domain's CloudFront Functions
 and Lambda@Edge handlers. This is a pure validation pass — it reports failures
 but **never modifies files** and **never suggests fixes**.
@@ -97,8 +103,8 @@ least one file was validated (an empty domain is itself a FAIL — see Step 2).
 
 Before running any checks, read:
 
-1. `references/unsupported-syntax.md` — tested forbidden ES6+ features.
-2. `references/validation-checklist.md` — complete validation checklist.
+1. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-js-validator/references/unsupported-syntax.md` — tested forbidden ES6+ features.
+2. `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-js-validator/references/validation-checklist.md` — complete validation checklist.
 3. The domain's IR: `cloudflare-to-aws-cdn/ir/final/<hostname>.json`
    — to understand whether Lambda@Edge escalation was expected, whether KVS is
    in use, and which ops should be present.
@@ -463,8 +469,8 @@ treat any field not present in V3 schema as ignored.
 
 ## Reference Documents
 
-- `references/unsupported-syntax.md` — **MUST READ.** Tested forbidden ES6+ features (optional chaining, destructuring) with evidence from live testing. These cause silent runtime errors.
-- `references/validation-checklist.md` — Complete validation checklist covering syntax, async ops, rule execution order, continent logic, bulk redirects, query string handling.
+- `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-js-validator/references/unsupported-syntax.md` — **MUST READ.** Tested forbidden ES6+ features (optional chaining, destructuring) with evidence from live testing. These cause silent runtime errors.
+- `~/.kiro/skills/cloudflare-aws-converter/cf-cdn-js-validator/references/validation-checklist.md` — Complete validation checklist covering syntax, async ops, rule execution order, continent logic, bulk redirects, query string handling.
 - `cloudflare-to-aws-cdn/ir/final/<hostname>.json` — domain IR
 - CloudFront Functions Runtime 2.0 developer guide (JavaScript constraints)
 - Lambda@Edge developer guide (Node.js runtime, event shape)
