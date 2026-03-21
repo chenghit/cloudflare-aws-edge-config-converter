@@ -51,7 +51,7 @@ rm -f "$AGENTS_DIR/cf-cdn-ir-chunk-validator.json"
 rm -f "$AGENTS_DIR/cf-cdn-ir-finalizer.json"
 rm -f "$AGENTS_DIR/cf-cdn-ir-final-validator.json"
 rm -f "$AGENTS_DIR/cf-cdn-tf-shared-policies.json"
-cp subagents/cloudflare-aws-converter.json "$AGENTS_DIR/"
+rm -f "$AGENTS_DIR/cloudflare-aws-converter.json"
 cp subagents/cf-waf-analyzer.json "$AGENTS_DIR/"
 cp subagents/cf-waf-analyzer-validator.json "$AGENTS_DIR/"
 cp subagents/cf-waf-terraform-generator.json "$AGENTS_DIR/"
@@ -64,30 +64,17 @@ echo ""
 echo "✅ Installation complete!"
 echo ""
 
-# Detect Kiro CLI version and show appropriate start command
-KIRO_VERSION=""
+# Detect Kiro CLI version and warn about 1.28.0
 if command -v kiro-cli &>/dev/null; then
-  KIRO_VERSION=$(kiro-cli --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
+  KIRO_FULL=$(kiro-cli --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  if [ "$KIRO_FULL" = "1.28.0" ]; then
+    echo "⚠️  Kiro CLI 1.28.0 detected — this version has known bugs that break"
+    echo "   subagent pipelines (#4751, #6163). Please upgrade to 1.28.1+:"
+    echo ""
+    echo "   curl -fsSL https://cli.kiro.dev/install | bash"
+    echo ""
+  fi
 fi
 
-KIRO_MAJOR=$(echo "$KIRO_VERSION" | cut -d. -f1)
-KIRO_MINOR=$(echo "$KIRO_VERSION" | cut -d. -f2)
-
-if [ -n "$KIRO_MAJOR" ] && [ "$KIRO_MAJOR" -ge 1 ] && [ "$KIRO_MINOR" -ge 28 ] 2>/dev/null; then
-  echo "⚠️  Kiro CLI $KIRO_MAJOR.$KIRO_MINOR detected."
-  echo "   Version 1.28+ has a subagent permission issue (https://github.com/kirodotdev/Kiro/issues/4751)"
-  echo "   that requires --trust-all-tools to avoid shell approval prompts blocking the pipeline."
-  echo ""
-  echo "To start a conversion:"
-  echo "  kiro-cli chat --agent cloudflare-aws-converter --trust-all-tools"
-elif [ -n "$KIRO_MAJOR" ]; then
-  echo "Kiro CLI $KIRO_MAJOR.$KIRO_MINOR detected."
-  echo ""
-  echo "To start a conversion:"
-  echo "  kiro-cli chat"
-else
-  echo "To start a conversion:"
-  echo "  kiro-cli chat --agent cloudflare-aws-converter --trust-all-tools"
-  echo ""
-  echo "  Kiro CLI 1.24-1.27 users can also use: kiro-cli chat"
-fi
+echo "To start a conversion:"
+echo "  kiro-cli chat"

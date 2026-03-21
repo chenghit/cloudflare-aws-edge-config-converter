@@ -19,8 +19,7 @@ cd cloudflare-aws-edge-config-converter
 ./install.sh
 
 # 4. Start conversion
-kiro-cli chat --agent cloudflare-aws-converter --trust-all-tools
-# Kiro CLI 1.24–1.27 users can also use: kiro-cli chat
+kiro-cli chat
 ```
 
 Then describe what you want:
@@ -37,7 +36,7 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 
 ## Prerequisites
 
-- **Kiro CLI** >= 1.24 — [Installation guide](https://kiro.dev/docs/getting-started/installation/). ⚠️ Kiro IDE is not recommended (does not support `skill://` resource binding in subagents). **Kiro CLI 1.28+ users:** A [subagent permission issue](https://github.com/kirodotdev/Kiro/issues/4751) causes shell approval prompts that block the pipeline. Add `--trust-all-tools` to work around this. See [CHANGELOG.md](./CHANGELOG.md) for details.
+- **Kiro CLI** >= 1.24 — [Installation guide](https://kiro.dev/docs/getting-started/installation/). ⚠️ Kiro IDE is not recommended (does not support `skill://` resource binding in subagents). **Avoid Kiro CLI 1.28.0** — it has two bugs ([#4751](https://github.com/kirodotdev/Kiro/issues/4751), [#6163](https://github.com/kirodotdev/Kiro/issues/6163)) that break subagent pipelines. Both are fixed in 1.28.1.
 - **Terraform** >= 1.8.0 with AWS Provider >= 6.x — [Install Terraform](https://developer.hashicorp.com/terraform/install). Note: `terraform validate` (run automatically after WAF generation) requires internet access on first run to download the AWS provider (~300MB).
 - **Python 3** — Required by both WAF and CDN pipeline scripts. WAF uses Python for IP list/access rule analysis and helper scripts for count validation and JSON chunking. CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–7.6) — these replaced LLM subagents for deterministic, sub-second processing. Pre-installed on macOS and most Linux distributions. No third-party packages needed for the conversion pipeline (stdlib only). **Post-conversion**: CDN domains with KVS (bulk redirects, IP lists, error pages) generate a `seed-kvs.py` script that requires `boto3` — install with `pip install boto3` before deploying.
 - **Model**: `claude-sonnet-4.6-1m` minimum. Switch with `/model` in Kiro.
@@ -218,25 +217,16 @@ For advanced users: `/agent swap <subagent-name>` to run individual pipeline sta
 
 ## Subagent Permissions and Security
 
-### Subagent runtime limitations (Kiro CLI 1.28+)
+Most subagents only have file I/O and search permissions (`fs_read`, `fs_write`, `glob`, `grep`). One subagent requires shell execution:
 
-Kiro CLI subagents run in a restricted runtime with only `read`, `write`, `shell`, and `code` tools — they do not have access to `glob` or `grep` ([docs](https://kiro.dev/docs/cli/chat/subagents/#tool-availability)). Since Kiro CLI 1.28, each `shell` call inside a subagent triggers an interactive approval prompt, blocking the automated pipeline ([#4751](https://github.com/kirodotdev/Kiro/issues/4751)). Neither `trustedAgents`, `allowedTools`, nor `--trust-tools` currently suppress subagent internal tool approval ([#5071](https://github.com/kirodotdev/Kiro/issues/5071)).
+| Subagent | Has `execute_bash` | Why |
+|----------|-------------------|-----|
+| `cf-cdn-js-validator` | ✅ Yes | Runs `node --check <file>` for JavaScript syntax validation and `wc -c` for file size checks. These are the only two commands it needs — there is no way to validate JS syntax or measure byte-accurate file size with file I/O tools alone. |
+| All other subagents | ❌ No | Only need to read/write files and search text. |
 
-**The only working workaround is `--trust-all-tools`:**
-```bash
-kiro-cli chat --agent cloudflare-aws-converter --trust-all-tools
-```
+**If your security policy flags `execute_bash`:** You can review the validator's SKILL.md to confirm it only runs `node --check` and `wc -c`. Removing `execute_bash` from `cf-cdn-js-validator.json` will disable JS syntax checking (CFF-01, LE-01) and byte-accurate size validation (CFF-06, LE-03) — the validator will skip these checks and report them as `SKIP` in the output JSON.
 
-This is a Kiro CLI limitation, not a design choice of this tool. Kiro CLI 1.24–1.27 users are not affected.
-
-### Subagent tool access
-
-All subagents have the same runtime tools (`read`, `write`, `shell`, `code`). The `cf-cdn-js-validator` is the only subagent that intentionally uses `shell` for validation:
-
-| Subagent | Uses `shell` | Why |
-|----------|-------------|-----|
-| `cf-cdn-js-validator` | ✅ Intentionally | Runs `node --check <file>` for JS syntax validation and `wc -c` for file size checks. |
-| All other subagents | ⚠️ Incidentally | May use `ls` for directory discovery since `glob` is not available in subagent runtime. |
+> **Note:** Kiro CLI 1.28.0 had two bugs that broke subagent pipelines: shell approval blocking ([#4751](https://github.com/kirodotdev/Kiro/issues/4751)) and subagent result return failure ([#6163](https://github.com/kirodotdev/Kiro/issues/6163)). Both are fixed in 1.28.1. If you encounter subagent issues, check your Kiro CLI version with `kiro-cli --version`.
 
 ## More Information
 

@@ -19,8 +19,7 @@ cd cloudflare-aws-edge-config-converter
 ./install.sh
 
 # 4. 开始转换
-kiro-cli chat --agent cloudflare-aws-converter --trust-all-tools
-# Kiro CLI 1.24–1.27 用户也可以直接用：kiro-cli chat
+kiro-cli chat
 ```
 
 然后描述你的需求：
@@ -37,7 +36,7 @@ kiro-cli chat --agent cloudflare-aws-converter --trust-all-tools
 
 ## 前提条件
 
-- **Kiro CLI** >= 1.24 — [安装文档](https://kiro.dev/docs/getting-started/installation/)。⚠️ 不推荐使用 Kiro IDE（不支持 subagent 中的 `skill://` 资源绑定）。**Kiro CLI 1.28+ 用户：** 1.28 引入的 [subagent 权限问题](https://github.com/kirodotdev/Kiro/issues/4751) 会导致 shell 审批提示阻塞 pipeline。添加 `--trust-all-tools` 解决。详见 [CHANGELOG.md](./CHANGELOG.md)。
+- **Kiro CLI** >= 1.24 — [安装文档](https://kiro.dev/docs/getting-started/installation/)。⚠️ 不推荐使用 Kiro IDE（不支持 subagent 中的 `skill://` 资源绑定）。**避免使用 Kiro CLI 1.28.0** — 该版本有两个 bug（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)、[#6163](https://github.com/kirodotdev/Kiro/issues/6163)）会导致 subagent pipeline 无法运行，已在 1.28.1 中修复。
 - **Terraform** >= 1.8.0，AWS Provider >= 6.x — [安装 Terraform](https://developer.hashicorp.com/terraform/install)。注意：`terraform validate`（WAF 生成后自动运行）首次运行需要联网下载 AWS provider（约 300MB）。
 - **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF 用 Python 做 IP 列表/访问规则分析，以及辅助脚本做 count 校验和 JSON 切分。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）——这些替代了 LLM subagent，实现确定性的亚秒级处理。macOS 和大多数 Linux 发行版已预装。转换流程无需第三方包（仅用标准库）。**部署阶段**：有 KVS 的 CDN 域名（批量重定向、IP 列表、错误页面）会生成 `seed-kvs.py` 脚本，需要 `boto3`——部署前运行 `pip install boto3` 安装。
 - **模型**：最低 `claude-sonnet-4.6-1m`。在 Kiro 中通过 `/model` 切换。
@@ -216,25 +215,18 @@ cd cloudflare-aws-edge-config-converter
 
 ## Subagent 权限与安全
 
-### Subagent 运行时限制（Kiro CLI 1.28+）
+## Subagent 权限与安全
 
-Kiro CLI 的 subagent 运行在受限环境中，只有 `read`、`write`、`shell`、`code` 四个工具——没有 `glob` 和 `grep`（[文档](https://kiro.dev/docs/cli/chat/subagents/#tool-availability)）。从 Kiro CLI 1.28 起，subagent 内部的每次 `shell` 调用都会弹出交互式审批提示，阻塞自动化 pipeline（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)）。`trustedAgents`、`allowedTools`、`--trust-tools` 目前都无法跳过 subagent 内部的工具审批（[#5071](https://github.com/kirodotdev/Kiro/issues/5071)）。
+大多数 subagent 只有文件读写和搜索权限（`fs_read`、`fs_write`、`glob`、`grep`）。只有一个 subagent 需要 shell 执行权限：
 
-**唯一有效的解决方法是 `--trust-all-tools`：**
-```bash
-kiro-cli chat --agent cloudflare-aws-converter --trust-all-tools
-```
+| Subagent | 有 `execute_bash` | 原因 |
+|----------|-------------------|------|
+| `cf-cdn-js-validator` | ✅ 有 | 运行 `node --check <file>` 做 JavaScript 语法检查，以及 `wc -c` 做文件大小检查。这是它唯一需要的两个命令——仅靠文件读写工具无法完成 JS 语法校验和精确的字节大小测量。 |
+| 其他所有 subagent | ❌ 无 | 只需要读写文件和搜索文本。 |
 
-这是 Kiro CLI 的限制，不是本工具的设计选择。Kiro CLI 1.24–1.27 用户不受影响。
+**如果你的安全策略对 `execute_bash` 有告警：** 你可以查看该 validator 的 SKILL.md 确认它只运行 `node --check` 和 `wc -c`。从 `cf-cdn-js-validator.json` 中移除 `execute_bash` 会导致 JS 语法检查（CFF-01、LE-01）和精确文件大小校验（CFF-06、LE-03）被禁用——validator 会跳过这些检查并在输出 JSON 中标记为 `SKIP`。
 
-### Subagent 工具权限
-
-所有 subagent 拥有相同的运行时工具（`read`、`write`、`shell`、`code`）。`cf-cdn-js-validator` 是唯一有意使用 `shell` 做校验的 subagent：
-
-| Subagent | 使用 `shell` | 原因 |
-|----------|-------------|------|
-| `cf-cdn-js-validator` | ✅ 有意使用 | 运行 `node --check <file>` 做 JS 语法校验，`wc -c` 做文件大小检查。 |
-| 其他所有 subagent | ⚠️ 附带使用 | 可能使用 `ls` 探索目录结构，因为 subagent 运行时没有 `glob`。 |
+> **注意：** Kiro CLI 1.28.0 有两个导致 subagent pipeline 无法运行的 bug：shell 审批阻塞（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)）和 subagent 结果返回失败（[#6163](https://github.com/kirodotdev/Kiro/issues/6163)）。两个 bug 均已在 1.28.1 中修复。如果遇到 subagent 问题，请用 `kiro-cli --version` 检查版本。
 
 ## 更多信息
 
