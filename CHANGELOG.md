@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — 2026-03-21
+## 2026-03-21
 
 ### Known Issue: Kiro CLI 1.28.0
 
