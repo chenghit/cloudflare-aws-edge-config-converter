@@ -45,11 +45,12 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 - **Kiro CLI** >= 1.24 — [Installation guide](https://kiro.dev/docs/getting-started/installation/). ⚠️ Kiro IDE is not recommended (does not support `skill://` resource binding in subagents). **Avoid Kiro CLI 1.28.0** — it has two bugs ([#4751](https://github.com/kirodotdev/Kiro/issues/4751), [#6163](https://github.com/kirodotdev/Kiro/issues/6163)) that break subagent pipelines. Both are fixed in 1.28.1.
 - **Terraform** >= 1.8.0 with AWS Provider >= 6.x — [Install Terraform](https://developer.hashicorp.com/terraform/install). Note: `terraform validate` (run automatically after WAF generation) requires internet access on first run to download the AWS provider (~300MB).
 - **Python 3** — Required by both WAF and CDN pipeline scripts. WAF uses Python for IP list/access rule analysis and helper scripts for count validation and JSON chunking. CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–7.6) — these replaced LLM subagents for deterministic, sub-second processing. Pre-installed on macOS and most Linux distributions. No third-party packages needed for the conversion pipeline (stdlib only). **Post-conversion**: CDN domains with KVS (bulk redirects, IP lists, error pages) generate a `seed-kvs.py` script that requires `boto3` — install with `pip install boto3` before deploying.
-- **Model**: `claude-sonnet-4.6-1m` minimum. Switch with `/model` in Kiro.
+- **Model**: `claude-sonnet-4.6-1m` minimum. Switch with `/model` in Kiro. Kiro CLI only supports Claude models on Amazon Bedrock.
   - **WAF migration**: `claude-sonnet-4.6-1m` for ≤ 100 rules, `claude-opus-4.6-1m` for > 100 rules. "Rules" = WAF Custom Rules + Rate Limiting Rules + IP Access Rules total. WAF pipeline supports up to ~200 CF rules; beyond that, consider simplifying rules in Cloudflare first or manual migration. The bottleneck for large rule sets is the Terraform generator's output — AWS WAF requires splitting Cloudflare rules that use top-level OR logic or mixed IPv4/IPv6 IP lists into multiple AWS WAF rules (e.g., a rule with 3 OR branches and mixed IPs becomes 6 AWS WAF rules). Typical split ratio is ~2x; simple zones ~1.5x, complex zones with many OR + mixed IP rules up to 3x. Each AWS WAF rule generates ~150 output tokens of HCL:
     - Sonnet 4.6 max output: 64K tokens → safe for ~200 AWS WAF rules (~100 CF rules)
     - Opus 4.6 max output: 128K tokens → safe for ~400 AWS WAF rules (~200 CF rules)
   - **CDN migration**: `claude-sonnet-4.6-1m` regardless of domain count. CDN Stages 3–7.6 are Python scripts (no LLM cost). The remaining LLM stages (DNS parsing, input validation, JS generation, JS validation) each process one domain independently and generate ~200 lines of output, well within Sonnet's 64K output limit. Opus is not needed for token capacity, but consider switching to Opus if Sonnet produces incorrect JavaScript for complex Cloudflare expressions (regex_replace, wildcard_replace with capture groups).
+  - For a full list of compatible models (including options for other agent frameworks), see [Supported Models](./docs/supported-models.md).
 - **ACM certificates** (CDN only): CloudFront requires certs in us-east-1. Provision wildcard certificates (e.g., `*.example.com`) before running, or leave blank in the CSV to let Terraform auto-discover existing ISSUED certs.
 - **Input format**: Only works with [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) exports. NOT compatible with [cf-terraforming](https://github.com/cloudflare/cf-terraforming) — see [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md).
 
@@ -237,6 +238,7 @@ Most subagents only have file I/O and search permissions (`fs_read`, `fs_write`,
 ## More Information
 
 - [Best Practices](./docs/best-practices.md)
+- [Supported Models](./docs/supported-models.md)
 - [Deployment Guide](./docs/deployment-guide.md)
 - [Limitations and Caveats](./docs/limitations.md)
 - [Troubleshooting](./docs/troubleshooting.md)
