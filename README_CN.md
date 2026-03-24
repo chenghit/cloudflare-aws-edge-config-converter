@@ -224,7 +224,13 @@ cd cloudflare-aws-edge-config-converter
 > # 1. 批量替换所有 SKILL.md 中的 skill 路径（subagent 之间通过绝对路径互相引用）
 > find . -name 'SKILL.md' | xargs sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g'
 >
-> # 2. 编辑 install.sh（或 install.bat）——修改文件开头的 SKILLS_DIR 和 AGENTS_DIR 变量
+> # 2. 替换 subagent 配置文件中的 skill 路径（subagents/*.json）
+> # 注意：这些文件使用 Kiro 的 skill:// 协议进行资源绑定。
+> # 如果你的 agent 工具使用不同的机制，可能需要重写这些 JSON 文件——
+> # 以下 sed 命令只替换目录路径。
+> sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g' subagents/*.json
+>
+> # 3. 编辑 install.sh（或 install.bat）——修改文件开头的 SKILLS_DIR 和 AGENTS_DIR 变量
 > ```
 
 高级用户可通过 `/agent swap <subagent-name>` 单独运行各流程阶段。可用 subagent：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。CDN Stage 3–7.6 为 Python 脚本（非 subagent），直接通过 `python3` 运行。

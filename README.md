@@ -226,7 +226,13 @@ Update: `git pull && ./install.sh`
 > # 1. Replace skill path in all SKILL.md files (subagent cross-references)
 > find . -name 'SKILL.md' | xargs sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g'
 >
-> # 2. Edit install.sh (or install.bat) — change SKILLS_DIR and AGENTS_DIR at the top of the file
+> # 2. Replace skill path in subagent config files (subagents/*.json)
+> # Note: these files use Kiro's skill:// protocol for resource binding.
+> # If your agent tool uses a different mechanism, you may need to rewrite
+> # these JSON files entirely — the sed command only fixes the directory path.
+> sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g' subagents/*.json
+>
+> # 3. Edit install.sh (or install.bat) — change SKILLS_DIR and AGENTS_DIR at the top of the file
 > ```
 
 For advanced users: `/agent swap <subagent-name>` to run individual pipeline stages. Available subagents: `cf-waf-analyzer`, `cf-waf-analyzer-validator`, `cf-waf-terraform-generator`, `cf-cdn-dns-parser`, `cf-cdn-input-validator`, `cf-cdn-tf-domain`, `cf-cdn-js-validator`. CDN Stages 3–7.6 are Python scripts (not subagents) — run them directly via `python3`.
