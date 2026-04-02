@@ -146,9 +146,28 @@ def gen_orp(pid, config):
     return "\n".join(lines)
 
 
-# ── Response headers policy ──────────────────────────────────────────────────
+# Default TLD wildcard list for CORS credentials=true + origin=* workaround.
+# CloudFront rejects literal "*" with credentials=true. Instead, we use TLD
+# wildcard patterns (e.g., "*.com") which CloudFront matches against the
+# request Origin header and echoes back the exact origin value.
+# Scheme-agnostic: "*.com" matches both http:// and https:// origins.
+# Limitation: does not match origins with non-standard ports (e.g., :8080).
+# Users can add/remove TLDs in the generated policies.tf as needed.
+CORS_WILDCARD_TLDS = [
+    # Generic TLDs
+    "*.com", "*.net", "*.org", "*.info", "*.biz", "*.xyz", "*.top",
+    "*.site", "*.online", "*.store", "*.app", "*.dev", "*.io", "*.ai",
+    "*.co", "*.me", "*.cc", "*.tv", "*.link", "*.cloud",
+    # Country/region TLDs
+    "*.cn", "*.uk", "*.de", "*.jp", "*.fr", "*.au", "*.ca", "*.br",
+    "*.in", "*.kr", "*.ru", "*.it", "*.es", "*.nl", "*.eu", "*.tw",
+    "*.hk", "*.sg", "*.se", "*.ch", "*.pl", "*.be", "*.at", "*.dk",
+    "*.fi", "*.no", "*.nz", "*.za", "*.mx", "*.ar", "*.th", "*.vn",
+    "*.id", "*.ph", "*.my", "*.pt", "*.ie", "*.cz", "*.il", "*.us",
+]
 
-def gen_rhp(pid, config):
+
+def gen_rhp(pid, config, zone_tld=None):
     sec = config.get("security_headers", {})
     custom = config.get("custom_headers", [])
     cors = config.get("cors")
@@ -167,75 +186,116 @@ def gen_rhp(pid, config):
     # CORS
     if cors and isinstance(cors, dict):
         allow_creds = cors.get("Access-Control-Allow-Credentials") == "true"
+        # Determine origin_override from Cloudflare operation (set=true, add=false)
+        origin_override = cors.get("_origin_override", True)  # default true (set)
         w('')
         w('  cors_config {')
         w(f'    access_control_allow_credentials = {"true" if allow_creds else "false"}')
 
         origins = cors.get("Access-Control-Allow-Origin", "*")
         origin_list = [o.strip() for o in origins.split(",")]
-        # CloudFront: * not allowed for origins when credentials=true
+
         if allow_creds and "*" in origin_list:
-            origin_list = [o for o in origin_list if o != "*"] or ["https://example.com"]
-            if origin_list == ["https://example.com"]:
-                w('    # WARNING: You MUST replace https://example.com with your actual origin domain(s).')
-                w('    # Cloudflare allowed credentials=true with wildcard origin, but CloudFront')
-                w('    # requires explicit origins per HTTP spec. Example: ["https://app.example.com"]')
-            else:
-                w('    # NOTE: Wildcard * removed from origins (credentials=true). Verify remaining origins.')
+            # Workaround: replace "*" with TLD wildcard patterns
+            # CloudFront echoes back the exact request Origin when a pattern matches
+            tld_list = list(CORS_WILDCARD_TLDS)
+            # Ensure the zone's own TLD is included
+            if zone_tld:
+                zone_pattern = f"*.{zone_tld}"
+                if zone_pattern not in tld_list:
+                    tld_list.append(zone_pattern)
+            # Keep any non-wildcard origins from the original list
+            explicit_origins = [o for o in origin_list if o != "*"]
+            origin_list = sorted(set(tld_list + explicit_origins))
+            w('    # Cloudflare allowed credentials=true with wildcard origin (*), but')
+            w('    # CloudFront requires explicit origins per CORS spec. Using TLD wildcard')
+            w('    # patterns as workaround — CloudFront echoes back the exact request Origin.')
+            w('    # Add or remove TLD patterns as needed for your use case.')
+            w('    # NOTE: Does not match origins with non-standard ports (e.g., :8080).')
+            if not origin_override:
+                w('    # Cloudflare operation was "add" (not "set"): when the request has no')
+                w('    # Origin header, CloudFront will not return CORS headers. This differs')
+                w('    # from Cloudflare which adds CORS headers unconditionally. This only')
+                w('    # affects non-browser clients (curl, SDKs) — browsers always send Origin')
+                w('    # for cross-origin requests.')
+        elif not allow_creds and "*" in origin_list:
+            # credentials=false with * is fine — CloudFront allows it
+            pass
+        elif allow_creds and "*" not in origin_list:
+            # Explicit origins with credentials — no workaround needed
+            pass
+
         w(f'    access_control_allow_origins {{ items = {hcl_list(origin_list)} }}')
 
         methods = cors.get("Access-Control-Allow-Methods", "GET, HEAD")
         method_list = [m.strip() for m in methods.split(",")]
-        # CloudFront requires explicit method names, not wildcard
         if "*" in method_list:
             method_list = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
         w(f'    access_control_allow_methods {{ items = {hcl_list(method_list)} }}')
 
         allow_headers = cors.get("Access-Control-Allow-Headers", "*")
         header_list = [h.strip() for h in allow_headers.split(",")]
-        # CloudFront: * not allowed for headers when credentials=true
         if allow_creds and "*" in header_list:
             header_list = [h for h in header_list if h != "*"] or ["Authorization", "Content-Type", "Origin", "Accept", "X-Requested-With"]
             w('    # NOTE: Wildcard headers replaced with common set (credentials=true).')
             w('    # Add any additional headers your application requires.')
         w(f'    access_control_allow_headers {{ items = {hcl_list(header_list)} }}')
-        w(f'    origin_override = true')
+        w(f'    origin_override = {"true" if origin_override else "false"}')
         w('  }')
 
     # Security headers
     if sec:
         w('')
         w('  security_headers_config {')
-        if "X-Content-Type-Options" in sec:
-            w('    content_type_options { override = true }')
-        if "X-Frame-Options" in sec:
-            val = sec["X-Frame-Options"].upper()
+        # Extract value — support both old format (string) and new format ({value, operation})
+        def _sec_val(key):
+            v = sec.get(key)
+            if v is None:
+                return None, True
+            if isinstance(v, dict):
+                return v.get("value", ""), v.get("operation", "set") == "set"
+            return v, True  # legacy string format → default override=true
+
+        val, override = _sec_val("X-Content-Type-Options")
+        if val is not None:
+            w(f'    content_type_options {{ override = {"true" if override else "false"} }}')
+
+        val, override = _sec_val("X-Frame-Options")
+        if val is not None:
             w(f'    frame_options {{')
-            w(f'      frame_option = "{val}"')
-            w(f'      override     = true')
+            w(f'      frame_option = "{val.upper()}"')
+            w(f'      override     = {"true" if override else "false"}')
             w(f'    }}')
-        if "Strict-Transport-Security" in sec:
+
+        val, override = _sec_val("Strict-Transport-Security")
+        if val is not None:
             w('    strict_transport_security {')
             w('      access_control_max_age_sec = 31536000')
             w('      include_subdomains         = true')
             w('      preload                    = false')
-            w('      override                   = true')
+            w(f'      override                   = {"true" if override else "false"}')
             w('    }')
-        if "Referrer-Policy" in sec:
+
+        val, override = _sec_val("Referrer-Policy")
+        if val is not None:
             w(f'    referrer_policy {{')
-            w(f'      referrer_policy = "{sec["Referrer-Policy"]}"')
-            w(f'      override        = true')
+            w(f'      referrer_policy = "{val}"')
+            w(f'      override        = {"true" if override else "false"}')
             w(f'    }}')
-        if "X-XSS-Protection" in sec:
+
+        val, override = _sec_val("X-XSS-Protection")
+        if val is not None:
             w('    xss_protection {')
             w('      mode_block  = true')
-            w('      override    = true')
+            w(f'      override    = {"true" if override else "false"}')
             w('      protection  = true')
             w('    }')
-        if "Content-Security-Policy" in sec:
+
+        val, override = _sec_val("Content-Security-Policy")
+        if val is not None:
             w(f'    content_security_policy {{')
-            w(f'      content_security_policy = "{sec["Content-Security-Policy"]}"')
-            w(f'      override                = true')
+            w(f'      content_security_policy = "{val}"')
+            w(f'      override                = {"true" if override else "false"}')
             w(f'    }}')
         w('  }')
 
@@ -244,10 +304,11 @@ def gen_rhp(pid, config):
         w('')
         w('  custom_headers_config {')
         for ch in custom:
+            op = ch.get("operation", "set")
             w(f'    items {{')
             w(f'      header   = "{ch["name"]}"')
             w(f'      value    = "{ch.get("value", "")}"')
-            w(f'      override = true')
+            w(f'      override = {"true" if op == "set" else "false"}')
             w(f'    }}')
         w('  }')
 
@@ -319,6 +380,19 @@ def main():
     with open(manifest_path) as f:
         manifest = json.load(f)
 
+    # Extract zone TLD from domain_scope.json for CORS wildcard workaround
+    zone_tld = None
+    scope_path = os.path.join(output_dir, "domain_scope.json")
+    if os.path.exists(scope_path):
+        try:
+            with open(scope_path) as f:
+                scope = json.load(f)
+            zone_name = scope.get("zone_name", "")
+            if "." in zone_name:
+                zone_tld = zone_name.rsplit(".", 1)[-1]
+        except (json.JSONDecodeError, KeyError):
+            pass
+
     policies = manifest.get("policies", {})
     if not policies:
         with open(out_path, "w") as f:
@@ -349,7 +423,7 @@ def main():
         elif ptype == "origin_request_policy":
             sections.append(gen_orp(pid, config))
         elif ptype == "response_headers_policy":
-            result = gen_rhp(pid, config)
+            result = gen_rhp(pid, config, zone_tld=zone_tld)
             if result:
                 sections.append(result)
             else:

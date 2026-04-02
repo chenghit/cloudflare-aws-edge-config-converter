@@ -54,6 +54,17 @@ CDN pipeline 把以下 Cloudflare 规则类型转换为 CloudFront 等价物：
 | 非 path 表达式的 Cloud Connector | Cloud Connector | CloudFront cache behaviors 只能按 path pattern 匹配 | 手动配置 origin |
 | 不允许/只读的 response headers | Response Header Transform | CloudFront 限制修改某些 headers（`Via`、`X-Amz-Cf-*` 等） | N/A |
 
+### CORS `credentials: true` + 通配符 origin
+
+Cloudflare 允许 `Access-Control-Allow-Credentials: true` 与 `Access-Control-Allow-Origin: *` 同时使用。CloudFront 的 Response Headers Policy 按照 CORS 规范拒绝此组合。
+
+工具通过 TLD 通配符模式（`*.com`、`*.net`、`*.io` 等约 60 个常见 TLD）替代 `*` 来解决此问题。CloudFront 将请求的 `Origin` header 与这些模式匹配，并回显实际的 origin 值，符合 CORS 规范。
+
+限制：
+- 不在默认列表中的 TLD 的 origin 不会匹配。按需在 `policies.tf` 中添加模式。
+- 不带 scheme 的通配符模式（`*.com`）不匹配带非标准端口的 origin（如 `http://example.com:8080`）。CloudFront 仅在 80/443 端口提供服务，因此这只影响来自非标准端口 origin 的跨域请求。
+- 当 Cloudflare 规则使用 `add` 操作（而非 `set`）时，`origin_override` 设为 `false`。此模式下，CloudFront 仅在请求包含 `Origin` header 时返回 CORS headers。Cloudflare 无论请求是否包含 `Origin` header 都会添加 CORS headers。此差异仅影响非浏览器客户端（curl、SDK 等）— 浏览器在跨域请求时始终发送 `Origin`。
+
 ### CloudFront Function 大小限制
 
 CloudFront Functions 压缩后有 10 KB 大小限制。当域名的 `viewer_request.js` 超过此限制时：

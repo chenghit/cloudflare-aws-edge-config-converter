@@ -398,12 +398,21 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         # Static header → RHP on default behavior
         default_beh = ir["cache_behaviors"][0]
         params = result["params"]
+        op = params.get("operation", "set")
         if params.get("is_cors"):
             if default_beh["response_headers_policy"]["cors"] is None:
                 default_beh["response_headers_policy"]["cors"] = {}
             default_beh["response_headers_policy"]["cors"][params["name"]] = params["value"]
+            # Track if any CORS header uses "add" (origin_override = false).
+            # If mixed set/add across multiple rules, we use false (conservative
+            # — don't override origin). CloudFront cors_config.origin_override
+            # is per-config, not per-header.
+            if op == "add":
+                default_beh["response_headers_policy"]["cors"]["_origin_override"] = False
         elif params.get("is_security"):
-            default_beh["response_headers_policy"]["security_headers"][params["name"]] = params["value"]
+            default_beh["response_headers_policy"]["security_headers"][params["name"]] = {
+                "value": params["value"], "operation": op,
+            }
         else:
             default_beh["response_headers_policy"]["custom_headers"].append({
                 "name": params["name"], "value": params["value"], "operation": params["operation"],
@@ -653,10 +662,10 @@ def _process_managed_transforms(ir, managed_transforms, default_beh):
     for h in resp_headers:
         if h.get("enabled") and h.get("id") == "add_security_headers":
             default_beh["response_headers_policy"]["security_headers"].setdefault(
-                "X-Content-Type-Options", "nosniff"
+                "X-Content-Type-Options", {"value": "nosniff", "operation": "add"}
             )
             default_beh["response_headers_policy"]["security_headers"].setdefault(
-                "X-Frame-Options", "SAMEORIGIN"
+                "X-Frame-Options", {"value": "SAMEORIGIN", "operation": "add"}
             )
 
 

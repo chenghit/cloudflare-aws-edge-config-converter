@@ -54,6 +54,17 @@ The CDN pipeline converts these Cloudflare rule types to CloudFront equivalents:
 | Cloud Connector with non-path expressions | Cloud Connector | CloudFront cache behaviors only match on path patterns | Manual origin configuration |
 | Disallowed/read-only response headers | Response Header Transform | CloudFront restricts modification of certain headers (`Via`, `X-Amz-Cf-*`, etc.) | N/A |
 
+### CORS with `credentials: true` and wildcard origin
+
+Cloudflare allows `Access-Control-Allow-Credentials: true` with `Access-Control-Allow-Origin: *`. CloudFront's Response Headers Policy rejects this combination per the CORS spec.
+
+The tool works around this by replacing `*` with TLD wildcard patterns (`*.com`, `*.net`, `*.io`, etc. — ~60 common TLDs). CloudFront matches the request `Origin` header against these patterns and echoes back the exact origin value, satisfying the CORS spec.
+
+Limitations:
+- Origins on TLDs not in the default list will not match. Add patterns to `policies.tf` as needed.
+- Scheme-less wildcard patterns (`*.com`) do not match origins with non-standard ports (e.g., `http://example.com:8080`). CloudFront only serves on ports 80/443, so this only affects cross-origin requests *from* non-standard-port origins.
+- When the Cloudflare rule used `add` operation (not `set`), `origin_override` is set to `false`. In this mode, CloudFront only returns CORS headers when the request contains an `Origin` header. Cloudflare adds CORS headers unconditionally regardless of request headers. This difference only affects non-browser clients (curl, SDKs) — browsers always send `Origin` for cross-origin requests.
+
 ### CloudFront Function size limit
 
 CloudFront Functions have a 10 KB size limit after minification. When a domain's `viewer_request.js` exceeds this limit:

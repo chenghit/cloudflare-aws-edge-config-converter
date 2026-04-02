@@ -354,15 +354,33 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         if cors.get("Access-Control-Allow-Credentials") == "true":
             origins = cors.get("Access-Control-Allow-Origin", "")
             headers = cors.get("Access-Control-Allow-Headers", "")
-            if "*" in origins or "*" in headers:
-                used = ", ".join(entry.get("used_by", [entry.get("sample_hostname", "?")]))
+            used = ", ".join(entry.get("used_by", [entry.get("sample_hostname", "?")]))
+            if "*" in origins:
                 all_warnings.append(
                     f"CORS policy {pid} (used by {used}): credentials=true with wildcard "
-                    f"origin/headers. CloudFront does not allow this per HTTP spec. "
-                    f"Wildcards were replaced with defaults — review and update with "
-                    f"your actual allowed origins/headers in policies.tf. "
-                    f"If you need wildcard origin with credentials, use CloudFront Functions "
-                    f"viewer-response to set CORS headers instead of Response Headers Policy."
+                    f"origin. Converted using TLD wildcard patterns (*.com, *.net, etc.) "
+                    f"which cover ~60 common TLDs. CloudFront echoes back the exact "
+                    f"request Origin value. Limitations: (1) Origins on unlisted TLDs "
+                    f"will not match — add patterns to policies.tf as needed. "
+                    f"(2) Origins with non-standard ports are not matched by scheme-less "
+                    f"wildcards. CloudFront only serves on ports 80/443, so this only "
+                    f"affects cross-origin requests FROM non-standard-port origins."
+                )
+            if "*" in origins and not cors.get("_origin_override", True):
+                all_warnings.append(
+                    f"CORS policy {pid} (used by {used}): Cloudflare operation was 'add' "
+                    f"(not 'set'). CloudFront cors_config with origin_override=false will "
+                    f"not add CORS headers when the request has no Origin header. This "
+                    f"differs from Cloudflare which adds headers unconditionally. Only "
+                    f"affects non-browser clients (curl, SDKs) — browsers always send "
+                    f"Origin for cross-origin requests."
+                )
+            if "*" in headers:
+                all_warnings.append(
+                    f"CORS policy {pid} (used by {used}): credentials=true with wildcard "
+                    f"headers. Replaced with common header set (Authorization, Content-Type, "
+                    f"Origin, Accept, X-Requested-With). Add additional headers in policies.tf "
+                    f"if your application requires them."
                 )
 
     # CFF associated with behaviors that have no path-specific ops
