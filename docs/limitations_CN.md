@@ -27,7 +27,8 @@ CDN pipeline 把以下 Cloudflare 规则类型转换为 CloudFront 等价物：
 | 项目 | 原因 | 替代方案 |
 |------|--------|-------------|
 | Page Rules (legacy) | Cloudflare 已弃用。先迁移到现代规则类型，再用本工具。 | Cloudflare 迁移指南 |
-| Snippets / Workers | 跑在 Cloudflare V8 runtime 上的任意 JavaScript/TypeScript 代码，不是声明式配置。可能用了 Cloudflare 专有 API（KV、Durable Objects、R2、D1），CloudFront 没有对应的。需要理解业务逻辑才能重写。 | 手动改写为 CloudFront Functions 或 Lambda@Edge。复杂的 Workers 可能需要 Lambda@Edge 或 CloudFront 后面挂独立 Lambda。 |
+| Snippets | 跑在 Cloudflare V8 runtime 上的 JavaScript 代码。虽然 Snippets 不能用存储绑定（KV、D1、R2、DO），但可以用 `fetch()`（子请求）、`HTMLRewriter` 和 `request.body`——这些在 CloudFront Functions 中都不可用。只操作 headers、URL 和 cookies 的 Snippets 理论上可以转换，但这些用例已经被 Cloudflare 的声明式规则类型（Redirect Rules、Transform Rules 等）覆盖，本工具已经在转换这些规则。用了 `fetch()`、`HTMLRewriter` 或 body 访问的 Snippets 需要 Lambda@Edge。 | 逐个评估每个 Snippet。简单的 header/URL 逻辑 → CloudFront Functions。`fetch()` 或 `HTMLRewriter` → Lambda@Edge。`request.cf.botManagement` → AWS WAF Bot Control。 |
+| Workers | 带完整 Cloudflare 平台绑定（KV、Durable Objects、R2、D1、Queues 等）的 TypeScript/JavaScript。任意业务逻辑，需要理解意图才能重写。 | Lambda@Edge 处理请求/响应。复杂的 Workers 可能需要 CloudFront 后面挂独立 Lambda，或完全重写应用。 |
 | URL Normalization | CloudFront 默认按 RFC 3986 标准化 URI，不需要转换。 | N/A |
 | Managed Transforms（True-Client-IP 除外） | Cloudflare 专有功能。 | CloudFront 原生等价物（如果有的话） |
 | Trace | Cloudflare 专有测试功能。 | CloudWatch Logs、CloudFront real-time logs |
