@@ -34,6 +34,11 @@ terraform {
     }
   }
 }
+
+# WAFv2 resources with scope=CLOUDFRONT must be created in us-east-1.
+provider "aws" {
+  region = "us-east-1"
+}
 EOF
 
 # modules/waf/variables.tf — fixed

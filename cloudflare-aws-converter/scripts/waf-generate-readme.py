@@ -107,6 +107,9 @@ def main():
         "",
         "## Important Notes",
         "",
+        "- **Region**: All WAFv2 resources with `scope = CLOUDFRONT` must be in `us-east-1`. "
+        "The generated `versions.tf` already sets `provider \"aws\" { region = \"us-east-1\" }`. "
+        "Do not override this with a different region.",
         "- **Two Web ACLs** are generated: one for website traffic (challenge actions enabled) "
         "and one for API/file traffic (challenge actions disabled, using block instead). "
         "Associate the appropriate ACL based on your traffic type.",
