@@ -208,33 +208,32 @@ def process_ip_access_rules(config_path):
             })
 
         if target in ("ip", "ip_range"):
-            entry["aws_statement_type"] = "ip_set_reference_statement"
             # Parse addresses — value may be comma-separated
             addresses = [a.strip() for a in value.split(",") if a.strip()]
             addresses = [ensure_cidr(a) for a in addresses]
             v4 = [a for a in addresses if not is_ipv6(a)]
             v6 = [a for a in addresses if is_ipv6(a)]
 
-            if v4 and v6:
-                entry["split_count"] = 2
-                entry["ip_sets"] = [
-                    {"name": f"{entry['name']}-ipv4", "addresses": v4},
-                    {"name": f"{entry['name']}-ipv6", "addresses": v6},
-                ]
-            else:
-                entry["split_count"] = 1
+            entry["conditions"] = {"field": "ip.src", "operator": "in",
+                                   "value": "{" + " ".join(addresses) + "}"}
+            if v4 or v6:
+                entry["ip_sets"] = []
+                if v4:
+                    entry["ip_sets"].append({"name": f"{entry['name']}-ipv4", "addresses": v4})
+                if v6:
+                    entry["ip_sets"].append({"name": f"{entry['name']}-ipv6", "addresses": v6})
 
         elif target == "country":
-            entry["aws_statement_type"] = "geo_match_statement"
-            entry["split_count"] = 1
+            entry["conditions"] = {"field": "ip.src.country", "operator": "eq",
+                                   "value": value.upper()}
 
         elif target == "asn":
             # Value format: "AS13335" → extract number
             asn_num = re.sub(r"[^0-9]", "", value)
             if asn_num:
                 entry["value"] = int(asn_num)
-            entry["aws_statement_type"] = "asn_match_statement"
-            entry["split_count"] = 1
+            entry["conditions"] = {"field": "ip.geoip.asnum", "operator": "in",
+                                   "value": "{" + asn_num + "}" if asn_num else "{0}"}
 
         else:
             entry["convertibility"] = "no"

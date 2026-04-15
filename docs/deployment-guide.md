@@ -8,41 +8,39 @@ This guide explains the output structure and deployment steps for each pipeline.
 
 ```
 cloudflare-to-aws-waf/
-├── waf_ir.json                             # Structured IR (input to generator)
-├── versions.tf                             # Provider version constraints
-├── ip_sets.tf                              # Shared IP sets (referenced by both ACLs)
-├── main.tf                                 # Locals + two module calls (website + api-and-file)
-├── modules/
-│   └── waf/
-│       ├── main.tf                         # Web ACL resource definition
-│       ├── variables.tf                    # Module input variables
-│       └── outputs.tf                      # Module outputs
-└── README_aws-waf-terraform-deployment.md  # Auto-generated deployment notes
+├── waf_ir_ip.json                  # IP lists + access rules IR
+├── waf_ir_custom.json              # Custom rules IR
+├── waf_ir_rate.json                # Rate-limiting rules IR
+├── waf_ir.json                     # Merged IR (all rule types)
+├── waf-cloudformation.json         # CloudFormation template (deploy this)
+└── README_aws-waf-deployment.md    # Auto-generated deployment notes
 ```
 
 ### WAF deployment
 
-WAF is a single root module — one `terraform apply` deploys everything:
+WAF uses CloudFormation — one command deploys everything:
 
 ```bash
 cd cloudflare-to-aws-waf
-terraform init
-terraform plan    # Review the plan carefully
-terraform apply
+aws cloudformation deploy \
+  --template-file waf-cloudformation.json \
+  --stack-name cloudflare-waf-migration \
+  --region us-east-1
 ```
 
-The root `main.tf` calls the `modules/waf/` module twice — once for the website
-Web ACL and once for the API/file Web ACL. Shared IP sets are defined at root
-level and passed into both module calls.
+The template contains all IP sets, two Web ACLs (website + API/file), and
+managed rule groups. CloudFormation handles resource ordering automatically.
 
 ### WAF notes
 
-- WAF resources are regional. Set your AWS provider region to match where your
-  ALB/API Gateway lives, or use `us-east-1` for CloudFront-associated WAFs.
-- Review `ip_sets.tf` — IP addresses from Cloudflare rules are converted
-  directly. Verify they are still correct for your AWS environment.
-- Check `README_aws-waf-terraform-deployment.md` (auto-generated) for
-  rule-specific notes from the conversion.
+- WAF resources with `Scope: CLOUDFRONT` must be in `us-east-1`.
+- Two Web ACLs are generated: `waf-website` (Anti-DDoS challenge enabled) and
+  `waf-api-file` (challenge disabled, block sensitivity MEDIUM). Associate the
+  appropriate one with your CloudFront distribution.
+- All managed rules use Count mode for initial monitoring. Switch to Block after
+  validating no false positives.
+- Check `README_aws-waf-deployment.md` (auto-generated) for rule-specific notes,
+  WCU summary, and non-convertible items.
 
 ---
 

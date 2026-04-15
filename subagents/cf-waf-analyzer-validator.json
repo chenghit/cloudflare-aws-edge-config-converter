@@ -1,9 +1,0 @@
-{
-  "name": "cf-waf-analyzer-validator",
-  "description": "Validates WAF analysis summary against original Cloudflare configuration files, fixes errors in-place",
-  "resources": [
-    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-waf-analyzer-validator/SKILL.md"
-  ],
-  "tools": ["fs_read", "fs_write", "glob", "grep"],
-  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
-}

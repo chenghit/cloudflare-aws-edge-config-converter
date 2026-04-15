@@ -1,9 +1,0 @@
-{
-  "name": "cf-waf-terraform-generator",
-  "description": "Generates AWS WAF Terraform configuration from validated security rules summary",
-  "resources": [
-    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-waf-terraform-generator/SKILL.md"
-  ],
-  "tools": ["fs_read", "fs_write", "glob", "grep"],
-  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
-}

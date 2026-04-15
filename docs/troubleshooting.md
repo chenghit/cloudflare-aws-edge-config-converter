@@ -12,8 +12,8 @@
 - Agent doesn't read reference documents
 
 **Solution**:
-1. Try manual invocation first: `/agent swap cf-waf-analyzer` then give your instruction. If this works, the issue is with orchestrator routing, not the skill itself.
-2. Verify installation: Check if `~/.kiro/agents/cf-waf-analyzer.json` exists
+1. Try manual invocation first: `/agent swap cf-cdn-dns-parser` then give your instruction. If this works, the issue is with orchestrator routing, not the skill itself.
+2. Verify installation: Check if `~/.kiro/agents/cf-cdn-dns-parser.json` exists
 3. Restart Kiro CLI: Exit and start a new `kiro-cli chat` session
 4. List available agents: Use `/agent list` to see installed subagents
 

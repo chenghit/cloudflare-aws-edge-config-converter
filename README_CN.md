@@ -2,7 +2,7 @@
 
 **通过 AI 对话，自动将 Cloudflare 配置转换为 AWS 边缘服务配置**
 
-本工具读取 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 导出的备份文件，生成可直接部署的 AWS WAF 和 CloudFront Terraform 配置——包括缓存策略、CloudFront Functions、Lambda@Edge 和 KVS 数据。
+本工具读取 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 导出的备份文件，生成可直接部署的 AWS WAF（CloudFormation）和 CloudFront（Terraform）配置——包括缓存策略、CloudFront Functions、Lambda@Edge 和 KVS 数据。
 
 > **⚠️ Kiro CLI 1.28.0 与本工具不兼容。** 1.28.0 版本（2026-03-20 发布）存在两个导致 subagent pipeline 无法运行的 bug：shell 审批阻塞（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)）和 subagent 结果返回失败（[#6163](https://github.com/kirodotdev/Kiro/issues/6163)）。两个 bug 均已在 **1.28.1** 中修复。如果你使用的是 1.28.0，请升级：
 > ```bash
@@ -43,12 +43,10 @@ kiro-cli chat
 ## 前提条件
 
 - **Kiro CLI** >= 1.24 — [安装文档](https://kiro.dev/docs/getting-started/installation/)。⚠️ 不推荐使用 Kiro IDE（不支持 subagent 中的 `skill://` 资源绑定）。**避免使用 Kiro CLI 1.28.0** — 该版本有两个 bug（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)、[#6163](https://github.com/kirodotdev/Kiro/issues/6163)）会导致 subagent pipeline 无法运行，已在 1.28.1 中修复。**Kiro CLI 1.29.x** 存在回归 bug：未显式指定 `model` 字段的 subagent 会报 `Missing modelId` 错误（[#7321](https://github.com/kirodotdev/Kiro/issues/7321)）。临时解决方案：在 `~/.kiro/agents/` 下的每个 agent 配置中添加 `"model": "claude-sonnet-4.6"`。
-- **Terraform** >= 1.8.0，AWS Provider >= 6.x — [安装 Terraform](https://developer.hashicorp.com/terraform/install)。注意：`terraform validate`（WAF 生成后自动运行）首次运行需要联网下载 AWS provider（约 300MB）。
-- **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF 用 Python 做 IP 列表/访问规则分析，以及辅助脚本做 count 校验和 JSON 切分。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）——这些替代了 LLM subagent，实现确定性的亚秒级处理。macOS 和大多数 Linux 发行版已预装。转换流程无需第三方包（仅用标准库）。**部署阶段**：有 KVS 的 CDN 域名（批量重定向、IP 列表、错误页面）会生成 `seed-kvs.py` 脚本，需要 `boto3`——部署前运行 `pip install boto3` 安装。
+- **Terraform** >= 1.8.0，AWS Provider >= 6.x — [安装 Terraform](https://developer.hashicorp.com/terraform/install)。仅 CDN pipeline 需要。WAF pipeline 使用 CloudFormation（不需要 Terraform）。
+- **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF pipeline 完全基于 Python（表达式解析、分析、验证、CloudFormation 生成）。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）。macOS 和大多数 Linux 发行版已预装。转换流程无需第三方包（仅用标准库）。**部署阶段**：有 KVS 的 CDN 域名（批量重定向、IP 列表、错误页面）会生成 `seed-kvs.py` 脚本，需要 `boto3`——部署前运行 `pip install boto3` 安装。
 - **模型**：最低 `claude-sonnet-4.6-1m`。在 Kiro 中通过 `/model` 切换。Kiro CLI 仅支持 Amazon Bedrock 上的 Claude 模型。
-  - **WAF 迁移**：≤ 100 条规则用 `claude-sonnet-4.6-1m`，> 100 条用 `claude-opus-4.6-1m`。"规则"= WAF Custom Rules + Rate Limiting Rules + IP Access Rules 总数。WAF pipeline 最多支持约 200 条 CF 规则；超过此数建议先在 Cloudflare 端简化规则或手动迁移。瓶颈在于 Terraform generator 的输出量——AWS WAF 要求将使用顶层 OR 逻辑或混合 IPv4/IPv6 IP 列表的 Cloudflare 规则拆分为多条 AWS WAF 规则（例如，一条有 3 个 OR 分支和混合 IP 的规则会变成 6 条 AWS WAF 规则）。典型拆分比例约 2x；简单 zone 约 1.5x，包含大量 OR + 混合 IP 规则的复杂 zone 可达 3x。每条 AWS WAF 规则约产生 150 output tokens 的 HCL：
-    - Sonnet 4.6 最大输出：64K tokens → 约 200 条 AWS WAF 规则（约 100 条 CF 规则）
-    - Opus 4.6 最大输出：128K tokens → 约 400 条 AWS WAF 规则（约 200 条 CF 规则）
+  - **WAF 迁移**：无模型要求——WAF pipeline 完全是确定性 Python，零 LLM 调用。任何模型都可以，因为编排器只运行 shell 命令。
   - **CDN 迁移**：无论域名数量，统一使用 `claude-sonnet-4.6-1m`。CDN Stage 3–7.6 是 Python 脚本（无 LLM 开销）。剩余的 LLM 阶段（DNS 解析、输入校验、JS 生成、JS 校验）每个域名独立处理，单次生成约 200 行输出，远低于 Sonnet 的 64K output 上限。token 容量不需要 Opus，但如果 Sonnet 对复杂 Cloudflare 表达式（regex_replace、带捕获组的 wildcard_replace）生成的 JavaScript 有误，可以考虑切换到 Opus。
   - 完整的兼容模型列表（含其他 agent 框架的可用选项），请参阅[支持的模型](./docs/supported-models_CN.md)。
 - **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。运行前申请通配符证书（如 `*.example.com`），或在 CSV 中留空让 Terraform 自动查找已签发的证书。
@@ -58,7 +56,7 @@ kiro-cli chat
 
 | Cloudflare | AWS 等价物 | 流程 |
 |------------|-----------|------|
-| WAF 规则、速率限制、IP 访问控制 | AWS WAF Web ACL (Terraform) | WAF |
+| WAF 规则、速率限制、IP 访问控制 | AWS WAF Web ACL (CloudFormation) | WAF |
 | 缓存规则 | CloudFront 缓存策略 + 缓存行为 | CDN |
 | 源站规则 | CloudFront Functions (`updateRequestOrigin`) 或缓存行为 | CDN |
 | 重定向规则 | CloudFront Functions (viewer-request) | CDN |
@@ -76,7 +74,7 @@ kiro-cli chat
 
 本工具作为 Kiro CLI skill 运行，由编排器调度专用 subagent。每个 subagent 拥有隔离的上下文，负责一个流程阶段。
 
-**WAF 流程**（4 阶段）：**分析 IP 列表（Python）** → 分析自定义规则 + 速率限制（2 个 LLM 批次）→ 合并 + 校验（并行）→ 生成 Terraform → terraform validate
+**WAF 流程**（全 Python，零 LLM）：分析 IP 列表 → 分析自定义规则 → 分析速率限制 → 合并 → 校验 → 生成 CloudFormation
 
 **CDN 流程**（4 个 LLM 阶段 + 7 个 Python 脚本）：解析 DNS → 校验用户输入 → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → 生成每域名 JS → 校验 JS
 
@@ -86,7 +84,7 @@ CDN Stage 3–7.6 是确定性 Python 脚本，替代了原来的 LLM subagent�
 flowchart TD
     User([用户]) -->|"转换 WAF / CDN / 全部"| Main["编排器"]
 
-    Main -->|WAF| WAF_IP["🐍 IP 分析器"] --> WAF_A["分析器 × 2"] --> WAF_M["合并 IR"] --> WAF_V["校验器 × N"] -->|通过| WAF_G["TF 生成器"] --> WAF_T{{"terraform validate"}} --> WAF_Done([WAF Terraform ✅])
+    Main -->|WAF| WAF_A1["🐍 IP 分析"] --> WAF_A2["🐍 自定义规则"] --> WAF_A3["🐍 速率限制"] --> WAF_M["🐍 合并 + 校验"] --> WAF_G["🐍 生成 CFN"] --> WAF_Done([CloudFormation ✅])
 
     Main -->|CDN| CDN1["DNS 解析"] -->|CSV| Pause[/"⏸ 用户填写 CSV"/]
     Pause --> CDN2["输入校验"]
@@ -170,7 +168,7 @@ cloudflare-to-aws-cdn/
 | CDN | ~32 分钟 | ~20 分钟 |
 
 时间分布：
-- **WAF**：分析器 A2+A3（~5 分钟）、校验器 V1-V4（~5 分钟）、Terraform 生成器（~3 分钟）、terraform validate（~2 分钟）。Python 脚本（A1、合并、计数、切分、README）总计 <1 秒。
+- **WAF**：全 Python pipeline，总计 <1 秒（无 LLM 调用）。
 - **CDN**：Python 脚本 Stage 3–7.6 总计 <1 秒。Stage 8 JS 生成（7 域名、批次 2 约 15 分钟）和 Stage 9 JS 校验（~10 分钟）占主要时间。DNS 解析和输入校验各约 2 分钟。
 
 影响因素：
@@ -233,7 +231,7 @@ cd cloudflare-aws-edge-config-converter
 > # 3. 编辑 install.sh（或 install.bat）——修改文件开头的 SKILLS_DIR 和 AGENTS_DIR 变量
 > ```
 
-高级用户可通过 `/agent swap <subagent-name>` 单独运行各流程阶段。可用 subagent：`cf-waf-analyzer`、`cf-waf-analyzer-validator`、`cf-waf-terraform-generator`、`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。CDN Stage 3–7.6 为 Python 脚本（非 subagent），直接通过 `python3` 运行。
+高级用户可通过 `/agent swap <subagent-name>` 单独运行 CDN 各流程阶段。可用 subagent：`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。CDN Stage 3–7.6 为 Python 脚本（非 subagent），直接通过 `python3` 运行。WAF pipeline 没有 subagent——完全通过 `waf-pipeline.sh` 运行 Python 脚本。
 
 ## Subagent 权限与安全
 

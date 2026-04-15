@@ -12,8 +12,8 @@
 - Agent 没有读取参考文档
 
 **解决方案**：
-1. 先尝试手动调用：`/agent swap cf-waf-analyzer`，然后给出指令。如果手动调用正常，问题出在编排器路由，不是 skill 本身。
-2. 检查安装：确认 `~/.kiro/agents/cf-waf-analyzer.json` 是否存在
+1. 先尝试手动调用：`/agent swap cf-cdn-dns-parser`，然后给出指令。如果手动调用正常，问题出在编排器路由，不是 skill 本身。
+2. 检查安装：确认 `~/.kiro/agents/cf-cdn-dns-parser.json` 是否存在
 3. 重启 Kiro CLI：退出并重新启动 `kiro-cli chat`
 4. 列出可用 agent：使用 `/agent list` 查看已安装的 subagent
 

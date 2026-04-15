@@ -1,0 +1,785 @@
+#!/usr/bin/env python3
+"""waf-generate-cfn.py — WAF Stage 3: Generate CloudFormation template.
+
+Reads waf_ir.json and outputs a CloudFormation JSON template containing
+IP sets, regex pattern sets, and two WebACL resources.
+
+Usage:
+    python3 waf-generate-cfn.py <output_dir>
+
+Exit codes: 0 = OK, 1 = error, 2 = quota exceeded.
+"""
+import json, sys, os, re, math
+
+# ── Constants ────────────────────────────────────────────────────────────────
+
+MAX_WCU = 5000
+WARN_WCU = 1500
+MAX_REF_STATEMENTS = 50
+MAX_RATE_RULES = 10
+MAX_IP_SET_SIZE = 10000
+MAX_ASN_PER_STATEMENT = 100
+MAX_STACK_RESOURCES = 500
+MAX_REGEX_LEN = 200
+MAX_STRING_MATCH_LEN = 200
+STRING_SET_REGEX_THRESHOLD = 3
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def sanitize_logical_id(name):
+    """Convert a name to a valid CloudFormation logical ID (alphanumeric only)."""
+    parts = re.split(r'[-_.\s]+', name)
+    result = ''.join(p.capitalize() for p in parts if p)
+    result = re.sub(r'[^A-Za-z0-9]', '', result)
+    if not result or result[0].isdigit():
+        result = 'R' + result
+    return result[:64]
+
+
+def sanitize_rule_name(name):
+    """Convert to valid AWS WAF rule name: a-zA-Z0-9_- only, max 128 chars."""
+    result = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+    # Collapse multiple underscores
+    result = re.sub(r'_+', '_', result).strip('_')
+    if not result or result[0].isdigit():
+        result = 'R' + result
+    return result[:128]
+
+
+def glob_to_regex(pattern, case_insensitive=True):
+    """Convert a Cloudflare wildcard pattern to a regex."""
+    # Escape regex metacharacters except *
+    escaped = ''
+    for ch in pattern:
+        if ch == '*':
+            escaped += '.*'
+        elif ch in r'\.+?^${}()|[]':
+            escaped += '\\' + ch
+        else:
+            escaped += ch
+    regex = f'^{escaped}$'
+    if case_insensitive:
+        regex = f'(?i){regex}'
+    return regex
+
+
+def is_ipv6(addr):
+    return ':' in addr.split('/')[0]
+
+
+class WCUTracker:
+    def __init__(self):
+        self.total = 0
+        self.per_rule = {}
+
+    def add(self, rule_name, wcu):
+        self.total += wcu
+        self.per_rule[rule_name] = self.per_rule.get(rule_name, 0) + wcu
+
+
+class RefCounter:
+    """Count reference statements. NOTE: AWS WAF limit of 50 is per-WebACL.
+    Since both WebACLs share identical rules, the global count equals per-WebACL count.
+    If WebACLs diverge in the future, this needs to be tracked per-WebACL."""
+    def __init__(self):
+        self.count = 0
+
+    def add(self):
+        self.count += 1
+
+
+# ── Condition → Statement conversion ─────────────────────────────────────────
+
+FIELD_TO_MATCH = {
+    "http.request.uri.path": {"UriPath": {}},
+    "http.request.uri": {"UriPath": {}},
+    "http.request.uri.query": {"QueryString": {}},
+    "http.host": {"SingleHeader": {"Name": "host"}},
+    "http.user_agent": {"SingleHeader": {"Name": "user-agent"}},
+    "http.referer": {"SingleHeader": {"Name": "referer"}},
+    "http.request.method": {"Method": {}},
+    "http.cookie": {"Cookies": {"MatchPattern": {"All": {}}, "MatchScope": "ALL", "OversizeHandling": "NO_MATCH"}},
+    "http.request.full_uri": {"UriPath": {}},
+    "http.request.body": {"Body": {"OversizeHandling": "NO_MATCH"}},
+}
+
+POSITIONAL_CONSTRAINT = {
+    "eq": "EXACTLY",
+    "contains": "CONTAINS",
+    "starts_with": "STARTS_WITH",
+    "ends_with": "ENDS_WITH",
+}
+
+
+def conditions_to_statement(cond, ctx):
+    """Recursively convert conditions tree to AWS WAF Statement JSON."""
+    if "op" in cond:
+        op = cond["op"]
+        if op == "and":
+            stmts = [conditions_to_statement(c, ctx) for c in cond["items"]]
+            return {"AndStatement": {"Statements": stmts}}
+        if op == "or":
+            stmts = [conditions_to_statement(c, ctx) for c in cond["items"]]
+            return {"OrStatement": {"Statements": stmts}}
+        if op == "not":
+            return {"NotStatement": {"Statement": conditions_to_statement(cond["item"], ctx)}}
+
+    # Leaf condition
+    field = cond.get("field", "")
+    operator = cond.get("operator", "")
+    value = cond.get("value")
+    transform = cond.get("transform")
+
+    text_transforms = [{"Priority": 0, "Type": "LOWERCASE" if transform == "lowercase" else "NONE"}]
+    if transform == "lowercase":
+        ctx["wcu"].add(ctx["rule_name"], 10)
+
+    # IP set reference
+    if field == "ip.src" and operator in ("in", "not_in"):
+        return _build_ip_statement(value, ctx, cond)
+
+    # Country match
+    if field == "ip.src.country":
+        if operator == "in" and isinstance(value, str) and value.startswith("{"):
+            codes = [c.strip().strip('"').upper() for c in value[1:-1].split()]
+        elif operator == "eq":
+            codes = [str(value).upper()]
+        elif operator == "ne":
+            ctx["wcu"].add(ctx["rule_name"], 1)
+            return {"NotStatement": {"Statement": {
+                "GeoMatchStatement": {"CountryCodes": [str(value).upper()]}}}}
+        else:
+            codes = [str(value).upper()]
+        ctx["wcu"].add(ctx["rule_name"], 1)
+        return {"GeoMatchStatement": {"CountryCodes": codes}}
+
+    # ASN match
+    if field in ("ip.geoip.asnum", "ip.src.asnum") and operator == "in":
+        return _build_asn_statement(value, ctx)
+
+    # Bare boolean field
+    if operator == "eq" and value is True:
+        # Non-convertible bare boolean — should have been caught by convertibility check
+        ctx["warnings"].append(f"Bare boolean field '{field}' in statement — may not convert correctly")
+        ctx["wcu"].add(ctx["rule_name"], 1)
+        return {"ByteMatchStatement": {
+            "SearchString": "1", "PositionalConstraint": "EXACTLY",
+            "FieldToMatch": {"SingleHeader": {"Name": field.replace(".", "-")}},
+            "TextTransformations": [{"Priority": 0, "Type": "NONE"}]}}
+
+    # Wildcard → regex
+    if operator in ("wildcard", "strict_wildcard"):
+        regex = glob_to_regex(str(value), case_insensitive=(operator == "wildcard"))
+        if len(regex) > MAX_REGEX_LEN:
+            ctx["warnings"].append(f"Regex pattern exceeds {MAX_REGEX_LEN} chars for field '{field}'")
+        ctx["wcu"].add(ctx["rule_name"], 3)
+        ftm = FIELD_TO_MATCH.get(field, {"UriPath": {}})
+        return {"RegexMatchStatement": {
+            "RegexString": regex,
+            "FieldToMatch": ftm,
+            "TextTransformations": [{"Priority": 0, "Type": "NONE"}]}}
+
+    # Regex match
+    if operator == "matches":
+        ctx["wcu"].add(ctx["rule_name"], 3)
+        ftm = FIELD_TO_MATCH.get(field, {"UriPath": {}})
+        return {"RegexMatchStatement": {
+            "RegexString": str(value),
+            "FieldToMatch": ftm,
+            "TextTransformations": text_transforms}}
+
+    # String set → OR of ByteMatch or regex optimization
+    if operator == "in" and isinstance(value, str) and value.startswith("{"):
+        inner = value[1:-1]
+        # Extract quoted strings, or fall back to whitespace split
+        items = re.findall(r'"([^"]*)"', inner)
+        if not items:
+            items = [v.strip() for v in inner.split() if v.strip()]
+        return _build_string_set_statement(field, items, text_transforms, ctx)
+
+    # Size constraint
+    if operator in ("gt", "lt", "ge", "le") and cond.get("size_check"):
+        comp_map = {"gt": "GT", "lt": "LT", "ge": "GE", "le": "LE"}
+        ctx["wcu"].add(ctx["rule_name"], 1)
+        ftm = FIELD_TO_MATCH.get(field, {"UriPath": {}})
+        return {"SizeConstraintStatement": {
+            "ComparisonOperator": comp_map[operator],
+            "Size": int(value),
+            "FieldToMatch": ftm,
+            "TextTransformations": [{"Priority": 0, "Type": "NONE"}]}}
+
+    # Standard byte match
+    if operator in POSITIONAL_CONSTRAINT:
+        pc = POSITIONAL_CONSTRAINT[operator]
+        search = str(value)
+        if len(search) > MAX_STRING_MATCH_LEN:
+            ctx["warnings"].append(f"String match exceeds {MAX_STRING_MATCH_LEN} chars for '{field}'")
+        ctx["wcu"].add(ctx["rule_name"], 1)
+        ftm = FIELD_TO_MATCH.get(field, {"SingleHeader": {"Name": field.split(".")[-1]}})
+        return {"ByteMatchStatement": {
+            "SearchString": search,
+            "PositionalConstraint": pc,
+            "FieldToMatch": ftm,
+            "TextTransformations": text_transforms}}
+
+    # ne → NOT + EXACTLY
+    if operator == "ne":
+        ctx["wcu"].add(ctx["rule_name"], 1)
+        ftm = FIELD_TO_MATCH.get(field, {"SingleHeader": {"Name": field.split(".")[-1]}})
+        return {"NotStatement": {"Statement": {"ByteMatchStatement": {
+            "SearchString": str(value),
+            "PositionalConstraint": "EXACTLY",
+            "FieldToMatch": ftm,
+            "TextTransformations": text_transforms}}}}
+
+    # Fallback — unknown field/operator
+    ctx["warnings"].append(f"Unknown field/operator: {field} {operator} — generating placeholder")
+    ctx["wcu"].add(ctx["rule_name"], 1)
+    return {"ByteMatchStatement": {
+        "SearchString": str(value) if value else "PLACEHOLDER",
+        "PositionalConstraint": "CONTAINS",
+        "FieldToMatch": {"UriPath": {}},
+        "TextTransformations": [{"Priority": 0, "Type": "NONE"}]}}
+
+
+def _build_ip_statement(value, ctx, cond=None):
+    """Build IPSetReferenceStatement(s) for ip.src in ... conditions."""
+    ctx["wcu"].add(ctx["rule_name"], 1)
+    value_str = str(value)
+
+    # Named list: $list_name
+    if value_str.startswith("$"):
+        list_name = value_str[1:]
+        ipv4_id = ctx["ip_list_map"].get(f"{list_name}-ipv4")
+        ipv6_id = ctx["ip_list_map"].get(f"{list_name}-ipv6")
+        if ipv4_id and ipv6_id:
+            ctx["refs"].add()
+            ctx["refs"].add()
+            return {"OrStatement": {"Statements": [
+                {"IPSetReferenceStatement": {"ARN": {"Fn::GetAtt": [ipv4_id, "Arn"]}}},
+                {"IPSetReferenceStatement": {"ARN": {"Fn::GetAtt": [ipv6_id, "Arn"]}}},
+            ]}}
+        elif ipv4_id:
+            ctx["refs"].add()
+            return {"IPSetReferenceStatement": {"ARN": {"Fn::GetAtt": [ipv4_id, "Arn"]}}}
+        elif ipv6_id:
+            ctx["refs"].add()
+            return {"IPSetReferenceStatement": {"ARN": {"Fn::GetAtt": [ipv6_id, "Arn"]}}}
+        # ASN list referenced as $name
+        asn_id = ctx["ip_list_map"].get(list_name)
+        if asn_id == "__asn__":
+            asns = ctx["asn_lists"].get(list_name, [])
+            return _build_asn_from_list(asns, ctx)
+        ctx["warnings"].append(f"IP list '${list_name}' not found in ip_lists")
+        return {"ByteMatchStatement": {"SearchString": "MISSING_IP_LIST", "PositionalConstraint": "EXACTLY",
+                "FieldToMatch": {"UriPath": {}}, "TextTransformations": [{"Priority": 0, "Type": "NONE"}]}}
+
+    # Inline IP set: {addr1 addr2 ...}
+    # Use _ip_set_names annotation from extract_ip_sets for precise matching
+    ip_set_names = cond.get("_ip_set_names", [])
+    stmts = []
+    for name in ip_set_names:
+        lid = ctx["inline_ip_set_ids"].get(name)
+        if lid:
+            ctx["refs"].add()
+            stmts.append({"IPSetReferenceStatement": {"ARN": {"Fn::GetAtt": [lid, "Arn"]}}})
+
+    if not stmts:
+        ctx["warnings"].append(f"No IP sets found for inline set in rule '{ctx['rule_name']}'")
+        return {"ByteMatchStatement": {"SearchString": "MISSING_INLINE_IP", "PositionalConstraint": "EXACTLY",
+                "FieldToMatch": {"UriPath": {}}, "TextTransformations": [{"Priority": 0, "Type": "NONE"}]}}
+    if len(stmts) == 1:
+        return stmts[0]
+    return {"OrStatement": {"Statements": stmts}}
+
+
+def _build_asn_statement(value, ctx):
+    """Build AsnMatchStatement, splitting if >100 ASNs."""
+    value_str = str(value)
+    if value_str.startswith("$"):
+        list_name = value_str[1:]
+        asns = ctx["asn_lists"].get(list_name, [])
+    elif value_str.startswith("{"):
+        asns = [int(x) for x in value_str[1:-1].split() if x.strip()]
+    else:
+        asns = [int(value_str)] if value_str.isdigit() else []
+    return _build_asn_from_list(asns, ctx)
+
+
+def _build_asn_from_list(asns, ctx):
+    if not asns:
+        ctx["warnings"].append("Empty ASN list")
+        return {"AsnMatchStatement": {"AsnList": [0]}}
+    chunks = [asns[i:i+MAX_ASN_PER_STATEMENT] for i in range(0, len(asns), MAX_ASN_PER_STATEMENT)]
+    stmts = []
+    for chunk in chunks:
+        ctx["wcu"].add(ctx["rule_name"], 1)
+        stmts.append({"AsnMatchStatement": {"AsnList": chunk}})
+    return stmts[0] if len(stmts) == 1 else {"OrStatement": {"Statements": stmts}}
+
+
+def _build_string_set_statement(field, items, text_transforms, ctx):
+    """Build statement for string set (in operator with string values)."""
+    ftm = FIELD_TO_MATCH.get(field, {"SingleHeader": {"Name": field.split(".")[-1]}})
+
+    if len(items) <= STRING_SET_REGEX_THRESHOLD:
+        stmts = []
+        for item in items:
+            ctx["wcu"].add(ctx["rule_name"], 1)
+            stmts.append({"ByteMatchStatement": {
+                "SearchString": item, "PositionalConstraint": "EXACTLY",
+                "FieldToMatch": ftm, "TextTransformations": text_transforms}})
+        return stmts[0] if len(stmts) == 1 else {"OrStatement": {"Statements": stmts}}
+
+    # Optimize: combine into regex
+    escaped = [re.escape(item) for item in items]
+    regex = "^(" + "|".join(escaped) + ")$"
+    if len(regex) <= MAX_REGEX_LEN:
+        ctx["wcu"].add(ctx["rule_name"], 3)
+        return {"RegexMatchStatement": {"RegexString": regex, "FieldToMatch": ftm,
+                "TextTransformations": text_transforms}}
+
+    # Split into multiple regex
+    stmts = []
+    batch = []
+    current_len = 4  # ^()$
+    for e in escaped:
+        if current_len + len(e) + 1 > MAX_REGEX_LEN - 4:
+            r = "^(" + "|".join(batch) + ")$"
+            ctx["wcu"].add(ctx["rule_name"], 3)
+            stmts.append({"RegexMatchStatement": {"RegexString": r, "FieldToMatch": ftm,
+                          "TextTransformations": text_transforms}})
+            batch = [e]
+            current_len = 4 + len(e)
+        else:
+            batch.append(e)
+            current_len += len(e) + 1
+    if batch:
+        r = "^(" + "|".join(batch) + ")$"
+        ctx["wcu"].add(ctx["rule_name"], 3)
+        stmts.append({"RegexMatchStatement": {"RegexString": r, "FieldToMatch": ftm,
+                      "TextTransformations": text_transforms}})
+    return stmts[0] if len(stmts) == 1 else {"OrStatement": {"Statements": stmts}}
+
+
+# ── Template assembly ────────────────────────────────────────────────────────
+
+ACTION_MAP = {
+    "block": {"Block": {}},
+    "allow": {"Allow": {}},
+    "challenge": {"Challenge": {}},
+    "captcha": {"Captcha": {}},
+    "count": {"Count": {}},
+}
+
+
+def build_managed_rules(priority_start, skip_labels_present, wcu):
+    """Build the 5 managed rule group rules."""
+    rules = []
+    p = priority_start
+
+    # Anti-DDoS (placeholder — actual config differs per WebACL, handled in build_webacl)
+    # IP Reputation
+    ip_rep = {
+        "Name": "AWS-AWSManagedRulesAmazonIpReputationList", "Priority": p,
+        "OverrideAction": {"Count": {}},
+        "Statement": {"ManagedRuleGroupStatement": {"VendorName": "AWS",
+                       "Name": "AWSManagedRulesAmazonIpReputationList"}},
+        "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                             "MetricName": "AWS-AWSManagedRulesAmazonIpReputationList"},
+    }
+    if skip_labels_present.get("http_request_firewall_managed"):
+        ip_rep["Statement"]["ManagedRuleGroupStatement"]["ScopeDownStatement"] = {
+            "NotStatement": {"Statement": {"LabelMatchStatement": {
+                "Scope": "LABEL", "Key": "skip:http_request_firewall_managed"}}}}
+    rules.append(ip_rep)
+    wcu.add("AWS-IpReputation", 25)
+    p += 1
+
+    # Common Rule Set
+    crs = {
+        "Name": "AWS-AWSManagedRulesCommonRuleSet", "Priority": p,
+        "OverrideAction": {"Count": {}},
+        "Statement": {"ManagedRuleGroupStatement": {"VendorName": "AWS",
+                       "Name": "AWSManagedRulesCommonRuleSet",
+                       "RuleActionOverrides": [{"Name": "SizeRestrictions_BODY",
+                                                "ActionToUse": {"Count": {}}}]}},
+        "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                             "MetricName": "AWS-AWSManagedRulesCommonRuleSet"},
+    }
+    if skip_labels_present.get("http_request_firewall_managed"):
+        crs["Statement"]["ManagedRuleGroupStatement"]["ScopeDownStatement"] = {
+            "NotStatement": {"Statement": {"LabelMatchStatement": {
+                "Scope": "LABEL", "Key": "skip:http_request_firewall_managed"}}}}
+    rules.append(crs)
+    wcu.add("AWS-CRS", 700)
+    p += 1
+
+    # Known Bad Inputs
+    kbi = {
+        "Name": "AWS-AWSManagedRulesKnownBadInputsRuleSet", "Priority": p,
+        "OverrideAction": {"Count": {}},
+        "Statement": {"ManagedRuleGroupStatement": {"VendorName": "AWS",
+                       "Name": "AWSManagedRulesKnownBadInputsRuleSet"}},
+        "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                             "MetricName": "AWS-AWSManagedRulesKnownBadInputsRuleSet"},
+    }
+    if skip_labels_present.get("http_request_firewall_managed"):
+        kbi["Statement"]["ManagedRuleGroupStatement"]["ScopeDownStatement"] = {
+            "NotStatement": {"Statement": {"LabelMatchStatement": {
+                "Scope": "LABEL", "Key": "skip:http_request_firewall_managed"}}}}
+    rules.append(kbi)
+    wcu.add("AWS-KBI", 200)
+    p += 1
+
+    # SQLi
+    sqli = {
+        "Name": "AWS-AWSManagedRulesSQLiRuleSet", "Priority": p,
+        "OverrideAction": {"Count": {}},
+        "Statement": {"ManagedRuleGroupStatement": {"VendorName": "AWS",
+                       "Name": "AWSManagedRulesSQLiRuleSet", "Version": "Version_2.0"}},
+        "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                             "MetricName": "AWS-AWSManagedRulesSQLiRuleSet"},
+    }
+    if skip_labels_present.get("http_request_firewall_managed"):
+        sqli["Statement"]["ManagedRuleGroupStatement"]["ScopeDownStatement"] = {
+            "NotStatement": {"Statement": {"LabelMatchStatement": {
+                "Scope": "LABEL", "Key": "skip:http_request_firewall_managed"}}}}
+    rules.append(sqli)
+    wcu.add("AWS-SQLi", 200)
+    p += 1
+
+    return rules, p
+
+
+def build_anti_ddos_rule(priority, advanced=False):
+    """Build Anti-DDoS managed rule."""
+    rule = {
+        "Name": "AWS-AWSManagedRulesAntiDDoSRuleSet", "Priority": priority,
+        "OverrideAction": {"Count": {}},
+        "Statement": {"ManagedRuleGroupStatement": {"VendorName": "AWS",
+                       "Name": "AWSManagedRulesAntiDDoSRuleSet"}},
+        "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                             "MetricName": "AWS-AWSManagedRulesAntiDDoSRuleSet"},
+    }
+    if advanced:
+        rule["Statement"]["ManagedRuleGroupStatement"]["ManagedRuleGroupConfigs"] = [{
+            "AWSManagedRulesAntiDDoSRuleSet": {
+                "ClientSideActionConfig": {"Challenge": {"UsageOfAction": "DISABLED"}},
+                "SensitivityToBlock": "MEDIUM"}}]
+    return rule
+
+
+# ── Main generation logic ────────────────────────────────────────────────────
+
+def generate(ir):
+    """Generate CloudFormation template from IR JSON."""
+    resources = {}
+    warnings = []
+    wcu = WCUTracker()
+    refs = RefCounter()
+
+    # ── Build IP set resources ───────────────────────────────────────────────
+
+    ip_list_map = {}   # list_name → logical_id (for named lists)
+    asn_lists = {}     # list_name → [asn_numbers] (for ASN lists)
+    inline_ip_set_ids = {}  # ip_set_name → logical_id
+    used_ids = set()
+
+    def unique_id(base):
+        lid = sanitize_logical_id(base)
+        if lid in used_ids:
+            i = 2
+            while f"{lid}{i}" in used_ids:
+                i += 1
+            lid = f"{lid}{i}"
+        used_ids.add(lid)
+        return lid
+
+    # Named IP lists
+    for lst in ir.get("ip_lists", []):
+        name = lst.get("name", "")
+        conv = lst.get("conversion", "")
+        if conv == "ip_set":
+            v4 = lst.get("items_ipv4", [])
+            v6 = lst.get("items_ipv6", [])
+            if v4:
+                lid = unique_id(f"IPSet{name}Ipv4")
+                resources[lid] = {"Type": "AWS::WAFv2::IPSet", "Properties": {
+                    "Name": f"{name}-ipv4", "Scope": "CLOUDFRONT",
+                    "IPAddressVersion": "IPV4", "Addresses": v4}}
+                ip_list_map[f"{name}-ipv4"] = lid
+            if v6:
+                lid = unique_id(f"IPSet{name}Ipv6")
+                resources[lid] = {"Type": "AWS::WAFv2::IPSet", "Properties": {
+                    "Name": f"{name}-ipv6", "Scope": "CLOUDFRONT",
+                    "IPAddressVersion": "IPV6", "Addresses": v6}}
+                ip_list_map[f"{name}-ipv6"] = lid
+            if not v4 and not v6:
+                ip_list_map[f"{name}-ipv4"] = None
+                ip_list_map[f"{name}-ipv6"] = None
+        elif conv == "asn_inline":
+            asn_lists[name] = lst.get("items", [])
+            ip_list_map[name] = "__asn__"
+
+    # Inline IP sets from rules
+    for section_key in ("ip_access_rules", "custom_rules", "rate_limiting_rules"):
+        section = ir.get(section_key, {})
+        for rule in section.get("rules", []):
+            for ipset in rule.get("ip_sets", []):
+                ipset_name = ipset["name"]
+                addrs = ipset.get("addresses", [])
+                if not addrs:
+                    continue
+                is_v6 = any(is_ipv6(a) for a in addrs)
+                lid = unique_id(f"IPSet{ipset_name}")
+                resources[lid] = {"Type": "AWS::WAFv2::IPSet", "Properties": {
+                    "Name": ipset_name, "Scope": "CLOUDFRONT",
+                    "IPAddressVersion": "IPV6" if is_v6 else "IPV4",
+                    "Addresses": addrs}}
+                inline_ip_set_ids[ipset_name] = lid
+                if len(addrs) > MAX_IP_SET_SIZE:
+                    warnings.append(f"IP set '{ipset_name}' has {len(addrs)} addresses (max {MAX_IP_SET_SIZE})")
+
+    # ── Build rules ──────────────────────────────────────────────────────────
+
+    all_rules = []
+    priority = 0
+    rate_rule_count = 0
+    used_rule_names = set()
+
+    def unique_rule_name(raw_name):
+        """Sanitize and deduplicate rule names for AWS WAF."""
+        name = sanitize_rule_name(raw_name)
+        if name not in used_rule_names:
+            used_rule_names.add(name)
+            return name
+        i = 2
+        while f"{name}-{i}" in used_rule_names:
+            i += 1
+        deduped = f"{name}-{i}"[:128]
+        used_rule_names.add(deduped)
+        return deduped
+
+    # Anti-DDoS at priority 0 (added per-WebACL later)
+    priority = 1
+
+    # IP Access Rules
+    for rule in ir.get("ip_access_rules", {}).get("rules", []):
+        if rule.get("convertibility") == "no":
+            continue
+        cond = rule.get("conditions")
+        if not cond:
+            continue
+        ctx = {"wcu": wcu, "refs": refs, "warnings": warnings,
+               "rule_name": rule["name"], "ip_list_map": ip_list_map,
+               "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
+               "current_rule_ip_sets": rule.get("ip_sets", [])}
+        stmt = conditions_to_statement(cond, ctx)
+        aws_action = ACTION_MAP.get(rule.get("mode", "block"), {"Block": {}})
+        rn = unique_rule_name(rule["name"])
+        all_rules.append({
+            "Name": rn, "Priority": priority,
+            "Action": aws_action, "Statement": stmt,
+            "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                                 "MetricName": rn},
+        })
+        priority += 1
+
+    # Custom Rules
+    skip_labels_present = ir.get("custom_rules", {}).get("skip_labels_present", {})
+    for rule in ir.get("custom_rules", {}).get("rules", []):
+        if rule.get("convertibility") == "no":
+            continue
+        cond = rule.get("conditions") or rule.get("convertible_conditions")
+        if not cond:
+            continue
+        ctx = {"wcu": wcu, "refs": refs, "warnings": warnings,
+               "rule_name": rule["name"], "ip_list_map": ip_list_map,
+               "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
+               "current_rule_ip_sets": rule.get("ip_sets", [])}
+        stmt = conditions_to_statement(cond, ctx)
+
+        # Scope-down: wrap in AND with NOT label_match
+        if rule.get("scope_down", {}).get("skip_all_remaining_custom_rules"):
+            stmt = {"AndStatement": {"Statements": [
+                {"NotStatement": {"Statement": {"LabelMatchStatement": {
+                    "Scope": "LABEL", "Key": "skip:all_remaining_custom_rules"}}}},
+                stmt]}}
+            wcu.add(rule["name"], 1)
+
+        # Determine action
+        action = rule.get("action", "block")
+        if action == "skip":
+            aws_action = {"Count": {}}
+        else:
+            aws_act = rule.get("aws_action", action)
+            aws_action = ACTION_MAP.get(aws_act, {"Block": {}})
+
+        rn = unique_rule_name(rule["name"])
+        waf_rule = {
+            "Name": rn, "Priority": priority,
+            "Action": aws_action, "Statement": stmt,
+            "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                                 "MetricName": rn},
+        }
+
+        # Skip rule labels
+        if action == "skip" and rule.get("labels"):
+            waf_rule["RuleLabels"] = [{"Name": l} for l in rule["labels"]]
+
+        all_rules.append(waf_rule)
+        priority += 1
+
+    # Rate-Limiting Rules
+    for rule in ir.get("rate_limiting_rules", {}).get("rules", []):
+        if rule.get("convertibility") == "no":
+            continue
+        rate_rule_count += 1
+        cond = rule.get("conditions") or rule.get("convertible_conditions")
+
+        ctx = {"wcu": wcu, "refs": refs, "warnings": warnings,
+               "rule_name": rule["name"], "ip_list_map": ip_list_map,
+               "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
+               "current_rule_ip_sets": rule.get("ip_sets", [])}
+
+        rate_stmt = {
+            "RateBasedStatement": {
+                "Limit": rule.get("aws_limit", 100),
+                "AggregateKeyType": "IP",
+                "EvaluationWindowSec": rule.get("aws_evaluation_window_sec", 60),
+            }
+        }
+        wcu.add(rule["name"], 2)
+
+        # Build scope-down
+        scope_parts = []
+        if rule.get("scope_down", {}).get("skip_http_ratelimit"):
+            scope_parts.append({"NotStatement": {"Statement": {"LabelMatchStatement": {
+                "Scope": "LABEL", "Key": "skip:http_ratelimit"}}}})
+            wcu.add(rule["name"], 1)
+        if cond:
+            scope_parts.append(conditions_to_statement(cond, ctx))
+
+        if scope_parts:
+            if len(scope_parts) == 1:
+                rate_stmt["RateBasedStatement"]["ScopeDownStatement"] = scope_parts[0]
+            else:
+                rate_stmt["RateBasedStatement"]["ScopeDownStatement"] = {
+                    "AndStatement": {"Statements": scope_parts}}
+
+        aws_action = ACTION_MAP.get(rule.get("action", "block"), {"Block": {}})
+        rn = unique_rule_name(rule["name"])
+        all_rules.append({
+            "Name": rn, "Priority": priority,
+            "Action": aws_action, "Statement": rate_stmt,
+            "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                                 "MetricName": rn},
+        })
+        priority += 1
+
+    # Managed rules
+    managed_rules, priority = build_managed_rules(priority, skip_labels_present, wcu)
+    all_rules.extend(managed_rules)
+
+    # ── Build WebACLs ────────────────────────────────────────────────────────
+
+    def build_webacl(name, lid, advanced_ddos):
+        ddos_rule = build_anti_ddos_rule(0, advanced=advanced_ddos)
+        wcu.add(f"AntiDDoS-{name}", 250)
+        acl_rules = [ddos_rule] + all_rules
+        return {
+            "Type": "AWS::WAFv2::WebACL",
+            "Properties": {
+                "Name": name, "Scope": "CLOUDFRONT",
+                "DefaultAction": {"Allow": {}},
+                "Rules": acl_rules,
+                "VisibilityConfig": {"SampledRequestsEnabled": True,
+                                     "CloudWatchMetricsEnabled": True,
+                                     "MetricName": name},
+            }
+        }
+
+    resources["WebACLWebsite"] = build_webacl("waf-website", "WebACLWebsite", advanced_ddos=False)
+    resources["WebACLApiFile"] = build_webacl("waf-api-file", "WebACLApiFile", advanced_ddos=True)
+
+    # ── Quota validation ─────────────────────────────────────────────────────
+
+    errors = []
+    if wcu.total > MAX_WCU:
+        errors.append(f"WCU total {wcu.total} exceeds maximum {MAX_WCU}")
+    elif wcu.total > WARN_WCU:
+        warnings.append(f"WCU total {wcu.total} exceeds {WARN_WCU} (extra charges apply)")
+    if refs.count > MAX_REF_STATEMENTS:
+        errors.append(f"Reference statements {refs.count} exceeds maximum {MAX_REF_STATEMENTS} per WebACL")
+    if rate_rule_count > MAX_RATE_RULES:
+        errors.append(f"Rate-based rules {rate_rule_count} exceeds maximum {MAX_RATE_RULES}")
+    if len(resources) > MAX_STACK_RESOURCES:
+        errors.append(f"Stack resources {len(resources)} exceeds maximum {MAX_STACK_RESOURCES}")
+
+    # ── Assemble template ────────────────────────────────────────────────────
+
+    template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Description": "AWS WAF configuration — converted from Cloudflare",
+        "Resources": resources,
+        "Outputs": {
+            "WebACLWebsiteArn": {"Description": "Website WebACL ARN",
+                                 "Value": {"Fn::GetAtt": ["WebACLWebsite", "Arn"]}},
+            "WebACLApiFileArn": {"Description": "API/File WebACL ARN",
+                                 "Value": {"Fn::GetAtt": ["WebACLApiFile", "Arn"]}},
+        }
+    }
+
+    return template, wcu, warnings, errors
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: waf-generate-cfn.py <output_dir>", file=sys.stderr)
+        sys.exit(1)
+
+    output_dir = os.path.expanduser(sys.argv[1])
+    ir_path = os.path.join(output_dir, "waf_ir.json")
+
+    if not os.path.exists(ir_path):
+        print(f"ERROR: {ir_path} not found", file=sys.stderr)
+        sys.exit(1)
+
+    with open(ir_path) as f:
+        ir = json.load(f)
+
+    template, wcu, warnings, errors = generate(ir)
+
+    # Write template
+    out_path = os.path.join(output_dir, "waf-cloudformation.json")
+    with open(out_path, "w") as f:
+        json.dump(template, f, indent=2, ensure_ascii=False)
+
+    template_size = os.path.getsize(out_path)
+    if template_size > 1_000_000:
+        warnings.append(f"Template size {template_size} bytes exceeds 1 MB")
+
+    # Report
+    num_resources = len(template["Resources"])
+    num_rules = len(template["Resources"].get("WebACLWebsite", {}).get("Properties", {}).get("Rules", []))
+
+    for w in warnings:
+        print(f"  WARN: {w}", file=sys.stderr)
+
+    if errors:
+        for e in errors:
+            print(f"  ERROR: {e}", file=sys.stderr)
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: ERROR\nERRORS: {len(errors)}")
+        sys.exit(2)
+
+    print(f"OK: {num_resources} resources, {num_rules} rules, WCU={wcu.total} → {out_path}")
+    print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nOUTPUT_FILE: {out_path}\n"
+          f"RESOURCES: {num_resources}\nRULES: {num_rules}\nWCU: {wcu.total}")
+
+
+if __name__ == "__main__":
+    main()
