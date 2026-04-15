@@ -164,10 +164,11 @@ Shared policies → Lambda@Edge (if any) → each domain independently → KVS d
 
 Conversion time depends on the number of rules/domains, LLM API latency, and parallel batch size. Benchmark with the included `examples/cloudflare-configs/` (1 zone, 7 proxied domains, 34 CDN rules + 8 WAF rules across 12 rule types — including regex expressions, OR conditions, geo-based routing, CORS, bulk redirects, and inline error pages), using `claude-sonnet-4.6-1m` on Anthropic API:
 
-| Pipeline | Parallel batch size 2 | Parallel batch size 4 |
-|----------|----------------------|----------------------|
-| WAF | ~15 min | ~10 min |
-| CDN | ~32 min | ~20 min |
+| Pipeline | Time |
+|----------|------|
+| WAF | <1 second (all Python, no LLM) |
+| CDN (batch size 2) | ~32 min |
+| CDN (batch size 4) | ~20 min |
 
 Where the time goes:
 - **WAF**: Entire Python pipeline finishes in <1 second (zero LLM invocations).
