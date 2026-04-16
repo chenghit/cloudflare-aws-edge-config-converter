@@ -34,9 +34,8 @@ managed rule groups. CloudFormation handles resource ordering automatically.
 ### WAF notes
 
 - WAF resources with `Scope: CLOUDFRONT` must be in `us-east-1`.
-- Two Web ACLs are generated: `waf-website` (Anti-DDoS challenge enabled) and
-  `waf-api-file` (challenge disabled, block sensitivity MEDIUM). Associate the
-  appropriate one with your CloudFront distribution.
+- **Legacy mode** (≤50 IP sets): Two Web ACLs — `waf-website` (search engine labeling + Anti-DDoS challenge + always-on challenge) and `waf-api-file` (Anti-DDoS challenge disabled, block sensitivity MEDIUM).
+- **Per-domain mode** (>50 IP sets): One WebACL per proxied domain. All include search engine labeling, Anti-DDoS, and always-on challenge (Count mode). Customize per-domain after deployment — see the post-deployment checklist in `README_aws-waf-deployment.md`.
 - All managed rules use Count mode for initial monitoring. Switch to Block after
   validating no false positives.
 - Check `README_aws-waf-deployment.md` (auto-generated) for rule-specific notes,
