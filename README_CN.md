@@ -76,7 +76,7 @@ kiro-cli chat
 
 **WAF 流程**（全 Python，零 LLM）：分析 IP 列表 → 分析自定义规则 → 分析速率限制 → 合并 → 校验 → 生成 CloudFormation
 
-**CDN 流程**（4 个 LLM 阶段 + 7 个 Python 脚本）：解析 DNS → 校验用户输入 → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → 生成每域名 JS → 校验 JS
+**CDN 流程**（2 个 LLM 阶段 + 9 个 Python 脚本）：解析 DNS → 校验用户输入 → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → **🐍 生成每域名 JS** → **🐍 校验 JS**
 
 CDN Stage 3–7.6 是确定性 Python 脚本，替代了原来的 LLM subagent。它们负责规则解析、字段映射、表达式分析、缓存行为组装、策略去重、IR 校验、共享策略生成和每域名 Terraform 骨架——全是查表和结构化操作，不需要 LLM 判断。这使得 Stage 3–7.6 瞬间完成（任意域名数量 <1 秒）、完全可复现，并省去了每个 zone 约 30 分钟的 LLM 处理时间。Stage 7.6 生成每域名的部署后验证测试脚本。剩余的 LLM 阶段（8–9）负责 JS 代码生成和校验，这些确实需要语言模型能力。
 
@@ -96,7 +96,7 @@ flowchart TD
     CDN7 --> CDN75["🐍 TF 骨架"]
     CDN75 --> CDN76["🐍 测试脚本"]
     CDN76 --> CDN8["TF 域名 × N"]
-    CDN8 --> CDN9["JS 校验"]
+    CDN8 --> CDN9["🐍 JS 校验"]
     CDN9 -->|通过| CDN_Done([CDN Terraform + JS ✅])
 
     style Main fill:#f9f,stroke:#333

@@ -76,7 +76,7 @@ The tool runs as a Kiro CLI skill with an orchestrator that dispatches to specia
 
 **WAF pipeline** (all Python, zero LLM): analyze IP lists → analyze custom rules → analyze rate limits → merge → validate → generate CloudFormation
 
-**CDN pipeline** (4 LLM stages + 7 Python scripts): parse DNS → validate user input → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → **generate shared policies (Python)** → **generate per-domain Terraform scaffold (Python)** → **generate per-domain test scripts (Python)** → generate per-domain JS → validate JS
+**CDN pipeline** (2 LLM stages + 9 Python scripts): parse DNS → validate user input → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → **generate shared policies (Python)** → **generate per-domain Terraform scaffold (Python)** → **generate per-domain test scripts (Python)** → **generate per-domain JS (Python)** → **validate JS (Python)**
 
 CDN Stages 3–7.6 are deterministic Python scripts that replaced LLM subagents. They handle rule parsing, field mapping, expression analysis, cache behavior assembly, policy deduplication, IR validation, shared policy generation, and per-domain Terraform scaffold — all table-lookup and structural operations that don't need LLM judgment. This makes Stages 3–7.6 instant (<1 second for any number of domains), fully reproducible, and eliminates ~30 minutes of LLM processing per zone. Stage 7.6 generates per-domain test scripts for post-deployment validation. The remaining LLM stages (8–9) handle JS code generation and validation, which genuinely benefits from language model capabilities.
 
@@ -95,8 +95,8 @@ flowchart TD
     CDN6 -->|PASS| CDN7["🐍 Shared Policies"]
     CDN7 --> CDN75["🐍 TF Scaffold"]
     CDN75 --> CDN76["🐍 Test Scripts"]
-    CDN76 --> CDN8["TF Domain × N"]
-    CDN8 --> CDN9["JS Validator × N"]
+    CDN76 --> CDN8["🐍 JS Gen"]
+    CDN8 --> CDN9["🐍 JS Validate"]
     CDN9 -->|PASS| CDN_Done([CDN Terraform + JS ✅])
 
     style Main fill:#f9f,stroke:#333
