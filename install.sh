@@ -31,9 +31,6 @@ rm -rf \
   "$SKILLS_DIR/SKILL.md" \
   "$SKILLS_DIR/scripts"
 
-cp -r cf-waf-analyzer "$SKILLS_DIR/"
-cp -r cf-waf-analyzer-validator "$SKILLS_DIR/"
-cp -r cf-waf-terraform-generator "$SKILLS_DIR/"
 cp -r cf-cdn-dns-parser "$SKILLS_DIR/"
 cp -r cf-cdn-input-validator "$SKILLS_DIR/"
 cp -r cf-cdn-tf-domain "$SKILLS_DIR/"
@@ -42,7 +39,7 @@ cp cloudflare-aws-converter/SKILL.md "$SKILLS_DIR/"
 cp -r cloudflare-aws-converter/references "$SKILLS_DIR/"
 cp -r cloudflare-aws-converter/scripts "$SKILLS_DIR/"
 
-# Copy subagent configurations
+# Copy subagent configurations (CDN only — WAF pipeline has no LLM subagents)
 echo "Copying subagent configurations to $AGENTS_DIR..."
 rm -f "$AGENTS_DIR/cf-waf-converter.json"
 rm -f "$AGENTS_DIR/cf-functions-converter.json"
@@ -52,9 +49,10 @@ rm -f "$AGENTS_DIR/cf-cdn-ir-finalizer.json"
 rm -f "$AGENTS_DIR/cf-cdn-ir-final-validator.json"
 rm -f "$AGENTS_DIR/cf-cdn-tf-shared-policies.json"
 rm -f "$AGENTS_DIR/cloudflare-aws-converter.json"
-cp subagents/cf-waf-analyzer.json "$AGENTS_DIR/"
-cp subagents/cf-waf-analyzer-validator.json "$AGENTS_DIR/"
-cp subagents/cf-waf-terraform-generator.json "$AGENTS_DIR/"
+# Remove old WAF subagent configs
+rm -f "$AGENTS_DIR/cf-waf-analyzer.json"
+rm -f "$AGENTS_DIR/cf-waf-analyzer-validator.json"
+rm -f "$AGENTS_DIR/cf-waf-terraform-generator.json"
 cp subagents/cf-cdn-dns-parser.json "$AGENTS_DIR/"
 cp subagents/cf-cdn-input-validator.json "$AGENTS_DIR/"
 cp subagents/cf-cdn-tf-domain.json "$AGENTS_DIR/"

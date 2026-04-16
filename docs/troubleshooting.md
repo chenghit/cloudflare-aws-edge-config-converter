@@ -12,8 +12,8 @@
 - Agent doesn't read reference documents
 
 **Solution**:
-1. Try manual invocation first: `/agent swap cf-waf-analyzer` then give your instruction. If this works, the issue is with orchestrator routing, not the skill itself.
-2. Verify installation: Check if `~/.kiro/agents/cf-waf-analyzer.json` exists
+1. Try manual invocation first: `/agent swap cf-cdn-dns-parser` then give your instruction. If this works, the issue is with orchestrator routing, not the skill itself.
+2. Verify installation: Check if `~/.kiro/agents/cf-cdn-dns-parser.json` exists
 3. Restart Kiro CLI: Exit and start a new `kiro-cli chat` session
 4. List available agents: Use `/agent list` to see installed subagents
 
@@ -130,3 +130,39 @@
    aws iam delete-role --role-name cfcdn-<sanitized_domain>-lambda-edge
    ```
    Then re-run `terraform apply`.
+
+
+## WAF CloudFormation "Duplicate Resource" Error
+
+**Problem**: `aws cloudformation deploy` fails with `some resource in your request is a duplicate of an existing one`
+
+**Cause**: A previous CloudFormation stack deployment failed and rolled back, but some resources (IP sets, WebACLs) were not fully cleaned up. CloudFormation cannot create resources with the same Name + Scope combination.
+
+**Solution**:
+
+1. Delete the failed stack:
+   ```bash
+   aws cloudformation delete-stack --stack-name cloudflare-waf-migration --region us-east-1
+   aws cloudformation wait stack-delete-complete --stack-name cloudflare-waf-migration --region us-east-1
+   ```
+
+2. If residual resources remain after stack deletion, remove them manually:
+   ```bash
+   # List orphaned resources
+   aws wafv2 list-ip-sets --scope CLOUDFRONT --region us-east-1
+   aws wafv2 list-web-acls --scope CLOUDFRONT --region us-east-1
+
+   # Delete each orphan (get Id and LockToken from the list output)
+   aws wafv2 delete-ip-set --scope CLOUDFRONT --region us-east-1 \
+     --name <name> --id <id> --lock-token <lock-token>
+   aws wafv2 delete-web-acl --scope CLOUDFRONT --region us-east-1 \
+     --name <name> --id <id> --lock-token <lock-token>
+   ```
+
+3. Re-deploy:
+   ```bash
+   aws cloudformation deploy \
+     --template-file waf-cloudformation.json \
+     --stack-name cloudflare-waf-migration \
+     --region us-east-1
+   ```

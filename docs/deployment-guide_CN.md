@@ -8,36 +8,34 @@
 
 ```
 cloudflare-to-aws-waf/
-├── waf_ir.json                             # 结构化 IR（generator 的输入）
-├── versions.tf                             # Provider 版本约束
-├── ip_sets.tf                              # 共享 IP sets（两个 ACL 都会引用）
-├── main.tf                                 # Locals + 两个 module 调用（website + api-and-file）
-├── modules/
-│   └── waf/
-│       ├── main.tf                         # Web ACL 资源定义
-│       ├── variables.tf                    # Module 输入变量
-│       └── outputs.tf                      # Module 输出
-└── README_aws-waf-terraform-deployment.md  # 自动生成的部署说明
+├── waf_ir_ip.json                  # IP 列表 + 访问规则 IR
+├── waf_ir_custom.json              # 自定义规则 IR
+├── waf_ir_rate.json                # 限速规则 IR
+├── waf_ir.json                     # 合并后的 IR（所有规则类型）
+├── waf-cloudformation.json         # CloudFormation 模板（部署这个）
+└── README_aws-waf-deployment.md    # 自动生成的部署说明
 ```
 
 ### WAF 部署
 
-WAF 是单个 root module，一次 `terraform apply` 搞定：
+WAF 使用 CloudFormation，一条命令搞定：
 
 ```bash
 cd cloudflare-to-aws-waf
-terraform init
-terraform plan    # 仔细看一下 plan
-terraform apply
+aws cloudformation deploy \
+  --template-file waf-cloudformation.json \
+  --stack-name cloudflare-waf-migration \
+  --region us-east-1
 ```
 
-根目录的 `main.tf` 调用 `modules/waf/` 两次——一次给 website Web ACL，一次给 API/file Web ACL。共享 IP sets 在根级别定义，传给两个 module 调用。
+模板包含所有 IP sets、两个 Web ACL（website + API/file）和托管规则组。CloudFormation 自动处理资源创建顺序。
 
 ### WAF 注意事项
 
-- WAF 资源是区域性的。把 AWS provider region 设成你 ALB/API Gateway 所在的区域，或者用 `us-east-1`（如果是关联 CloudFront 的 WAF）。
-- 检查 `ip_sets.tf`——Cloudflare 规则里的 IP 地址是直接转换过来的，确认下在 AWS 环境里还对不对。
-- 看看 `README_aws-waf-terraform-deployment.md`（自动生成的），里面有转换过程中各规则的备注。
+- `Scope: CLOUDFRONT` 的 WAF 资源必须在 `us-east-1`。
+- 生成两个 Web ACL：`waf-website`（Anti-DDoS challenge 启用）和 `waf-api-file`（challenge 禁用，block 灵敏度 MEDIUM）。根据你的 CloudFront 分配关联对应的 ACL。
+- 所有托管规则使用 Count 模式做初始监控。确认没有误报后再切换到 Block。
+- 查看 `README_aws-waf-deployment.md`（自动生成）了解规则备注、WCU 汇总和不可转换项。
 
 ---
 
