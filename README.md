@@ -188,7 +188,6 @@ Or leave the cert ARN blank in the CSV — the tool generates a `data "aws_acm_c
 <summary>What the tool does NOT configure</summary>
 
 - **CloudFront access logging** — involves S3 bucket decisions outside migration scope. Add `logging_config` to `main.tf` if needed.
-- **Lambda@Edge deployment** — code is generated but ARN placeholders must be filled after deploying. See [Deployment Guide](./docs/deployment-guide.md).
 - **DNS cutover** — distributions are created but DNS records are not modified.
 
 </details>

@@ -186,7 +186,6 @@ aws acm request-certificate \
 <summary>本工具不配置的内容</summary>
 
 - **CloudFront 访问日志** — 涉及 S3 桶决策，超出迁移范围。如需要，自行在 `main.tf` 中添加 `logging_config`。
-- **Lambda@Edge 部署** — 代码已生成，但 ARN 占位符需在部署后填入。详见 [部署指南](./docs/deployment-guide.md)。
 - **DNS 切换** — 创建了 distribution 但不修改 DNS 记录。
 
 </details>
