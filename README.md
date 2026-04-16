@@ -112,7 +112,6 @@ flowchart TD
 
 ```
 cloudflare-to-aws-cdn/
-├── user_input_template.csv          # Fill this in, save as user_input.csv
 ├── dns_manifest.yaml
 ├── domain_scope.json
 ├── conversion_report.md             # Non-convertible rules + warnings
@@ -159,7 +158,7 @@ Shared policies → Lambda@Edge (if any) → each domain independently → KVS d
 <details>
 <summary>Expected conversion time</summary>
 
-Conversion time depends on the number of rules/domains and LLM API latency. Benchmark with the included `examples/cloudflare-configs/` (1 zone, 7 proxied domains, 34 CDN rules + 8 WAF rules across 12 rule types — including regex expressions, OR conditions, geo-based routing, CORS, bulk redirects, and inline error pages), using `claude-sonnet-4.6-1m` on Anthropic API:
+Conversion time depends on the number of rules/domains. Benchmark with the included `examples/cloudflare-configs/` (1 zone, 7 proxied domains, 34 CDN rules + 8 WAF rules across 12 rule types — including regex expressions, OR conditions, geo-based routing, CORS, bulk redirects, and inline error pages):
 
 | Pipeline | Time |
 |----------|------|
@@ -168,11 +167,10 @@ Conversion time depends on the number of rules/domains and LLM API latency. Benc
 
 Where the time goes:
 - **WAF**: Entire Python pipeline finishes in <1 second (zero LLM invocations).
-- **CDN**: All 11 Python stages finish in <1 second total. The only delay is the user pause between Stage 1 and Stage 2 (filling in `user_input.csv`).
+- **CDN**: All 10 Python stages finish in <1 second total. Fully automated, no user interaction.
 
 Factors that affect conversion time:
-- **LLM API latency** varies by provider, region, and time of day. Anthropic direct API is typically faster than AWS Bedrock.
-- **Number of domains** does NOT affect CDN Stages 3–9 (Python processes all domains in one invocation). Only Stages 1–2 scale with domain count, and they're fast (~4 min total).
+- **Number of domains** does NOT affect performance — Python processes all domains in one invocation.
 
 </details>
 

@@ -69,7 +69,7 @@ Determine what the user wants from their message. There are two dimensions:
 | CDN only | CDN full pipeline | CDN full pipeline |
 | Both | WAF pipeline → CDN pipeline | WAF pipeline → CDN pipeline |
 
-**Both pipelines in one session is supported.** WAF pipeline uses zero LLM tokens (<1 second). CDN pipeline uses LLM only for Stages 1–2 (~4 min). Total token usage is manageable in a single session. Run WAF first (instant), then CDN (pauses for user input at Stage 1).
+**Both pipelines in one session is supported.** Both WAF and CDN pipelines are zero LLM, <1 second each. Run WAF first, then CDN — fully automated, no user interaction.
 
 ### Step 2: Extract config path and validate single-zone
 
@@ -156,7 +156,7 @@ All stages are deterministic Python scripts. No LLM subagents. No user interacti
 python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-parse-dns.py "{config_path}" "cloudflare-to-aws-cdn"
 ```
 Parse the `---RESULT---` block:
-- `STATUS: OK` → proceed directly to Stage 3 (no user pause needed).
+- `STATUS: OK` → proceed directly to Stage 3.
   If the result includes WARNINGS about non-convertible origins or CloudFront loop exclusions, report them to the user.
 - `STATUS: FATAL` → report the `CONTEXT` field to the user and stop.
 

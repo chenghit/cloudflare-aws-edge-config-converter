@@ -45,10 +45,8 @@ kiro-cli chat
 - **Kiro CLI** >= 1.24 — [安装文档](https://kiro.dev/docs/getting-started/installation/)。⚠️ 不推荐使用 Kiro IDE（不支持 subagent 中的 `skill://` 资源绑定）。**避免使用 Kiro CLI 1.28.0** — 该版本有两个 bug（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)、[#6163](https://github.com/kirodotdev/Kiro/issues/6163)）会导致 subagent pipeline 无法运行，已在 1.28.1 中修复。**Kiro CLI 1.29.x** 存在回归 bug：未显式指定 `model` 字段的 subagent 会报 `Missing modelId` 错误（[#7321](https://github.com/kirodotdev/Kiro/issues/7321)）。临时解决方案：在 `~/.kiro/agents/` 下的每个 agent 配置中添加 `"model": "claude-sonnet-4.6"`。
 - **Terraform** >= 1.8.0，AWS Provider >= 6.x — [安装 Terraform](https://developer.hashicorp.com/terraform/install)。仅 CDN pipeline 需要。WAF pipeline 使用 CloudFormation（不需要 Terraform）。
 - **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF pipeline 完全基于 Python（表达式解析、分析、验证、CloudFormation 生成）。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）。macOS 和大多数 Linux 发行版已预装。转换流程无需第三方包（仅用标准库）。**部署阶段**：有 KVS 的 CDN 域名（批量重定向、IP 列表、错误页面）会生成 `seed-kvs.py` 脚本，需要 `boto3`——部署前运行 `pip install boto3` 安装。
-- **模型**：最低 `claude-sonnet-4.6-1m`。在 Kiro 中通过 `/model` 切换。Kiro CLI 仅支持 Amazon Bedrock 上的 Claude 模型。
-  - **WAF 迁移**：无模型要求——WAF pipeline 完全是确定性 Python，零 LLM 调用。任何模型都可以，因为编排器只运行 shell 命令。
-  - **CDN 迁移**：无论域名数量，统一使用 `claude-sonnet-4.6-1m`。CDN Stage 3–9 是 Python 脚本（无 LLM 开销）。仅 Stage 1–2（DNS 解析、输入校验）使用 LLM subagent，单次生成约 200 行输出，远低于 Sonnet 的 64K output 上限。
-- **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。运行前申请通配符证书（如 `*.example.com`），或在 CSV 中留空让 Terraform 自动查找已签发的证书。
+- **模型**：无模型要求——WAF 和 CDN pipeline 都是确定性 Python，零 LLM 调用。任何模型都可以，因为编排器只运行 shell 命令。
+- **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。运行前申请通配符证书（如 `*.example.com`），Terraform 会自动查找已签发的证书。
 - **输入格式**：仅支持 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 导出。不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)——详见 [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)
 
 ## 转换范围
@@ -114,7 +112,6 @@ flowchart TD
 
 ```
 cloudflare-to-aws-cdn/
-├── user_input_template.csv          # 填写后另存为 user_input.csv
 ├── dns_manifest.yaml
 ├── domain_scope.json
 ├── conversion_report.md             # 不可转换规则 + 警告
@@ -168,7 +165,7 @@ cloudflare-to-aws-cdn/
 
 时间分布：
 - **WAF**：全 Python pipeline，总计 <1 秒（无 LLM 调用）。
-- **CDN**：全部 11 个 Python 阶段总计 <1 秒。唯一的延迟是 Stage 1 和 Stage 2 之间的用户暂停（填写 `user_input.csv`）。
+- **CDN**：全部 10 个 Python 阶段总计 <1 秒。全自动，无用户交互。
 
 影响因素：
 - **LLM API 延迟**因服务商、区域和时段而异。Anthropic 直连 API 通常比 AWS Bedrock 快。
