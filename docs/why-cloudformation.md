@@ -70,3 +70,7 @@ The old pipeline used 3 LLM subagents with 16 reference documents to generate Te
 ## CDN Pipeline Still Uses Terraform
 
 The CDN pipeline (CloudFront distributions, cache policies, CloudFront Functions) continues to generate Terraform. CloudFront resources don't have the recursive nesting problem, and Terraform's module system is genuinely useful for managing per-domain CloudFront distributions with shared policies.
+
+## Per-Domain WebACL Splitting
+
+When a customer's Cloudflare config has many inline IP lists (>50 total IP sets), the pipeline automatically switches to **per-domain WebACLs** — one WebACL per proxied domain. This solves the AWS WAF limit of 50 IP set + regex set references per WebACL. Host-specific rules are placed only in the relevant domain's WebACL, and redundant host conditions are stripped. Each WebACL includes search engine labeling, Anti-DDoS protection, and an always-on challenge rule. See the generated deployment guide for post-deployment customization steps.

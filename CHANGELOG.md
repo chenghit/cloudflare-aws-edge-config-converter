@@ -2,6 +2,31 @@
 
 ## 2026-04-16
 
+### WAF: Per-domain WebACL with host-based rule splitting
+
+When a customer's Cloudflare config has many inline IP lists (>50 total IP sets), the WAF pipeline now automatically switches to per-domain WebACLs — one per proxied domain. This solves the AWS WAF limit of 50 IP set + regex set references per WebACL.
+
+**What changed**:
+- New: `waf-check-split.py` — auto-decides legacy (2 WebACLs) vs per-domain split based on IP set count
+- New: `waf-split-by-host.py` — splits IR by domain, strips redundant host conditions, re-derives scope-down per domain
+- New: `extract_host_scope()` in `waf_common.py` — analyzes condition trees for host field references (eq, in, contains, branched OR)
+- Modified: `waf-generate-cfn.py` — per-domain WebACL generation, IP set dedup (when inline >100), injected security rules
+- Modified: `waf-generate-readme.py` — per-domain deployment guide with post-deployment checklist
+- Modified: `waf-pipeline.sh` — new check-split and split-by-host steps, `--force-split` flag for testing
+- Modified: `SKILL.md` — documents new pipeline steps and `--force-split` flag
+
+**Injected security rules** (both legacy and split modes):
+- Search engine labeling rule (Count + label for Googlebot/Bingbot/YandexBot by UA + ASN)
+- Anti-DDoS AMR with scope-down excluding search engine label
+- Always-on challenge rule (Count action — user changes to Challenge after review)
+- Legacy mode: Website WebACL gets all three; API/File WebACL gets Anti-DDoS only (challenge disabled)
+- Split mode: all domains get all three; users customize per-domain after deployment
+
+**Auto-split decision tree**:
+1. Total IP sets (named + inline) ≤ 50 → legacy mode (2 WebACLs)
+2. > 50 → per-domain split
+3. Inline IP sets > 100 → cross-rule dedup (merge identical inline IP sets)
+
 ### CDN JS generation and validation replaced with deterministic Python
 
 CDN Stages 8 (JS generation) and 9 (JS validation) previously used LLM subagents (`cf-cdn-tf-domain`, `cf-cdn-js-validator`) invoked once per domain. These are now deterministic Python scripts (`cdn-generate-js.py`, `cdn-validate-js.py`) that process all domains in a single invocation.
