@@ -2,6 +2,21 @@
 
 ## 2026-04-16
 
+### CDN Stages 1-2 replaced with Python — entire tool is now zero LLM
+
+CDN Stages 1 (DNS parsing) and 2 (input validation) were the last LLM subagents. Both performed purely structural operations (JSON/CSV/YAML parsing, field validation) that required zero judgment. Now replaced by a single `cdn-parse-dns.py` that outputs both `dns_manifest.yaml` and `domain_scope.json` directly — no user input CSV, no validation stage, no user pause.
+
+**Impact**: The entire tool (WAF + CDN) now runs with zero LLM invocations, zero user interaction. CDN pipeline time drops from ~7 min to <1 second. All domains default to `apply_default_cache_behavior: false` and `cert_arn_mode: "data_source"` (Terraform auto-lookup).
+
+**What changed**:
+- New: `cdn-parse-dns.py` — DNS.txt → dns_manifest.yaml + domain_scope.json (SaaS detection, origin classification, CloudFront loop exclusion, A/AAAA non-convertible handling)
+- Deleted: `cf-cdn-dns-parser/` subagent
+- Deleted: `cf-cdn-input-validator/` subagent
+- Deleted: `subagents/` directory (empty after removal)
+- Deleted: `cdn-validate-input.py` (no longer needed — no user CSV to validate)
+- Updated: `SKILL.md` — Stage 1 outputs domain_scope.json directly, no Stage 2, no user pause
+- Updated: `install.sh` — no subagent copying, only cleanup of old configs
+
 ### WAF: Per-domain WebACL with host-based rule splitting
 
 When a customer's Cloudflare config has many inline IP lists (>50 total IP sets), the WAF pipeline now automatically switches to per-domain WebACLs — one per proxied domain. This solves the AWS WAF limit of 50 IP set + regex set references per WebACL.

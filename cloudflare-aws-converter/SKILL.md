@@ -34,17 +34,16 @@ Orchestrate conversion of Cloudflare configurations to AWS by delegating to spec
 
 ### CDN Pipeline
 
-| Subagent | Handles | Trigger when user mentions |
-|----------|---------|---------------------------|
-| `cf-cdn-dns-parser` | DNS export → domain manifest + input template | CDN, full migration, domains, DNS |
-| `cf-cdn-input-validator` | Validates user_input.csv → domain_scope.json | (invoked automatically after user fills input) |
+| Component | Type | Description |
+|-----------|------|-------------|
+| `cdn-parse-dns.py` | Python | DNS.txt → dns_manifest.yaml + domain_scope.json (no user input needed) |
 
 | Component | Type | Description |
 |-----------|------|-------------|
 | `cdn-generate-js.py` | Python | IR → CloudFront Function JS + Lambda@Edge handlers (all domains) |
 | `cdn-validate-js.py` | Python | Validates generated JS files (all domains) |
 
-**Stages 8–9 are deterministic Python scripts.** No LLM subagents are used for JS generation or validation.
+**All CDN stages are deterministic Python scripts.** No LLM subagents are used.
 
 ## Workflow
 
@@ -70,7 +69,7 @@ Determine what the user wants from their message. There are two dimensions:
 | CDN only | CDN full pipeline | CDN full pipeline |
 | Both | WAF pipeline → CDN pipeline | WAF pipeline → CDN pipeline |
 
-**Both pipelines in one session is supported.** WAF pipeline uses zero LLM tokens (<1 second). CDN pipeline uses LLM only for Stages 1–2 (~4 min). Total token usage is manageable in a single session. Run WAF first (instant), then CDN (pauses for user input at Stage 1).
+**Both pipelines in one session is supported.** Both WAF and CDN pipelines are zero LLM, <1 second each. Run WAF first, then CDN — fully automated, no user interaction.
 
 ### Step 2: Extract config path and validate single-zone
 
@@ -94,7 +93,6 @@ Before proceeding, check the structure of the provided path:
 **Account directory check**: Verify that `{config_path}` contains an `account/` subdirectory. If not found, warn the user: "No `account/` directory found under the provided path. IP lists and bulk redirect lists may not be found. CloudflareBackup always creates an `account/` directory — make sure you provided the backup root directory, not a zone subdirectory."
 
 If the user requests CDN full pipeline (Terraform generation), also check for:
-- `cloudflare-to-aws-cdn/user_input.csv` — if it exists, CDN pipeline can start from Stage 2
 - `cloudflare-to-aws-cdn/domain_scope.json` — if it exists, pipeline can start from Stage 3
 
 ### Step 2b: Initialize CDN output directory (CDN pipeline only)
@@ -117,13 +115,9 @@ working directory.
 
 Skip this step if `cloudflare-to-aws-cdn/` already exists **in the current working directory** (resuming a previous run).
 
-### Step 3: Invoke subagents
+### Step 3: Run pipeline scripts
 
-**CRITICAL: Every subagent query MUST start with a skill-loading instruction.** Subagents may not automatically load their skill file when invoked via `use_subagent`. Prefix every query with:
-
-`"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/{subagent-name}/SKILL.md and follow its workflow. You MUST use tools to read input files and write output files — do NOT generate output from memory or skip tool calls. "`
-
-Where `{subagent-name}` matches the subagent directory name (e.g., `cf-cdn-dns-parser`, `cf-cdn-input-validator`).
+No LLM subagents are used. All stages are Python scripts invoked via `execute_bash`.
 
 ---
 
@@ -153,28 +147,18 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-cdn-dns-p
 
 ---
 
-#### CDN full pipeline (2 LLM stages + 9 Python scripts — runs when user wants Terraform output for CloudFront):
+#### CDN full pipeline (0 LLM stages + 10 Python scripts — runs when user wants Terraform output for CloudFront):
 
-Stages 3–7.6 are deterministic Python scripts (no LLM). Stages 1, 2 use LLM subagents.
+All stages are deterministic Python scripts. No LLM subagents. No user interaction required.
 
-**Stage 1: DNS Parsing**
-1. Invoke `cf-cdn-dns-parser` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-dns-parser/SKILL.md and follow its workflow. You MUST use tools (glob, fs_read, fs_write) to read DNS.txt and write output files — do NOT generate output from memory. The Cloudflare backup directory is {config_path}. Parse DNS.txt to identify all proxied domains. Detect any Cloudflare for SaaS configurations. Group domains by apex domain for ACM certificate planning. Write dns_manifest.yaml and user_input_template.csv to the cloudflare-to-aws-cdn/ output directory. Generate output files in {user_language}."`
-2. **Verify output files exist** (CRITICAL — subagents may skip tool calls):
-   ```bash
-   ls cloudflare-to-aws-cdn/dns_manifest.yaml cloudflare-to-aws-cdn/user_input_template.csv
-   ```
-   - If both files exist → **pause and tell the user**:
-     > "DNS parsing complete. I found N proxied domains. Please fill in `cloudflare-to-aws-cdn/user_input_template.csv` with your ACM certificate ARNs (or leave blank for auto-lookup), then save it as `cloudflare-to-aws-cdn/user_input.csv`. Let me know when it's ready to proceed."
-   - If either file is missing → **re-invoke the subagent once** with the same query. If the second attempt also fails to produce files → stop and tell the user: "DNS parser failed to write output files after 2 attempts. Please file a GitHub issue."
-   - Wait for the user to confirm before continuing.
-
-**Stage 2: Input Validation**
-1. Invoke `cf-cdn-input-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-input-validator/SKILL.md and follow its workflow. You MUST use tools to read and write files. The Cloudflare backup directory is {config_path}. Validate cloudflare-to-aws-cdn/user_input.csv against cloudflare-to-aws-cdn/dns_manifest.yaml. On success, write cloudflare-to-aws-cdn/domain_scope.json. Report any validation errors with remediation hints. Generate output files in {user_language}."`
-2. **Verify output**: run `ls cloudflare-to-aws-cdn/domain_scope.json`. If missing after subagent claims PASS → re-invoke once.
-3. Check the `---RESULT---` block:
-   - `STATUS: PASS` → proceed to Stage 3
-   - `STATUS: ERRORS` → show the user the list of errors and ask them to fix `user_input.csv`, then re-invoke Stage 2
-   - `STATUS: CANNOT_FIX` → stop and tell the user which fields require manual correction
+**Stage 1: DNS Parsing + Domain Scope** (Python script, no LLM)
+```bash
+python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-parse-dns.py "{config_path}" "cloudflare-to-aws-cdn"
+```
+Parse the `---RESULT---` block:
+- `STATUS: OK` → proceed directly to Stage 3.
+  If the result includes WARNINGS about non-convertible origins or CloudFront loop exclusions, report them to the user.
+- `STATUS: FATAL` → report the `CONTEXT` field to the user and stop.
 
 **Stage 3–6: Preprocess → Validate → Finalize → Validate Final** (Python scripts, no LLM)
 
@@ -344,9 +328,7 @@ If the user's message is not in English, read `cloudflare-to-aws-cdn/conversion_
 
 ## Important Rules
 
-- **Never read config files yourself** — always delegate to subagents (CDN pipeline) or scripts (WAF pipeline)
+- **Never read config files yourself** — always delegate to scripts (both WAF and CDN pipelines)
 - **Pass the exact path** the user provided; do not modify or resolve it
 - **WAF pipeline**: single `waf-pipeline.sh` call, no LLM subagents, no retry logic needed
-- **CDN pipeline**: serial execution for pipeline stages. Stages 3–9 are single Python script invocations (no parallelization needed). Stages 1–2 use LLM subagents.
-- If the user's request is ambiguous about which conversion is needed, infer from context rather than asking
-- **CDN full pipeline requires a user pause at Stage 1** — always wait for the user to fill in `user_input.csv` before invoking Stage 2. Do not attempt to auto-fill the CSV.
+- **CDN pipeline**: serial execution for pipeline stages. All 10 stages are Python script invocations (no LLM subagents, no parallelization needed, no user interaction).

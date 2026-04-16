@@ -1,9 +1,0 @@
-{
-  "name": "cf-cdn-dns-parser",
-  "description": "Parses Cloudflare DNS backup file (DNS.txt) to identify proxied (orange-cloud) domains that require CloudFront distributions. Detects Cloudflare for SaaS configurations and aborts if found. Groups subdomains by apex domain for ACM certificate planning, identifies wildcard and multi-level subdomains, and produces dns_manifest.yaml (structured domain list with metadata) and user_input_template.csv (per-domain spreadsheet for the operator to fill in default cache behavior and ACM certificate ARN).",
-  "resources": [
-    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-dns-parser/SKILL.md"
-  ],
-  "tools": ["fs_read", "fs_write", "glob", "grep"],
-  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
-}
