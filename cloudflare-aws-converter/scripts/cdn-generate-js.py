@@ -8,6 +8,7 @@ Usage:
     python3 cdn-generate-js.py <output_dir>
     # output_dir is e.g. "cloudflare-to-aws-cdn"
 """
+import copy
 import json
 import os
 import re
@@ -387,7 +388,8 @@ def dyn_expr_to_js(node, target="cff"):
         if "u" in flags_val:
             result = f"Buffer.from({field_js}, 'utf8').toString('base64url')"
             if "p" in flags_val:
-                result += " + '='.repeat((4 - Buffer.from({field_js}, 'utf8').toString('base64url').length % 4) % 4)"
+                b64_expr = f"Buffer.from({field_js}, 'utf8').toString('base64url')"
+                result = f"(()=>{{const b={b64_expr};return b+'='.repeat((4-b.length%4)%4)}})()"
             return result
         if "p" in flags_val:
             return f"Buffer.from({field_js}, 'utf8').toString('base64')"
@@ -856,13 +858,14 @@ def process_domain(ir, output_dir):
 
     if vr_size > CFF_SIZE_LIMIT and origin_ops:
         # Escalate: move origin_override to Lambda@Edge
-        # Regenerate CFF without origin_override
-        for beh in ir.get("cache_behaviors", []):
+        # Regenerate CFF without origin_override using a deep copy
+        ir_no_origin = copy.deepcopy(ir)
+        for beh in ir_no_origin.get("cache_behaviors", []):
             beh["viewer_request_ops"] = [
                 op for op in beh.get("viewer_request_ops", [])
                 if op.get("type") != "origin_override"
             ]
-        vr_js = generate_viewer_request_js(ir)
+        vr_js = generate_viewer_request_js(ir_no_origin)
         vr_size = len(vr_js.encode("utf-8"))
         if vr_size > CFF_SIZE_LIMIT:
             vr_js = minify_js(vr_js)
