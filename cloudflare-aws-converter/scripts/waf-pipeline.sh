@@ -56,6 +56,19 @@ run_step "Count Validate" \
 run_step "IR Validate" \
     python3 "$SCRIPTS_DIR/waf-validate-ir.py" "$CONFIG_PATH" "$OUTPUT_DIR"
 
+# Check split decision
+run_step "Check split" \
+    python3 "$SCRIPTS_DIR/waf-check-split.py" "$OUTPUT_DIR"
+
+# Read split decision
+SPLIT_MODE=$(python3 -c "import json; d=json.load(open('$OUTPUT_DIR/waf_split_decision.json')); print(d['mode'])")
+DEDUP=$(python3 -c "import json; d=json.load(open('$OUTPUT_DIR/waf_split_decision.json')); print(d['dedup'])")
+
+if [ "$SPLIT_MODE" = "split" ]; then
+    run_step "Split by host" \
+        python3 "$SCRIPTS_DIR/waf-split-by-host.py" "$CONFIG_PATH" "$OUTPUT_DIR"
+fi
+
 run_step "Generate CloudFormation" \
     python3 "$SCRIPTS_DIR/waf-generate-cfn.py" "$OUTPUT_DIR"
 

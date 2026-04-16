@@ -476,7 +476,7 @@ def build_managed_rules(priority_start, skip_labels_present, wcu):
     return rules, p
 
 
-def build_anti_ddos_rule(priority, advanced=False):
+def build_anti_ddos_rule(priority, advanced=False, scope_down_exclude_labels=None):
     """Build Anti-DDoS managed rule."""
     rule = {
         "Name": "AWS-AWSManagedRulesAntiDDoSRuleSet", "Priority": priority,
@@ -486,12 +486,76 @@ def build_anti_ddos_rule(priority, advanced=False):
         "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
                              "MetricName": "AWS-AWSManagedRulesAntiDDoSRuleSet"},
     }
+    mrg = rule["Statement"]["ManagedRuleGroupStatement"]
     if advanced:
-        rule["Statement"]["ManagedRuleGroupStatement"]["ManagedRuleGroupConfigs"] = [{
+        mrg["ManagedRuleGroupConfigs"] = [{
             "AWSManagedRulesAntiDDoSRuleSet": {
                 "ClientSideActionConfig": {"Challenge": {"UsageOfAction": "DISABLED"}},
                 "SensitivityToBlock": "MEDIUM"}}]
+    else:
+        mrg["ManagedRuleGroupConfigs"] = [{
+            "AWSManagedRulesAntiDDoSRuleSet": {
+                "ClientSideActionConfig": {"Challenge": {
+                    "UsageOfAction": "ENABLED", "Sensitivity": "HIGH"}},
+                "SensitivityToBlock": "LOW"}}]
+    if scope_down_exclude_labels:
+        if len(scope_down_exclude_labels) == 1:
+            mrg["ScopeDownStatement"] = {"NotStatement": {"Statement": {
+                "LabelMatchStatement": {"Scope": "LABEL", "Key": scope_down_exclude_labels[0]}}}}
+        else:
+            mrg["ScopeDownStatement"] = {"AndStatement": {"Statements": [
+                {"NotStatement": {"Statement": {"LabelMatchStatement": {
+                    "Scope": "LABEL", "Key": lbl}}}} for lbl in scope_down_exclude_labels]}}
     return rule
+
+
+def build_search_engine_label_rule(priority):
+    """Build search engine labeling rule (Count + label)."""
+    bots = [
+        ("Googlebot", [15169]),
+        ("bingbot", [8075]),
+        ("YandexBot", [13238]),
+    ]
+    stmts = []
+    for ua, asns in bots:
+        stmts.append({"AndStatement": {"Statements": [
+            {"ByteMatchStatement": {
+                "SearchString": ua, "PositionalConstraint": "CONTAINS",
+                "FieldToMatch": {"SingleHeader": {"Name": "user-agent"}},
+                "TextTransformations": [{"Priority": 0, "Type": "NONE"}]}},
+            {"AsnMatchStatement": {"AsnList": asns}},
+        ]}})
+    return {
+        "Name": "search-engine-label", "Priority": priority,
+        "Action": {"Count": {}},
+        "Statement": {"OrStatement": {"Statements": stmts}},
+        "RuleLabels": [{"Name": "awswaf:search-engine"}],
+        "VisibilityConfig": {"SampledRequestsEnabled": True,
+                             "CloudWatchMetricsEnabled": True,
+                             "MetricName": "search-engine-label"},
+    }
+
+
+def build_always_on_challenge_rule(priority):
+    """Build always-on challenge rule (Count action — user changes to Challenge after review)."""
+    uris = ["/", "/login", "/signup"]
+    stmts = [{"ByteMatchStatement": {
+        "SearchString": uri, "PositionalConstraint": "EXACTLY",
+        "FieldToMatch": {"UriPath": {}},
+        "TextTransformations": [{"Priority": 0, "Type": "NONE"}]}} for uri in uris]
+    return {
+        "Name": "always-on-challenge", "Priority": priority,
+        "Action": {"Count": {}},
+        "Statement": {"OrStatement": {"Statements": stmts}},
+        "VisibilityConfig": {"SampledRequestsEnabled": True,
+                             "CloudWatchMetricsEnabled": True,
+                             "MetricName": "always-on-challenge"},
+    }
+
+
+def sanitize_webacl_name(hostname):
+    """Convert hostname to valid AWS WAF Name: dots → underscores."""
+    return hostname.replace('.', '_')
 
 
 # ── Main generation logic ────────────────────────────────────────────────────
@@ -710,16 +774,12 @@ def generate(ir):
         })
         priority += 1
 
-    # Managed rules
-    managed_rules, priority = build_managed_rules(priority, skip_labels_present, wcu)
-    all_rules.extend(managed_rules)
+    # Managed rules (built separately, added per-WebACL)
+    managed_rules, _ = build_managed_rules(priority, skip_labels_present, wcu)
 
     # ── Build WebACLs ────────────────────────────────────────────────────────
 
-    def build_webacl(name, lid, advanced_ddos):
-        ddos_rule = build_anti_ddos_rule(0, advanced=advanced_ddos)
-        wcu.add(f"AntiDDoS-{name}", 250)
-        acl_rules = [ddos_rule] + all_rules
+    def build_webacl(name, acl_rules):
         return {
             "Type": "AWS::WAFv2::WebACL",
             "Properties": {
@@ -728,12 +788,70 @@ def generate(ir):
                 "Rules": acl_rules,
                 "VisibilityConfig": {"SampledRequestsEnabled": True,
                                      "CloudWatchMetricsEnabled": True,
-                                     "MetricName": name},
+                                     "MetricName": sanitize_rule_name(name)},
             }
         }
 
-    resources["WebACLWebsite"] = build_webacl("waf-website", "WebACLWebsite", advanced_ddos=False)
-    resources["WebACLApiFile"] = build_webacl("waf-api-file", "WebACLApiFile", advanced_ddos=True)
+    # Legacy mode: 2 WebACLs
+    # Website WebACL: search engine label + Anti-DDoS with scope-down + customer rules + always-on challenge + managed
+    se_rule = build_search_engine_label_rule(0)
+    wcu.add("search-engine-label", 6)
+    ddos_website = build_anti_ddos_rule(1, advanced=False,
+                                         scope_down_exclude_labels=["awswaf:search-engine"])
+    wcu.add("AntiDDoS-website", 250)
+
+    # Find where rate rules end to insert always-on challenge
+    rate_end_idx = len(all_rules)
+    for idx, r in enumerate(all_rules):
+        if "RateBasedStatement" not in r.get("Statement", {}):
+            if idx > 0 and "RateBasedStatement" in all_rules[idx - 1].get("Statement", {}):
+                rate_end_idx = idx
+                break
+
+    aoc_rule = build_always_on_challenge_rule(0)  # priority reassigned below
+    wcu.add("always-on-challenge", 3)
+
+    # Reassign priorities for website WebACL
+    website_rules = [se_rule, ddos_website]
+    p = 2
+    for r in all_rules[:rate_end_idx]:
+        r_copy = dict(r)
+        r_copy["Priority"] = p
+        website_rules.append(r_copy)
+        p += 1
+    aoc_rule["Priority"] = p
+    website_rules.append(aoc_rule)
+    p += 1
+    for r in all_rules[rate_end_idx:]:
+        r_copy = dict(r)
+        r_copy["Priority"] = p
+        website_rules.append(r_copy)
+        p += 1
+    for mr in managed_rules:
+        mr_copy = dict(mr)
+        mr_copy["Priority"] = p
+        website_rules.append(mr_copy)
+        p += 1
+
+    resources["WebACLWebsite"] = build_webacl("waf-website", website_rules)
+
+    # API/File WebACL: Anti-DDoS (challenge disabled) + customer rules + managed
+    ddos_api = build_anti_ddos_rule(0, advanced=True)
+    wcu.add("AntiDDoS-api", 250)
+    api_rules = [ddos_api]
+    p = 1
+    for r in all_rules:
+        r_copy = dict(r)
+        r_copy["Priority"] = p
+        api_rules.append(r_copy)
+        p += 1
+    for mr in managed_rules:
+        mr_copy = dict(mr)
+        mr_copy["Priority"] = p
+        api_rules.append(mr_copy)
+        p += 1
+
+    resources["WebACLApiFile"] = build_webacl("waf-api-file", api_rules)
 
     # ── Quota validation ─────────────────────────────────────────────────────
 
@@ -751,16 +869,311 @@ def generate(ir):
 
     # ── Assemble template ────────────────────────────────────────────────────
 
+    outputs = {}
+    for lid, res in resources.items():
+        if res["Type"] == "AWS::WAFv2::WebACL":
+            name = res["Properties"]["Name"]
+            outputs[f"{lid}Arn"] = {"Description": f"{name} WebACL ARN",
+                                    "Value": {"Fn::GetAtt": [lid, "Arn"]}}
+
     template = {
         "AWSTemplateFormatVersion": "2010-09-09",
         "Description": "AWS WAF configuration — converted from Cloudflare",
         "Resources": resources,
-        "Outputs": {
-            "WebACLWebsiteArn": {"Description": "Website WebACL ARN",
-                                 "Value": {"Fn::GetAtt": ["WebACLWebsite", "Arn"]}},
-            "WebACLApiFileArn": {"Description": "API/File WebACL ARN",
-                                 "Value": {"Fn::GetAtt": ["WebACLApiFile", "Arn"]}},
+        "Outputs": outputs,
+    }
+
+    return template, wcu, warnings, errors
+
+
+def generate_split(split_ir, dedup):
+    """Generate CloudFormation template with per-domain WebACLs."""
+    resources = {}
+    warnings = []
+    wcu = WCUTracker()
+    used_ids = set()
+
+    def unique_id(base):
+        lid = sanitize_logical_id(base)
+        if lid in used_ids:
+            i = 2
+            while f"{lid}{i}" in used_ids:
+                i += 1
+            lid = f"{lid}{i}"
+        used_ids.add(lid)
+        return lid
+
+    # ── Build named IP set resources ─────────────────────────────────────────
+
+    ip_list_map = {}
+    asn_lists = {}
+
+    for lst in split_ir.get("ip_lists", []):
+        name = lst.get("name", "")
+        conv = lst.get("conversion", "")
+        if conv == "ip_set":
+            v4 = lst.get("items_ipv4", [])
+            v6 = lst.get("items_ipv6", [])
+            if v4:
+                lid = unique_id(f"IPSet{name}Ipv4")
+                resources[lid] = {"Type": "AWS::WAFv2::IPSet", "Properties": {
+                    "Name": f"{name}-ipv4", "Scope": "CLOUDFRONT",
+                    "IPAddressVersion": "IPV4", "Addresses": v4}}
+                ip_list_map[f"{name}-ipv4"] = lid
+            if v6:
+                lid = unique_id(f"IPSet{name}Ipv6")
+                resources[lid] = {"Type": "AWS::WAFv2::IPSet", "Properties": {
+                    "Name": f"{name}-ipv6", "Scope": "CLOUDFRONT",
+                    "IPAddressVersion": "IPV6", "Addresses": v6}}
+                ip_list_map[f"{name}-ipv6"] = lid
+            if not v4 and not v6:
+                ip_list_map[f"{name}-ipv4"] = None
+                ip_list_map[f"{name}-ipv6"] = None
+        elif conv == "asn_inline":
+            asn_lists[name] = lst.get("items", [])
+            ip_list_map[name] = "__asn__"
+
+    # ── Build inline IP sets (with optional dedup) ───────────────────────────
+
+    inline_ip_set_ids = {}
+    if dedup:
+        content_to_id = {}
+        for domain_data in split_ir.get("domains", {}).values():
+            for section in ("ip_access_rules", "custom_rules", "rate_limiting_rules"):
+                for rule in domain_data.get(section, []):
+                    for ipset in rule.get("ip_sets", []):
+                        name = ipset["name"]
+                        addrs = ipset.get("addresses", [])
+                        if not addrs:
+                            continue
+                        is_v6 = any(is_ipv6(a) for a in addrs)
+                        key = (("IPV6" if is_v6 else "IPV4"), tuple(sorted(addrs)))
+                        if key in content_to_id:
+                            inline_ip_set_ids[name] = content_to_id[key]
+                        else:
+                            lid = unique_id(f"IPSet{name}")
+                            content_to_id[key] = lid
+                            inline_ip_set_ids[name] = lid
+                            resources[lid] = {"Type": "AWS::WAFv2::IPSet", "Properties": {
+                                "Name": name, "Scope": "CLOUDFRONT",
+                                "IPAddressVersion": key[0], "Addresses": addrs}}
+    else:
+        seen_names = set()
+        for domain_data in split_ir.get("domains", {}).values():
+            for section in ("ip_access_rules", "custom_rules", "rate_limiting_rules"):
+                for rule in domain_data.get(section, []):
+                    for ipset in rule.get("ip_sets", []):
+                        name = ipset["name"]
+                        if name in seen_names:
+                            continue
+                        seen_names.add(name)
+                        addrs = ipset.get("addresses", [])
+                        if not addrs:
+                            continue
+                        is_v6 = any(is_ipv6(a) for a in addrs)
+                        lid = unique_id(f"IPSet{name}")
+                        inline_ip_set_ids[name] = lid
+                        resources[lid] = {"Type": "AWS::WAFv2::IPSet", "Properties": {
+                            "Name": name, "Scope": "CLOUDFRONT",
+                            "IPAddressVersion": "IPV6" if is_v6 else "IPV4",
+                            "Addresses": addrs}}
+
+    # ── Build per-domain WebACLs ─────────────────────────────────────────────
+
+    skip_labels_present = split_ir.get("skip_labels_present", {})
+    total_rules = 0
+
+    for domain, domain_data in split_ir.get("domains", {}).items():
+        refs = RefCounter()
+        used_rule_names = set()
+
+        def unique_rule_name(raw_name):
+            name = sanitize_rule_name(raw_name)
+            if name not in used_rule_names:
+                used_rule_names.add(name)
+                return name
+            i = 2
+            while f"{name}-{i}" in used_rule_names:
+                i += 1
+            deduped = f"{name}-{i}"[:128]
+            used_rule_names.add(deduped)
+            return deduped
+
+        acl_rules = []
+        p = 0
+
+        # Injected: search engine label
+        acl_rules.append(build_search_engine_label_rule(p))
+        wcu.add(f"search-engine-{domain}", 6)
+        p += 1
+
+        # Injected: Anti-DDoS with scope-down
+        acl_rules.append(build_anti_ddos_rule(p, advanced=False,
+                                               scope_down_exclude_labels=["awswaf:search-engine"]))
+        wcu.add(f"AntiDDoS-{domain}", 250)
+        p += 1
+
+        # IP Access Rules
+        for rule in domain_data.get("ip_access_rules", []):
+            if rule.get("convertibility") == "no":
+                continue
+            cond = rule.get("conditions")
+            if not cond:
+                continue
+            ctx = {"wcu": wcu, "refs": refs, "warnings": warnings,
+                   "rule_name": rule["name"], "ip_list_map": ip_list_map,
+                   "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
+                   "current_rule_ip_sets": rule.get("ip_sets", [])}
+            stmt = conditions_to_statement(cond, ctx)
+            aws_action = ACTION_MAP.get(rule.get("mode", "block"), {"Block": {}})
+            rn = unique_rule_name(rule["name"])
+            acl_rules.append({
+                "Name": rn, "Priority": p,
+                "Action": aws_action, "Statement": stmt,
+                "VisibilityConfig": {"SampledRequestsEnabled": True,
+                                     "CloudWatchMetricsEnabled": True, "MetricName": rn},
+            })
+            p += 1
+
+        # Custom Rules
+        for rule in domain_data.get("custom_rules", []):
+            if rule.get("convertibility") == "no":
+                continue
+            cond = rule.get("conditions") or rule.get("convertible_conditions")
+            if not cond:
+                continue
+            ctx = {"wcu": wcu, "refs": refs, "warnings": warnings,
+                   "rule_name": rule["name"], "ip_list_map": ip_list_map,
+                   "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
+                   "current_rule_ip_sets": rule.get("ip_sets", [])}
+            stmt = conditions_to_statement(cond, ctx)
+
+            if rule.get("scope_down", {}).get("skip_all_remaining_custom_rules"):
+                not_label = {"NotStatement": {"Statement": {"LabelMatchStatement": {
+                    "Scope": "LABEL", "Key": "skip:all_remaining_custom_rules"}}}}
+                if "AndStatement" in stmt:
+                    stmt["AndStatement"]["Statements"].insert(0, not_label)
+                else:
+                    stmt = {"AndStatement": {"Statements": [not_label, stmt]}}
+                wcu.add(rule["name"], 1)
+
+            action = rule.get("action", "block")
+            if action == "skip":
+                aws_action = {"Count": {}}
+            else:
+                aws_act = rule.get("aws_action", action)
+                aws_action = ACTION_MAP.get(aws_act, {"Block": {}})
+
+            rn = unique_rule_name(rule["name"])
+            waf_rule = {
+                "Name": rn, "Priority": p,
+                "Action": aws_action, "Statement": stmt,
+                "VisibilityConfig": {"SampledRequestsEnabled": True,
+                                     "CloudWatchMetricsEnabled": True, "MetricName": rn},
+            }
+            if action == "skip" and rule.get("labels"):
+                waf_rule["RuleLabels"] = [{"Name": l} for l in rule["labels"]]
+            acl_rules.append(waf_rule)
+            p += 1
+
+        # Rate-Limiting Rules
+        for rule in domain_data.get("rate_limiting_rules", []):
+            if rule.get("convertibility") == "no":
+                continue
+            cond = rule.get("conditions") or rule.get("convertible_conditions")
+            ctx = {"wcu": wcu, "refs": refs, "warnings": warnings,
+                   "rule_name": rule["name"], "ip_list_map": ip_list_map,
+                   "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
+                   "current_rule_ip_sets": rule.get("ip_sets", [])}
+            rate_stmt = {"RateBasedStatement": {
+                "Limit": rule.get("aws_limit", 100),
+                "AggregateKeyType": "IP",
+                "EvaluationWindowSec": rule.get("aws_evaluation_window_sec", 60),
+            }}
+            wcu.add(rule["name"], 2)
+            scope_parts = []
+            if rule.get("scope_down", {}).get("skip_http_ratelimit"):
+                scope_parts.append({"NotStatement": {"Statement": {"LabelMatchStatement": {
+                    "Scope": "LABEL", "Key": "skip:http_ratelimit"}}}})
+                wcu.add(rule["name"], 1)
+            if cond:
+                cond_stmt = conditions_to_statement(cond, ctx)
+                if scope_parts and "AndStatement" in cond_stmt:
+                    scope_parts.extend(cond_stmt["AndStatement"]["Statements"])
+                else:
+                    scope_parts.append(cond_stmt)
+            if scope_parts:
+                if len(scope_parts) == 1:
+                    rate_stmt["RateBasedStatement"]["ScopeDownStatement"] = scope_parts[0]
+                else:
+                    rate_stmt["RateBasedStatement"]["ScopeDownStatement"] = {
+                        "AndStatement": {"Statements": scope_parts}}
+            aws_action = ACTION_MAP.get(rule.get("action", "block"), {"Block": {}})
+            rn = unique_rule_name(rule["name"])
+            acl_rules.append({
+                "Name": rn, "Priority": p,
+                "Action": aws_action, "Statement": rate_stmt,
+                "VisibilityConfig": {"SampledRequestsEnabled": True,
+                                     "CloudWatchMetricsEnabled": True, "MetricName": rn},
+            })
+            p += 1
+
+        # Injected: always-on challenge (after rate rules, before managed)
+        acl_rules.append(build_always_on_challenge_rule(p))
+        wcu.add(f"always-on-challenge-{domain}", 3)
+        p += 1
+
+        # Managed rules
+        managed, p = build_managed_rules(p, skip_labels_present, wcu)
+        acl_rules.extend(managed)
+
+        total_rules += len(acl_rules)
+
+        # Check per-WebACL IP set refs
+        if refs.count > MAX_REF_STATEMENTS:
+            warnings.append(f"Domain {domain}: {refs.count} IP set refs > {MAX_REF_STATEMENTS} limit")
+
+        webacl_name = sanitize_webacl_name(domain)
+        lid = f"WebACL{sanitize_logical_id(domain)}"
+        lid_unique = unique_id(lid)
+        resources[lid_unique] = {
+            "Type": "AWS::WAFv2::WebACL",
+            "Properties": {
+                "Name": webacl_name, "Scope": "CLOUDFRONT",
+                "DefaultAction": {"Allow": {}},
+                "Rules": acl_rules,
+                "VisibilityConfig": {"SampledRequestsEnabled": True,
+                                     "CloudWatchMetricsEnabled": True,
+                                     "MetricName": sanitize_rule_name(webacl_name)},
+            }
         }
+
+    # ── Quota validation ─────────────────────────────────────────────────────
+
+    errors = []
+    num_webacls = sum(1 for r in resources.values() if r["Type"] == "AWS::WAFv2::WebACL")
+    num_ip_sets = sum(1 for r in resources.values() if r["Type"] == "AWS::WAFv2::IPSet")
+    if num_webacls > 80:
+        warnings.append(f"{num_webacls} WebACLs approaching 100 per-region limit")
+    if num_ip_sets > 80:
+        warnings.append(f"{num_ip_sets} IP sets approaching 100 per-region limit")
+    if len(resources) > MAX_STACK_RESOURCES:
+        errors.append(f"Stack resources {len(resources)} exceeds maximum {MAX_STACK_RESOURCES}")
+
+    # ── Assemble template ────────────────────────────────────────────────────
+
+    outputs = {}
+    for lid, res in resources.items():
+        if res["Type"] == "AWS::WAFv2::WebACL":
+            name = res["Properties"]["Name"]
+            outputs[f"{lid}Arn"] = {"Description": f"{name} WebACL ARN",
+                                    "Value": {"Fn::GetAtt": [lid, "Arn"]}}
+
+    template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Description": "AWS WAF configuration — converted from Cloudflare (per-domain WebACLs)",
+        "Resources": resources,
+        "Outputs": outputs,
     }
 
     return template, wcu, warnings, errors
@@ -774,16 +1187,33 @@ def main():
         sys.exit(1)
 
     output_dir = os.path.expanduser(sys.argv[1])
-    ir_path = os.path.join(output_dir, "waf_ir.json")
 
-    if not os.path.exists(ir_path):
-        print(f"ERROR: {ir_path} not found", file=sys.stderr)
-        sys.exit(1)
+    # Check split decision
+    decision_path = os.path.join(output_dir, "waf_split_decision.json")
+    mode = "legacy"
+    dedup = False
+    if os.path.exists(decision_path):
+        with open(decision_path) as f:
+            decision = json.load(f)
+        mode = decision.get("mode", "legacy")
+        dedup = decision.get("dedup", False)
 
-    with open(ir_path) as f:
-        ir = json.load(f)
-
-    template, wcu, warnings, errors = generate(ir)
+    if mode == "split":
+        split_path = os.path.join(output_dir, "waf_ir_split.json")
+        if not os.path.exists(split_path):
+            print(f"ERROR: {split_path} not found (split mode requires waf-split-by-host.py)", file=sys.stderr)
+            sys.exit(1)
+        with open(split_path) as f:
+            split_ir = json.load(f)
+        template, wcu, warnings, errors = generate_split(split_ir, dedup)
+    else:
+        ir_path = os.path.join(output_dir, "waf_ir.json")
+        if not os.path.exists(ir_path):
+            print(f"ERROR: {ir_path} not found", file=sys.stderr)
+            sys.exit(1)
+        with open(ir_path) as f:
+            ir = json.load(f)
+        template, wcu, warnings, errors = generate(ir)
 
     # Write template
     out_path = os.path.join(output_dir, "waf-cloudformation.json")
@@ -796,7 +1226,8 @@ def main():
 
     # Report
     num_resources = len(template["Resources"])
-    num_rules = len(template["Resources"].get("WebACLWebsite", {}).get("Properties", {}).get("Rules", []))
+    num_webacls = sum(1 for r in template["Resources"].values() if r["Type"] == "AWS::WAFv2::WebACL")
+    num_ip_sets = sum(1 for r in template["Resources"].values() if r["Type"] == "AWS::WAFv2::IPSet")
 
     for w in warnings:
         print(f"  WARN: {w}", file=sys.stderr)
@@ -807,9 +1238,11 @@ def main():
         print(f"\n---RESULT---\nSPEC: 1\nSTATUS: ERROR\nERRORS: {len(errors)}")
         sys.exit(2)
 
-    print(f"OK: {num_resources} resources, {num_rules} rules, WCU={wcu.total} → {out_path}")
+    print(f"OK: {num_resources} resources, {num_webacls} WebACLs, "
+          f"{num_ip_sets} IP sets, WCU={wcu.total} → {out_path}")
     print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nOUTPUT_FILE: {out_path}\n"
-          f"RESOURCES: {num_resources}\nRULES: {num_rules}\nWCU: {wcu.total}")
+          f"RESOURCES: {num_resources}\nWEBACLS: {num_webacls}\n"
+          f"IP_SETS: {num_ip_sets}\nWCU: {wcu.total}\nMODE: {mode}")
 
 
 if __name__ == "__main__":

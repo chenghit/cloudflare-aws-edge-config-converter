@@ -14,7 +14,7 @@ import json, sys, os, glob, math
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from waf_expr_parser import parse, extract_ip_sets, ParseError
-from waf_common import classify_convertibility, NON_CONVERTIBLE_AWS_EQUIV
+from waf_common import classify_convertibility, NON_CONVERTIBLE_AWS_EQUIV, extract_host_scope
 
 # ── Rate limit calculation ───────────────────────────────────────────────────
 
@@ -143,6 +143,10 @@ def main():
         ip_sets = extract_ip_sets(cond, description, i + 1)
         if ip_sets:
             entry["ip_sets"] = ip_sets
+
+        # Extract host scope
+        effective_cond = cond if conv != "partial" else entry.get("convertible_conditions", cond)
+        entry["host_scope"] = extract_host_scope(effective_cond)
 
         if fallback:
             entry["_note"] = (f"Converted using fallback (10 req/600s ≈ "
