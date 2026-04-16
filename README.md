@@ -74,7 +74,9 @@ Not all Cloudflare features have CloudFront equivalents. Non-convertible items a
 
 The tool runs as a Kiro CLI skill with an orchestrator that dispatches to specialized subagents (CDN) or runs deterministic Python scripts (WAF).
 
-**WAF pipeline** (all Python, zero LLM): analyze IP lists → analyze custom rules → analyze rate limits → merge → validate → generate CloudFormation
+**WAF pipeline** (all Python, zero LLM): analyze IP lists → analyze custom rules → analyze rate limits → merge → validate → **auto-split decision** → generate CloudFormation
+
+The WAF pipeline automatically detects when inline IP sets exceed the 50 per-WebACL reference limit and switches to per-domain WebACLs (one per proxied domain). In per-domain mode, host-specific rules are placed only in the relevant domain's WebACL, and host conditions are stripped (redundant when a WebACL serves one domain). Each WebACL includes search engine labeling (Googlebot/Bingbot/YandexBot), Anti-DDoS with search engine exclusion, and an always-on challenge rule (Count mode — user activates after review).
 
 **CDN pipeline** (2 LLM stages + 9 Python scripts): parse DNS → validate user input → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → **generate shared policies (Python)** → **generate per-domain Terraform scaffold (Python)** → **generate per-domain test scripts (Python)** → **generate per-domain JS (Python)** → **validate JS (Python)**
 
@@ -84,7 +86,8 @@ CDN Stages 3–9 are deterministic Python scripts that replaced LLM subagents. T
 flowchart TD
     User([User]) -->|"Convert WAF / CDN / All"| Main["Orchestrator"]
 
-    Main -->|WAF| WAF_A1["🐍 IP Analyzer"] --> WAF_A2["🐍 Custom Rules"] --> WAF_A3["🐍 Rate Limits"] --> WAF_M["🐍 Merge + Validate"] --> WAF_G["🐍 Generate CFN"] --> WAF_Done([CloudFormation ✅])
+    Main -->|WAF| WAF_A1["🐍 IP Analyzer"] --> WAF_A2["🐍 Custom Rules"] --> WAF_A3["🐍 Rate Limits"] --> WAF_M["🐍 Merge + Validate"] --> WAF_S{"🐍 Split?"} -->|"≤50 IP sets"| WAF_G["🐍 Generate CFN (2 WebACLs)"] --> WAF_Done([CloudFormation ✅])
+    WAF_S -->|">50 IP sets"| WAF_SP["🐍 Split by Host"] --> WAF_GP["🐍 Generate CFN (per-domain)"] --> WAF_Done
 
     Main -->|CDN| CDN1["DNS Parser"] -->|CSV| Pause[/"⏸ User fills CSV"/]
     Pause --> CDN2["Input Validator"]

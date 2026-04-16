@@ -9,8 +9,14 @@
 
 set -euo pipefail
 
-CONFIG_PATH="${1:?Usage: waf-pipeline.sh <config_path> [output_dir]}"
+CONFIG_PATH="${1:?Usage: waf-pipeline.sh <config_path> [output_dir] [--force-split]}"
 OUTPUT_DIR="${2:-cloudflare-to-aws-waf}"
+FORCE_SPLIT=""
+for arg in "$@"; do
+    if [ "$arg" = "--force-split" ]; then
+        FORCE_SPLIT="--force-split"
+    fi
+done
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Resolve config path
@@ -55,6 +61,19 @@ run_step "Count Validate" \
 
 run_step "IR Validate" \
     python3 "$SCRIPTS_DIR/waf-validate-ir.py" "$CONFIG_PATH" "$OUTPUT_DIR"
+
+# Check split decision
+run_step "Check split" \
+    python3 "$SCRIPTS_DIR/waf-check-split.py" "$OUTPUT_DIR" $FORCE_SPLIT
+
+# Read split decision
+SPLIT_MODE=$(python3 -c "import json; d=json.load(open('$OUTPUT_DIR/waf_split_decision.json')); print(d['mode'])")
+DEDUP=$(python3 -c "import json; d=json.load(open('$OUTPUT_DIR/waf_split_decision.json')); print(d['dedup'])")
+
+if [ "$SPLIT_MODE" = "split" ]; then
+    run_step "Split by host" \
+        python3 "$SCRIPTS_DIR/waf-split-by-host.py" "$CONFIG_PATH" "$OUTPUT_DIR"
+fi
 
 run_step "Generate CloudFormation" \
     python3 "$SCRIPTS_DIR/waf-generate-cfn.py" "$OUTPUT_DIR"

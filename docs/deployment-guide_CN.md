@@ -33,7 +33,8 @@ aws cloudformation deploy \
 ### WAF 注意事项
 
 - `Scope: CLOUDFRONT` 的 WAF 资源必须在 `us-east-1`。
-- 生成两个 Web ACL：`waf-website`（Anti-DDoS challenge 启用）和 `waf-api-file`（challenge 禁用，block 灵敏度 MEDIUM）。根据你的 CloudFront 分配关联对应的 ACL。
+- **Legacy 模式**（≤50 IP sets）：生成两个 Web ACL——`waf-website`（搜索引擎标签 + Anti-DDoS challenge + always-on challenge）和 `waf-api-file`（Anti-DDoS challenge 禁用，block 灵敏度 MEDIUM）。
+- **Per-domain 模式**（>50 IP sets）：每个 proxied 域名一个 WebACL。全部包含搜索引擎标签、Anti-DDoS 和 always-on challenge（Count 模式）。部署后按域名定制——见 `README_aws-waf-deployment.md` 中的部署后检查清单。
 - 所有托管规则使用 Count 模式做初始监控。确认没有误报后再切换到 Block。
 - 查看 `README_aws-waf-deployment.md`（自动生成）了解规则备注、WCU 汇总和不可转换项。
 

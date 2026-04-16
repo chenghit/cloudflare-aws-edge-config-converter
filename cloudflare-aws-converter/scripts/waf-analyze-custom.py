@@ -16,7 +16,7 @@ import json, sys, os, glob, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from waf_expr_parser import parse, extract_ip_sets, ParseError
 from waf_common import (NON_CONVERTIBLE_FIELDS, NON_CONVERTIBLE_AWS_EQUIV,
-                        classify_convertibility)
+                        classify_convertibility, extract_host_scope)
 
 # ── Skip label derivation ────────────────────────────────────────────────────
 
@@ -139,6 +139,10 @@ def main():
             ip_sets = extract_ip_sets(cond, description, i + 1)
             if ip_sets:
                 entry["ip_sets"] = ip_sets
+
+        # Extract host scope
+        effective_cond = cond if conv != "partial" else entry.get("convertible_conditions", cond)
+        entry["host_scope"] = extract_host_scope(effective_cond)
 
         # Skip action handling
         if action == "skip":

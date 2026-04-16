@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """waf-generate-readme.py — Generate WAF deployment README.
 
-Reads waf_ir.json and waf-cloudformation.json for deployment guide,
-non-convertible notes, and WCU summary.
+Reads waf_ir.json (or waf_ir_split.json), waf_split_decision.json,
+and waf-cloudformation.json for deployment guide.
 
 Usage:
     python3 waf-generate-readme.py <output_dir>
@@ -27,21 +27,37 @@ def main():
     with open(ir_path) as f:
         ir = json.load(f)
 
-    # Collect non-convertible notes
-    nc_notes = ir.get("non_convertible_notes", [])
+    # Check split mode
+    decision_path = os.path.join(output_dir, "waf_split_decision.json")
+    mode = "legacy"
+    dedup = False
+    if os.path.exists(decision_path):
+        with open(decision_path) as f:
+            decision = json.load(f)
+        mode = decision.get("mode", "legacy")
+        dedup = decision.get("dedup", False)
 
-    # Collect partial/no rules across all sections
+    # Read CloudFormation template for WebACL names
+    cfn_path = os.path.join(output_dir, "waf-cloudformation.json")
+    webacl_names = []
+    if os.path.exists(cfn_path):
+        with open(cfn_path) as f:
+            cfn = json.load(f)
+        for lid, res in cfn.get("Resources", {}).items():
+            if res.get("Type") == "AWS::WAFv2::WebACL":
+                webacl_names.append(res["Properties"]["Name"])
+
+    # Collect non-convertible notes and partial rules
+    nc_notes = ir.get("non_convertible_notes", [])
     partial_rules = []
     for section in ("ip_access_rules", "custom_rules", "rate_limiting_rules"):
         s = ir.get(section, {})
         if not isinstance(s, dict):
             continue
         for rule in s.get("rules", []):
-            conv = rule.get("convertibility", "yes")
-            if conv == "partial":
+            if rule.get("convertibility") == "partial":
                 partial_rules.append({
                     "name": rule.get("name", ""),
-                    "convertibility": conv,
                     "reason": rule.get("non_convertible_reason", ""),
                     "section": section,
                 })
@@ -58,12 +74,14 @@ def main():
         "",
         "## Overview",
         "",
+        f"- Mode: **{'per-domain WebACLs' if mode == 'split' else 'legacy (2 WebACLs)'}**",
+        f"- WebACLs: {len(webacl_names)}",
         f"- IP lists converted: {ip_lists_count}",
         f"- IP access rules: {ip_count}",
         f"- Custom rules: {custom_count}",
         f"- Rate limiting rules: {rate_count}",
         f"- Non-convertible items: {len(nc_notes)}",
-        f"- Partially converted rules: {len([r for r in partial_rules if r['convertibility'] == 'partial'])}",
+        f"- Partially converted rules: {len(partial_rules)}",
         "",
         "## Prerequisites",
         "",
@@ -95,9 +113,9 @@ def main():
         '  --query "Stacks[0].StackStatus"',
         "```",
         "",
-        "### 4. Associate Web ACL with CloudFront",
+        "### 4. Associate Web ACLs with CloudFront distributions",
         "",
-        "After deployment, get the Web ACL ARNs from stack outputs:",
+        "Get the Web ACL ARNs from stack outputs:",
         "```bash",
         "aws cloudformation describe-stacks \\",
         "  --stack-name cloudflare-waf-migration \\",
@@ -105,68 +123,152 @@ def main():
         '  --query "Stacks[0].Outputs"',
         "```",
         "",
-        "Associate the appropriate Web ACL with your CloudFront distribution:",
-        "```bash",
-        "aws wafv2 associate-web-acl \\",
-        '  --web-acl-arn "<WEB_ACL_ARN>" \\',
-        '  --resource-arn "arn:aws:cloudfront::<ACCOUNT_ID>:distribution/<DIST_ID>"',
-        "```",
-        "",
+    ]
+
+    if mode == "split":
+        lines += [
+            "Associate each domain's Web ACL with its CloudFront distribution:",
+            "```bash",
+            "aws wafv2 associate-web-acl \\",
+            '  --web-acl-arn "<DOMAIN_WEB_ACL_ARN>" \\',
+            '  --resource-arn "arn:aws:cloudfront::<ACCOUNT_ID>:distribution/<DIST_ID>"',
+            "```",
+            "",
+            "WebACL → domain mapping:",
+            "",
+            "| WebACL Name | Domain |",
+            "|-------------|--------|",
+        ]
+        for name in sorted(webacl_names):
+            domain = name.replace("_", ".")
+            lines.append(f"| `{name}` | {domain} |")
+        lines.append("")
+    else:
+        lines += [
+            "Associate the appropriate Web ACL with your CloudFront distribution:",
+            "```bash",
+            "aws wafv2 associate-web-acl \\",
+            '  --web-acl-arn "<WEB_ACL_ARN>" \\',
+            '  --resource-arn "arn:aws:cloudfront::<ACCOUNT_ID>:distribution/<DIST_ID>"',
+            "```",
+            "",
+        ]
+
+    lines += [
         "### 5. Update or destroy",
         "```bash",
-        "# Update (re-run after regenerating template)",
+        "# Update",
         "aws cloudformation deploy \\",
         "  --template-file waf-cloudformation.json \\",
         "  --stack-name cloudflare-waf-migration \\",
         "  --region us-east-1",
         "",
-        "# Destroy all resources",
+        "# Destroy",
         "aws cloudformation delete-stack \\",
         "  --stack-name cloudflare-waf-migration \\",
         "  --region us-east-1",
         "```",
         "",
+    ]
+
+    # Post-deployment checklist
+    lines += [
+        "## ⚠️ Post-Deployment Checklist",
+        "",
+        "### always-on-challenge rule",
+        "",
+        "The `always-on-challenge` rule is deployed with **Count action** (monitoring only). "
+        "It does NOT protect against DDoS until you change it.",
+        "",
+        "1. **Web-facing domains**: Change the `always-on-challenge` rule's action from "
+        "Count to **Challenge**. Add your landing page paths (e.g., `/pricing`, `/about`, "
+        "`/register`) to the rule's URI list.",
+        "2. **Mixed domains** (web frontend + API backend): Same as #1, but also ensure "
+        "all API paths are excluded from challenge rules. API clients cannot solve "
+        "challenges — unexcluded API paths will return 202 challenge responses.",
+        "3. **Pure API / static file domains** (no web frontend): Delete the "
+        "`search-engine-label` rule and the `always-on-challenge` rule from the WebACL. "
+        "In the Anti-DDoS AMR, disable challenge and set block sensitivity to medium.",
+        "",
+        "### Managed rules",
+        "",
+        "All managed rules (CRS, Known Bad Inputs, SQLi, IP Reputation) use **Count mode** "
+        "for initial monitoring. Switch to Block after validating no false positives.",
+        "",
+    ]
+
+    # Rate-limiting note for split mode
+    if mode == "split":
+        lines += [
+            "### Rate-limiting behavioral difference",
+            "",
+            "Cloudflare counts rate limits across all domains in a zone. With per-domain "
+            "WebACLs, each domain's rate counter is independent. This means a client hitting "
+            "multiple domains will have separate rate counters per domain, not a shared one.",
+            "",
+        ]
+
+    # IP set dedup warning
+    if dedup:
+        lines += [
+            "### IP set deduplication",
+            "",
+            "Some inline IP sets with identical addresses were merged to stay within the "
+            "100 IP set per-region limit. If you need to maintain separate lists for "
+            "different rules in the future, duplicate the IP set in the AWS WAF console "
+            "and update the rule references.",
+            "",
+        ]
+
+    # Important notes
+    lines += [
         "## Important Notes",
         "",
         "- **Region**: All WAFv2 resources with `Scope: CLOUDFRONT` must be in `us-east-1`.",
-        "- **Two Web ACLs** are generated:",
-        "  - `waf-website`: For website traffic (Anti-DDoS challenge enabled)",
-        "  - `waf-api-file`: For API/file traffic (Anti-DDoS challenge disabled, block sensitivity MEDIUM)",
-        "  - Rules with `challenge` or `captcha` actions apply to both — review whether these are appropriate for your API endpoints.",
-        "- **All managed rules use Count mode** for initial monitoring. Switch to Block after validating no false positives.",
+    ]
+
+    if mode == "legacy":
+        lines += [
+            "- **Two Web ACLs** are generated:",
+            "  - `waf-website`: For website traffic (search engine labeling + Anti-DDoS "
+            "challenge enabled + always-on challenge)",
+            "  - `waf-api-file`: For API/file traffic (Anti-DDoS challenge disabled, "
+            "block sensitivity MEDIUM)",
+        ]
+    else:
+        lines += [
+            f"- **{len(webacl_names)} per-domain Web ACLs** are generated, one per proxied domain.",
+            "- All WebACLs include search engine labeling, Anti-DDoS with challenge enabled, "
+            "and always-on challenge (Count mode). Customize per-domain after deployment.",
+        ]
+
+    lines += [
         "- **IP sets quota**: Default 100 IP sets per account per region.",
+        "- **WebACL quota**: Default 100 WebACLs per account per region.",
         "- **Rate-based rules**: AWS WAF minimum rate limit is 10 requests per evaluation window.",
         "",
         "## Migration from Terraform",
         "",
         "If you previously deployed WAF resources with the Terraform version of this tool:",
-        "1. Run `terraform destroy` in the old `cloudflare-to-aws-waf/` directory to remove old resources",
+        "1. Run `terraform destroy` in the old `cloudflare-to-aws-waf/` directory",
         "2. Then deploy with CloudFormation using the steps above",
         "",
     ]
 
     # Non-convertible items
-    if nc_notes or partial_rules:
-        lines += [
-            "## Items Requiring Manual Action",
-            "",
-        ]
-
     if nc_notes:
         lines += [
-            "### Non-Convertible Rules",
+            "## Non-Convertible Rules",
             "",
-            "These Cloudflare features have no direct AWS WAF equivalent and were not "
-            "included in the generated CloudFormation template. Manual configuration is required.",
+            "These Cloudflare features have no direct AWS WAF equivalent.",
             "",
-            "| Rule | Field | Reason | AWS Equivalent | Manual Action |",
-            "|------|-------|--------|----------------|---------------|",
+            "| Rule | Field | AWS Equivalent | Manual Action |",
+            "|------|-------|----------------|---------------|",
         ]
         for n in nc_notes:
             lines.append(
                 f"| {n.get('rule', '')} "
                 f"| `{n.get('field', '')}` "
-                f"| {n.get('reason', '')} "
                 f"| {n.get('aws_equivalent', '')} "
                 f"| {n.get('manual_action', '')} |"
             )
@@ -174,23 +276,14 @@ def main():
 
     if partial_rules:
         lines += [
-            "### Partially Converted Rules",
+            "## Partially Converted Rules",
             "",
-            "These rules were converted but some conditions were removed because they "
-            "reference Cloudflare-specific fields. Review the generated CloudFormation template and "
-            "add equivalent AWS WAF conditions where possible.",
-            "",
-            "| Rule | Section | Convertibility | Removed Condition |",
-            "|------|---------|---------------|-------------------|",
+            "| Rule | Section | Removed Condition |",
+            "|------|---------|-------------------|",
         ]
         for r in partial_rules:
             section_label = r["section"].replace("_", " ").title()
-            lines.append(
-                f"| {r['name']} "
-                f"| {section_label} "
-                f"| {r['convertibility']} "
-                f"| {r['reason']} |"
-            )
+            lines.append(f"| {r['name']} | {section_label} | {r['reason']} |")
         lines.append("")
 
     out_path = os.path.join(output_dir, "README_aws-waf-deployment.md")
@@ -199,6 +292,8 @@ def main():
 
     print(f"OK: {out_path} → {len(nc_notes)} non-convertible, "
           f"{len(partial_rules)} partial rules")
+    print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nOUTPUT_DIR: {output_dir}\n"
+          f"TEMPLATE: {os.path.join(output_dir, 'waf-cloudformation.json')}")
 
 
 if __name__ == "__main__":

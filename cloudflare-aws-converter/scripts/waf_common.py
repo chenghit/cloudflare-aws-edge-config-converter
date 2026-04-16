@@ -112,6 +112,114 @@ def _prune_non_convertible(cond):
     return cond, set()
 
 
+# ── Host scope extraction ────────────────────────────────────────────────────
+
+def _parse_host_in_value(value):
+    """Parse host in {"d1" "d2"} value string into list of domains."""
+    import re as _re
+    return _re.findall(r'"([^"]+)"', value)
+
+
+def _extract_branch_host(cond):
+    """Extract host info from a single AND/leaf branch.
+    Returns (host_value, host_op, non_host_condition) or (None, None, cond) if no host."""
+    if "field" in cond and cond.get("field") == "http.host":
+        return cond["value"], cond["operator"], None
+    if cond.get("op") != "and":
+        return None, None, cond
+    host_val, host_op = None, None
+    others = []
+    for item in cond["items"]:
+        if "field" in item and item.get("field") == "http.host":
+            host_val = item["value"]
+            host_op = item["operator"]
+        else:
+            others.append(item)
+    if host_val is None:
+        return None, None, cond
+    if len(others) == 0:
+        return host_val, host_op, None
+    if len(others) == 1:
+        return host_val, host_op, others[0]
+    return host_val, host_op, {"op": "and", "items": others}
+
+
+def extract_host_scope(cond):
+    """Extract host scope from a parsed condition tree.
+
+    Returns dict:
+        {"type": "global"} — no host condition
+        {"type": "single_host", "hosts": ["domain"]}
+        {"type": "multi_host", "hosts": ["d1", "d2"]}
+        {"type": "contains", "contains": ["keyword"]}
+        {"type": "branched", "branches": [{"host": ..., "host_op": ..., "condition": ...}, ...]}
+    """
+    if cond is None:
+        return {"type": "global"}
+
+    # Leaf node
+    if "field" in cond:
+        if cond["field"] == "http.host":
+            op = cond["operator"]
+            if op == "eq":
+                return {"type": "single_host", "hosts": [cond["value"]]}
+            if op == "in":
+                hosts = _parse_host_in_value(cond["value"])
+                return {"type": "multi_host", "hosts": hosts}
+            if op == "contains":
+                return {"type": "contains", "contains": [cond["value"]]}
+        return {"type": "global"}
+
+    op = cond.get("op")
+
+    # NOT — check inner
+    if op == "not":
+        inner_scope = extract_host_scope(cond.get("item"))
+        # not(host ...) is unusual but treat as global to be safe
+        if inner_scope["type"] != "global":
+            return {"type": "global"}
+        return {"type": "global"}
+
+    # AND — look for host field among items
+    if op == "and":
+        host_val, host_op, _ = _extract_branch_host(cond)
+        if host_val is None:
+            return {"type": "global"}
+        if host_op == "eq":
+            return {"type": "single_host", "hosts": [host_val]}
+        if host_op == "in":
+            return {"type": "multi_host", "hosts": _parse_host_in_value(host_val)}
+        if host_op == "contains":
+            return {"type": "contains", "contains": [host_val]}
+        return {"type": "global"}
+
+    # OR — each branch may have different host
+    if op == "or":
+        branches = []
+        all_global = True
+        for item in cond["items"]:
+            host_val, host_op, remainder = _extract_branch_host(item)
+            if host_val is not None:
+                all_global = False
+                if host_op == "in":
+                    # host in {d1 d2} inside an OR branch — expand to per-host
+                    for h in _parse_host_in_value(host_val):
+                        branches.append({"host": h, "host_op": "eq", "condition": remainder})
+                else:
+                    branches.append({"host": host_val, "host_op": host_op, "condition": remainder})
+            else:
+                branches.append({"host": None, "host_op": None, "condition": item})
+        if all_global:
+            return {"type": "global"}
+        # If all branches have the same single host, simplify
+        hosts = set(b["host"] for b in branches if b["host"] is not None)
+        if len(hosts) == 1 and all(b["host"] is not None for b in branches):
+            return {"type": "single_host", "hosts": [hosts.pop()]}
+        return {"type": "branched", "branches": branches}
+
+    return {"type": "global"}
+
+
 def classify_convertibility(cond):
     """Determine convertibility of a conditions tree.
     Returns (convertibility, pruned_tree_or_None, non_convertible_fields)."""

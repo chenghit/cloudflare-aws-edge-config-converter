@@ -74,7 +74,9 @@ kiro-cli chat
 
 本工具作为 Kiro CLI skill 运行，由编排器调度专用 subagent。每个 subagent 拥有隔离的上下文，负责一个流程阶段。
 
-**WAF 流程**（全 Python，零 LLM）：分析 IP 列表 → 分析自定义规则 → 分析速率限制 → 合并 → 校验 → 生成 CloudFormation
+**WAF 流程**（全 Python，零 LLM）：分析 IP 列表 → 分析自定义规则 → 分析速率限制 → 合并 → 校验 → **自动拆分决策** → 生成 CloudFormation
+
+WAF pipeline 自动检测 inline IP set 是否超过每个 WebACL 50 个引用限制，超过时自动切换为 per-domain WebACL（每个 proxied 域名一个）。Per-domain 模式下，host-specific 规则只放到对应域名的 WebACL，host 条件被剥离（WebACL 只服务一个域名时冗余）。每个 WebACL 包含搜索引擎标签规则（Googlebot/Bingbot/YandexBot）、Anti-DDoS（排除搜索引擎）和 always-on challenge 规则（Count 模式——用户确认后手动改为 Challenge）。
 
 **CDN 流程**（2 个 LLM 阶段 + 9 个 Python 脚本）：解析 DNS → 校验用户输入 → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → **🐍 生成每域名 JS** → **🐍 校验 JS**
 
@@ -84,7 +86,8 @@ CDN Stage 3–9 是确定性 Python 脚本，替代了原来的 LLM subagent。�
 flowchart TD
     User([用户]) -->|"转换 WAF / CDN / 全部"| Main["编排器"]
 
-    Main -->|WAF| WAF_A1["🐍 IP 分析"] --> WAF_A2["🐍 自定义规则"] --> WAF_A3["🐍 速率限制"] --> WAF_M["🐍 合并 + 校验"] --> WAF_G["🐍 生成 CFN"] --> WAF_Done([CloudFormation ✅])
+    Main -->|WAF| WAF_A1["🐍 IP 分析"] --> WAF_A2["🐍 自定义规则"] --> WAF_A3["🐍 速率限制"] --> WAF_M["🐍 合并 + 校验"] --> WAF_S{"🐍 拆分?"} -->|"≤50 IP sets"| WAF_G["🐍 生成 CFN (2 WebACL)"] --> WAF_Done([CloudFormation ✅])
+    WAF_S -->|">50 IP sets"| WAF_SP["🐍 按域名拆分"] --> WAF_GP["🐍 生成 CFN (per-domain)"] --> WAF_Done
 
     Main -->|CDN| CDN1["DNS 解析"] -->|CSV| Pause[/"⏸ 用户填写 CSV"/]
     Pause --> CDN2["输入校验"]
