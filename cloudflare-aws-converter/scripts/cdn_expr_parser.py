@@ -501,3 +501,428 @@ def extract_path_pattern_single(cond):
         if pp:
             return pp
     return "*"
+
+
+# ── Full recursive descent parser (Phase 2) ─────────────────────────────────
+# Handles OR, nested AND/OR, NOT — eliminates raw_expression fallback.
+# Output format matches Phase 1: {"field": "uri.path", "op": "eq", "value": "/api"}
+
+class _ParseError(Exception):
+    pass
+
+
+class _Token:
+    __slots__ = ("type", "value", "pos")
+    def __init__(self, type, value, pos):
+        self.type = type
+        self.value = value
+        self.pos = pos
+
+
+# Token types
+_TT_FIELD = 1
+_TT_STRING = 2
+_TT_NUMBER = 3
+_TT_LBRACE = 4
+_TT_RBRACE = 5
+_TT_LPAREN = 6
+_TT_RPAREN = 7
+_TT_COMMA = 8
+_TT_DOLLAR = 9
+_TT_AND = 10
+_TT_OR = 11
+_TT_NOT = 12
+_TT_OP = 13
+_TT_EOF = 14
+
+_OPS = {"eq", "ne", "contains", "matches", "wildcard", "in", "gt", "lt", "ge", "le"}
+_OP_CLIKE = {"==": "eq", "!=": "ne", "~": "matches", ">": "gt", "<": "lt", ">=": "ge", "<=": "le"}
+_FUNC_OPS = {"starts_with", "ends_with", "lower", "upper", "len"}
+
+
+def _tokenize_cdn(expr):
+    tokens = []
+    i = 0
+    n = len(expr)
+    while i < n:
+        if expr[i].isspace():
+            i += 1
+            continue
+        pos = i
+        ch = expr[i]
+        if ch == '(':
+            tokens.append(_Token(_TT_LPAREN, '(', pos)); i += 1
+        elif ch == ')':
+            tokens.append(_Token(_TT_RPAREN, ')', pos)); i += 1
+        elif ch == '{':
+            tokens.append(_Token(_TT_LBRACE, '{', pos)); i += 1
+        elif ch == '}':
+            tokens.append(_Token(_TT_RBRACE, '}', pos)); i += 1
+        elif ch == ',':
+            tokens.append(_Token(_TT_COMMA, ',', pos)); i += 1
+        elif ch == '$':
+            tokens.append(_Token(_TT_DOLLAR, '$', pos)); i += 1
+        elif expr[i:i+2] in ('==', '!=', '>=', '<='):
+            tokens.append(_Token(_TT_OP, _OP_CLIKE[expr[i:i+2]], pos)); i += 2
+        elif ch in ('>', '<'):
+            tokens.append(_Token(_TT_OP, _OP_CLIKE[ch], pos)); i += 1
+        elif ch == '~':
+            tokens.append(_Token(_TT_OP, "matches", pos)); i += 1
+        elif ch == '"' or (ch == 'r' and i + 1 < n and expr[i+1] == '"'):
+            raw = ch == 'r'
+            if raw:
+                i += 1
+            i += 1  # skip "
+            start = i
+            while i < n and expr[i] != '"':
+                if not raw and expr[i] == '\\':
+                    i += 2
+                else:
+                    i += 1
+            val = expr[start:i]
+            if i < n:
+                i += 1
+            tokens.append(_Token(_TT_STRING, val, pos))
+        elif ch.isdigit() or (ch == '-' and i + 1 < n and expr[i+1].isdigit()):
+            start = i
+            if ch == '-':
+                i += 1
+            while i < n and (expr[i].isalnum() or expr[i] in '.:/'):
+                i += 1
+            val = expr[start:i]
+            if re.fullmatch(r'-?\d+', val):
+                tokens.append(_Token(_TT_NUMBER, int(val), pos))
+            elif re.fullmatch(r'-?\d+\.\d+', val):
+                tokens.append(_Token(_TT_NUMBER, float(val), pos))
+            else:
+                tokens.append(_Token(_TT_FIELD, val, pos))
+        elif ch.isalpha() or ch == '_':
+            start = i
+            while i < n and (expr[i].isalnum() or expr[i] in '._'):
+                i += 1
+            word = expr[start:i]
+            if word == "strict":
+                j = i
+                while j < n and expr[j].isspace():
+                    j += 1
+                if expr[j:j+8] == "wildcard":
+                    tokens.append(_Token(_TT_OP, "strict_wildcard", pos)); i = j + 8; continue
+            if word == "and":
+                tokens.append(_Token(_TT_AND, "and", pos))
+            elif word == "or":
+                tokens.append(_Token(_TT_OR, "or", pos))
+            elif word == "not":
+                tokens.append(_Token(_TT_NOT, "not", pos))
+            elif word in _OPS:
+                tokens.append(_Token(_TT_OP, word, pos))
+            else:
+                tokens.append(_Token(_TT_FIELD, word, pos))
+        else:
+            raise _ParseError(f"Unexpected character: {ch!r} at position {pos}")
+    tokens.append(_Token(_TT_EOF, None, len(expr)))
+    return tokens
+
+
+class _CDNParser:
+    """Recursive descent parser producing CDN-format condition trees."""
+
+    def __init__(self, tokens, expr):
+        self.tokens = tokens
+        self.expr = expr
+        self.pos = 0
+
+    def peek(self):
+        return self.tokens[self.pos]
+
+    def advance(self):
+        t = self.tokens[self.pos]
+        self.pos += 1
+        return t
+
+    def expect(self, tt):
+        t = self.advance()
+        if t.type != tt:
+            raise _ParseError(f"Expected token type {tt}, got {t.type} ({t.value!r}) at pos {t.pos}")
+        return t
+
+    def parse(self):
+        result = self._or_expr()
+        if self.peek().type != _TT_EOF:
+            t = self.peek()
+            raise _ParseError(f"Unexpected token after expression: {t.value!r} at pos {t.pos}")
+        return result
+
+    def _or_expr(self):
+        left = self._and_expr()
+        items = [left]
+        while self.peek().type == _TT_OR:
+            self.advance()
+            items.append(self._and_expr())
+        if len(items) == 1:
+            return items[0]
+        return {"logic": "or", "parts": items}
+
+    def _and_expr(self):
+        left = self._not_expr()
+        items = [left]
+        while self.peek().type == _TT_AND:
+            self.advance()
+            items.append(self._not_expr())
+        if len(items) == 1:
+            return items[0]
+        return {"logic": "and", "parts": items}
+
+    def _not_expr(self):
+        if self.peek().type == _TT_NOT:
+            self.advance()
+            inner = self._not_expr()
+            # Flatten not into op: not {field, op: eq} → {field, op: not_eq}
+            if "field" in inner and "op" in inner:
+                inner["op"] = "not_" + inner["op"]
+                return inner
+            # not (logic expr) → wrap
+            return {"logic": "not", "item": inner}
+        return self._atom()
+
+    def _atom(self):
+        t = self.peek()
+        if t.type == _TT_LPAREN:
+            self.advance()
+            result = self._or_expr()
+            self.expect(_TT_RPAREN)
+            return result
+        if t.type == _TT_FIELD and t.value in _FUNC_OPS:
+            return self._func_call()
+        if t.type == _TT_FIELD:
+            return self._field_expr()
+        raise _ParseError(f"Unexpected token: {t.value!r} at pos {t.pos}")
+
+    def _func_call(self):
+        func_tok = self.advance()
+        name = func_tok.value
+        if name in ("lower", "upper"):
+            self.expect(_TT_LPAREN)
+            field = self.expect(_TT_FIELD).value
+            self.expect(_TT_RPAREN)
+            op = self._read_op()
+            value = self._read_value()
+            mapped = CF_FIELD_MAP.get(field, field)
+            result = {"field": mapped, "op": op, "value": value}
+            if name == "lower":
+                result["transform"] = "lowercase"
+            elif name == "upper":
+                result["transform"] = "uppercase"
+            return result
+        if name in ("starts_with", "ends_with"):
+            self.expect(_TT_LPAREN)
+            field = self.expect(_TT_FIELD).value
+            self.expect(_TT_COMMA)
+            value = self._read_value()
+            self.expect(_TT_RPAREN)
+            mapped = CF_FIELD_MAP.get(field, field)
+            return {"field": mapped, "op": name, "value": value}
+        if name == "len":
+            self.expect(_TT_LPAREN)
+            field = self.expect(_TT_FIELD).value
+            self.expect(_TT_RPAREN)
+            op = self._read_op()
+            value = self._read_value()
+            mapped = CF_FIELD_MAP.get(field, field)
+            return {"field": mapped, "op": op, "value": value, "size_check": True}
+        raise _ParseError(f"Unknown function: {name}")
+
+    def _field_expr(self):
+        field_tok = self.advance()
+        field = field_tok.value
+        mapped = CF_FIELD_MAP.get(field, field)
+
+        # Bare boolean field (no operator follows)
+        if self.peek().type not in (_TT_OP,):
+            return {"field": mapped, "op": "eq", "value": True}
+
+        op_tok = self.advance()
+        op = op_tok.value
+
+        # "in" can be followed by $list or {set}
+        if op == "in":
+            t = self.peek()
+            if t.type == _TT_DOLLAR:
+                self.advance()
+                list_name = self.expect(_TT_FIELD).value
+                return {"field": mapped, "op": "in_list", "value": "$" + list_name}
+            if t.type == _TT_LBRACE:
+                values = self._read_set()
+                return {"field": mapped, "op": "in", "value": values}
+            raise _ParseError(f"Expected $ or {{ after 'in', got {t.value!r}")
+
+        # wildcard / strict_wildcard with full_uri special handling
+        if op in ("wildcard", "strict_wildcard"):
+            value = self._read_value()
+            if mapped == "full_uri":
+                host_pat, path_pat = _parse_full_uri_wildcard(value)
+                if host_pat and path_pat:
+                    return {"field": "full_uri", "op": "wildcard", "value": value,
+                            "host_pattern": host_pat, "path_pattern": path_pat}
+            return {"field": mapped, "op": "wildcard" if op == "wildcard" else "strict_wildcard", "value": value}
+
+        # matches — keep regex as-is, try simple wildcard conversion
+        if op == "matches":
+            value = self._read_value()
+            wc = _try_simple_regex_to_wildcard(value)
+            if wc:
+                return {"field": mapped, "op": "wildcard", "value": wc}
+            return {"field": mapped, "op": "matches", "value": value}
+
+        # Standard comparison: eq, ne, contains, gt, lt, ge, le
+        value = self._read_value()
+        return {"field": mapped, "op": op, "value": value}
+
+    def _read_op(self):
+        t = self.expect(_TT_OP)
+        return _OP_CLIKE.get(t.value, t.value) if t.value in _OP_CLIKE else t.value
+
+    def _read_value(self):
+        t = self.peek()
+        if t.type == _TT_STRING:
+            self.advance()
+            return t.value
+        if t.type == _TT_NUMBER:
+            self.advance()
+            return t.value
+        if t.type == _TT_DOLLAR:
+            self.advance()
+            name = self.expect(_TT_FIELD).value
+            return "$" + name
+        if t.type == _TT_LBRACE:
+            return self._read_set()
+        raise _ParseError(f"Expected value, got {t.type} ({t.value!r}) at pos {t.pos}")
+
+    def _read_set(self):
+        self.expect(_TT_LBRACE)
+        items = []
+        while self.peek().type != _TT_RBRACE:
+            t = self.peek()
+            if t.type == _TT_STRING:
+                self.advance()
+                items.append(t.value)
+            elif t.type == _TT_NUMBER:
+                self.advance()
+                items.append(t.value)
+            elif t.type == _TT_FIELD:
+                self.advance()
+                items.append(t.value)
+            else:
+                raise _ParseError(f"Unexpected token in set: {t.value!r}")
+        self.expect(_TT_RBRACE)
+        return items
+
+
+def parse_expression_full(expression):
+    """Full recursive descent parse of a Cloudflare expression.
+
+    Returns a conditions tree in CDN format (same as parse_expression() conditions).
+    Raises _ParseError on failure — never returns raw_expression.
+
+    Examples:
+        parse_expression_full('http.request.uri.path eq "/api"')
+        → {"field": "uri.path", "op": "eq", "value": "/api"}
+
+        parse_expression_full('(A eq "1") or (B eq "2")')
+        → {"logic": "or", "parts": [...]}
+    """
+    expr = expression.strip()
+    if expr == "true":
+        return {"always": True}
+    tokens = _tokenize_cdn(expr)
+    parser = _CDNParser(tokens, expr)
+    return parser.parse()
+
+
+# ── Dynamic expression parser ────────────────────────────────────────────────
+# Parses Cloudflare action expressions: concat(), regex_replace(),
+# wildcard_replace(), lower(), upper(), etc.
+
+def parse_dynamic_expression(expr):
+    """Parse a Cloudflare dynamic expression (used in action params).
+
+    Returns a structured representation:
+        {"func": "concat", "args": [{"type": "literal", "value": "/eu"}, ...]}
+        {"type": "field", "value": "http.request.uri.path"}
+        {"type": "literal", "value": "/static"}
+    """
+    expr = expr.strip()
+    tokens = _tokenize_cdn(expr)
+    parser = _DynExprParser(tokens, expr)
+    result = parser.parse()
+    return result
+
+
+_DYN_FUNCS = {
+    "concat", "regex_replace", "wildcard_replace", "lower", "upper",
+    "to_string", "substring", "len", "url_decode", "encode_base64",
+    "decode_base64", "lookup_json_string", "lookup_json_integer",
+    "sha256", "split", "join", "remove_query_args", "remove_bytes",
+    "uuidv4",
+}
+
+
+class _DynExprParser:
+    """Parser for Cloudflare dynamic expressions (action values)."""
+
+    def __init__(self, tokens, expr):
+        self.tokens = tokens
+        self.expr = expr
+        self.pos = 0
+
+    def peek(self):
+        return self.tokens[self.pos]
+
+    def advance(self):
+        t = self.tokens[self.pos]
+        self.pos += 1
+        return t
+
+    def expect(self, tt):
+        t = self.advance()
+        if t.type != tt:
+            raise _ParseError(f"Expected {tt}, got {t.type} ({t.value!r}) at pos {t.pos}")
+        return t
+
+    def parse(self):
+        result = self._dyn_expr()
+        if self.peek().type != _TT_EOF:
+            t = self.peek()
+            raise _ParseError(f"Unexpected token: {t.value!r} at pos {t.pos}")
+        return result
+
+    def _dyn_expr(self):
+        t = self.peek()
+        # Function call
+        if t.type == _TT_FIELD and t.value in _DYN_FUNCS:
+            return self._func_call()
+        # String literal
+        if t.type == _TT_STRING:
+            self.advance()
+            return {"type": "literal", "value": t.value}
+        # Number
+        if t.type == _TT_NUMBER:
+            self.advance()
+            return {"type": "literal", "value": t.value}
+        # Field reference (e.g., http.request.uri.path)
+        if t.type == _TT_FIELD:
+            self.advance()
+            return {"type": "field", "value": t.value}
+        raise _ParseError(f"Unexpected token in dynamic expression: {t.value!r} at pos {t.pos}")
+
+    def _func_call(self):
+        name_tok = self.advance()
+        name = name_tok.value
+        self.expect(_TT_LPAREN)
+        args = []
+        if self.peek().type != _TT_RPAREN:
+            args.append(self._dyn_expr())
+            while self.peek().type == _TT_COMMA:
+                self.advance()
+                args.append(self._dyn_expr())
+        self.expect(_TT_RPAREN)
+        return {"type": "func_call", "func": name, "args": args}
