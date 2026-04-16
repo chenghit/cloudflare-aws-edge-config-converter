@@ -36,8 +36,7 @@ Orchestrate conversion of Cloudflare configurations to AWS by delegating to spec
 
 | Component | Type | Description |
 |-----------|------|-------------|
-| `cdn-parse-dns.py` | Python | DNS.txt → dns_manifest.yaml + user_input_template.csv |
-| `cdn-validate-input.py` | Python | Validates user_input.csv → domain_scope.json |
+| `cdn-parse-dns.py` | Python | DNS.txt → dns_manifest.yaml + domain_scope.json (no user input needed) |
 
 | Component | Type | Description |
 |-----------|------|-------------|
@@ -94,7 +93,6 @@ Before proceeding, check the structure of the provided path:
 **Account directory check**: Verify that `{config_path}` contains an `account/` subdirectory. If not found, warn the user: "No `account/` directory found under the provided path. IP lists and bulk redirect lists may not be found. CloudflareBackup always creates an `account/` directory — make sure you provided the backup root directory, not a zone subdirectory."
 
 If the user requests CDN full pipeline (Terraform generation), also check for:
-- `cloudflare-to-aws-cdn/user_input.csv` — if it exists, CDN pipeline can start from Stage 2
 - `cloudflare-to-aws-cdn/domain_scope.json` — if it exists, pipeline can start from Stage 3
 
 ### Step 2b: Initialize CDN output directory (CDN pipeline only)
@@ -149,29 +147,18 @@ No LLM subagents are used. All stages are Python scripts invoked via `execute_ba
 
 ---
 
-#### CDN full pipeline (0 LLM stages + 11 Python scripts — runs when user wants Terraform output for CloudFront):
+#### CDN full pipeline (0 LLM stages + 10 Python scripts — runs when user wants Terraform output for CloudFront):
 
-All stages are deterministic Python scripts. No LLM subagents.
+All stages are deterministic Python scripts. No LLM subagents. No user interaction required.
 
-**Stage 1: DNS Parsing** (Python script, no LLM)
+**Stage 1: DNS Parsing + Domain Scope** (Python script, no LLM)
 ```bash
 python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-parse-dns.py "{config_path}" "cloudflare-to-aws-cdn"
 ```
 Parse the `---RESULT---` block:
-- `STATUS: OK` → **pause and tell the user**:
-  > "DNS parsing complete. I found N proxied domains. Please fill in `cloudflare-to-aws-cdn/user_input_template.csv` with your ACM certificate ARNs (or leave blank for auto-lookup), then save it as `cloudflare-to-aws-cdn/user_input.csv`. Let me know when it's ready to proceed."
+- `STATUS: OK` → proceed directly to Stage 3 (no user pause needed).
   If the result includes WARNINGS about non-convertible origins or CloudFront loop exclusions, report them to the user.
 - `STATUS: FATAL` → report the `CONTEXT` field to the user and stop.
-- Wait for the user to confirm before continuing.
-
-**Stage 2: Input Validation** (Python script, no LLM)
-```bash
-python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-validate-input.py "cloudflare-to-aws-cdn" "{config_path}"
-```
-Parse the `---RESULT---` block:
-- `STATUS: OK` → proceed to Stage 3
-- `STATUS: ERROR` → show the user the list of errors and ask them to fix `user_input.csv`, then re-run Stage 2
-- `STATUS: FATAL` → stop and tell the user which fields require manual correction
 
 **Stage 3–6: Preprocess → Validate → Finalize → Validate Final** (Python scripts, no LLM)
 
@@ -344,5 +331,4 @@ If the user's message is not in English, read `cloudflare-to-aws-cdn/conversion_
 - **Never read config files yourself** — always delegate to scripts (both WAF and CDN pipelines)
 - **Pass the exact path** the user provided; do not modify or resolve it
 - **WAF pipeline**: single `waf-pipeline.sh` call, no LLM subagents, no retry logic needed
-- **CDN pipeline**: serial execution for pipeline stages. All 11 stages are Python script invocations (no LLM subagents, no parallelization needed).
-- **CDN full pipeline requires a user pause at Stage 1** — always wait for the user to fill in `user_input.csv` before running Stage 2. Do not attempt to auto-fill the CSV.
+- **CDN pipeline**: serial execution for pipeline stages. All 10 stages are Python script invocations (no LLM subagents, no parallelization needed, no user interaction).

@@ -75,9 +75,9 @@ The tool runs as a Kiro CLI skill with an orchestrator that dispatches to specia
 
 The WAF pipeline automatically detects when inline IP sets exceed the 50 per-WebACL reference limit and switches to per-domain WebACLs (one per proxied domain). In per-domain mode, host-specific rules are placed only in the relevant domain's WebACL, and host conditions are stripped (redundant when a WebACL serves one domain). Each WebACL includes search engine labeling (Googlebot/Bingbot/YandexBot), Anti-DDoS with search engine exclusion, and an always-on challenge rule (Count mode — user activates after review).
 
-**CDN pipeline** (0 LLM stages + 11 Python scripts): **parse DNS (Python)** → **validate user input (Python)** → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → **generate shared policies (Python)** → **generate per-domain Terraform scaffold (Python)** → **generate per-domain test scripts (Python)** → **generate per-domain JS (Python)** → **validate JS (Python)**
+**CDN pipeline** (0 LLM stages + 10 Python scripts): **parse DNS + generate scope (Python)** → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → **generate shared policies (Python)** → **generate per-domain Terraform scaffold (Python)** → **generate per-domain test scripts (Python)** → **generate per-domain JS (Python)** → **validate JS (Python)**
 
-All CDN stages are deterministic Python scripts. No LLM subagents. Stages 1–2 (DNS parsing, input validation) were the last LLM stages — now replaced by `cdn-parse-dns.py` and `cdn-validate-input.py`. The entire tool (WAF + CDN) is zero LLM.
+All CDN stages are deterministic Python scripts. No LLM subagents. No user interaction — Stage 1 parses DNS and generates `domain_scope.json` automatically (all domains use Terraform data source for ACM cert lookup). The entire tool (WAF + CDN) is zero LLM.
 
 ```mermaid
 flowchart TD
@@ -86,9 +86,7 @@ flowchart TD
     Main -->|WAF| WAF_A1["🐍 IP Analyzer"] --> WAF_A2["🐍 Custom Rules"] --> WAF_A3["🐍 Rate Limits"] --> WAF_M["🐍 Merge + Validate"] --> WAF_S{"🐍 Split?"} -->|"≤50 IP sets"| WAF_G["🐍 Generate CFN (2 WebACLs)"] --> WAF_Done([CloudFormation ✅])
     WAF_S -->|">50 IP sets"| WAF_SP["🐍 Split by Host"] --> WAF_GP["🐍 Generate CFN (per-domain)"] --> WAF_Done
 
-    Main -->|CDN| CDN1["🐍 DNS Parser"] -->|CSV| Pause[/"⏸ User fills CSV"/]
-    Pause --> CDN2["🐍 Input Validator"]
-    CDN2 --> CDN3["🐍 Preprocess"]
+    Main -->|CDN| CDN1["🐍 DNS Parser"] --> CDN3["🐍 Preprocess"]
     CDN3 --> CDN4["🐍 V1 Validate"]
     CDN4 -->|PASS| CDN5["🐍 Finalize"]
     CDN5 --> CDN6["🐍 V2 Validate"]
@@ -105,7 +103,7 @@ flowchart TD
     style CDN_Done fill:#9f9,stroke:#333
 ```
 
-**One user interaction point:** After DNS parsing, you fill in a CSV template (default cache behavior + optional cert ARN per domain). Everything else is fully automated.
+**Fully automated:** No user interaction required. DNS parsing generates domain scope automatically. ACM certificates are looked up via Terraform data sources.
 
 ## CDN Pipeline Details
 

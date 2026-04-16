@@ -245,12 +245,38 @@ def main():
     with open(manifest_path, "w") as f:
         f.write("\n".join(lines) + "\n")
 
-    # Step 7: Write user_input_template.csv
-    csv_path = os.path.join(output_dir, "user_input_template.csv")
-    with open(csv_path, "w") as f:
-        f.write("hostname,apply_default_cache_behavior,cert_arn\n")
-        for d in proxied_domains:
-            f.write(f"{d['hostname']},Y,\n")
+    # Step 7: Write domain_scope.json (replaces user_input.csv + cdn-validate-input.py)
+    # All domains: apply_default_cache_behavior=false, cert_arn=null (data_source)
+    apex_cert_groups = {}
+    for apex in sorted(apex_groups):
+        g = apex_groups[apex]
+        apex_cert_groups[apex] = {
+            "suggested_cert_domain": g["suggested_cert_domain"],
+            "hostnames": g["hostnames"],
+        }
+
+    scope = {
+        "zone_name": zone_name,
+        "backup_path": os.path.abspath(config_path),
+        "domains": [
+            {
+                "hostname": d["hostname"],
+                "apex_domain": d["apex_domain"],
+                "apply_default_cache_behavior": False,
+                "cert_arn_mode": "data_source",
+                "cert_arn": None,
+                "origin_content": d["origin_content"],
+                "origin_type": d["origin_type"],
+            }
+            for d in proxied_domains
+        ],
+        "apex_cert_groups": apex_cert_groups,
+        "global_rules_note": "Rules without http.host condition will be applied to ALL domains during per-domain processing",
+    }
+
+    scope_path = os.path.join(output_dir, "domain_scope.json")
+    with open(scope_path, "w") as f:
+        json.dump(scope, f, indent=2, ensure_ascii=False)
 
     # Step 8: Print summary
     warnings = []
@@ -267,11 +293,11 @@ def main():
         warnings.append(f"{len(cf_loop_excluded)} CloudFront-loop domains excluded")
 
     print(f"OK: {len(proxied_domains)} proxied domains, "
-          f"{len(apex_groups)} apex group(s) → {manifest_path}")
+          f"{len(apex_groups)} apex group(s) → {manifest_path}, {scope_path}")
 
     warn_str = f"\nWARNINGS: {'; '.join(warnings)}" if warnings else ""
     print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\n"
-          f"OUTPUT_FILE: {manifest_path}\nDOMAINS: {len(proxied_domains)}"
+          f"OUTPUT_FILE: {scope_path}\nDOMAINS: {len(proxied_domains)}"
           f"{warn_str}")
 
 

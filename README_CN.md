@@ -78,9 +78,9 @@ kiro-cli chat
 
 WAF pipeline 自动检测 inline IP set 是否超过每个 WebACL 50 个引用限制，超过时自动切换为 per-domain WebACL（每个 proxied 域名一个）。Per-domain 模式下，host-specific 规则只放到对应域名的 WebACL，host 条件被剥离（WebACL 只服务一个域名时冗余）。每个 WebACL 包含搜索引擎标签规则（Googlebot/Bingbot/YandexBot）、Anti-DDoS（排除搜索引擎）和 always-on challenge 规则（Count 模式——用户确认后手动改为 Challenge）。
 
-**CDN 流程**（0 个 LLM 阶段 + 11 个 Python 脚本）：**🐍 解析 DNS** → **🐍 校验用户输入** → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → **🐍 生成每域名 JS** → **🐍 校验 JS**
+**CDN 流程**（0 个 LLM 阶段 + 10 个 Python 脚本）：**🐍 解析 DNS + 生成域名配置** → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → **🐍 生成每域名 JS** → **🐍 校验 JS**
 
-所有 CDN 阶段都是确定性 Python 脚本，零 LLM 调用。整个工具（WAF + CDN）完全不依赖模型。
+所有 CDN 阶段都是确定性 Python 脚本，零 LLM 调用，零用户交互。Stage 1 自动解析 DNS 并生成 `domain_scope.json`（所有域名使用 Terraform data source 自动查找 ACM 证书）。整个工具（WAF + CDN）完全不依赖模型。
 
 ```mermaid
 flowchart TD
@@ -89,9 +89,7 @@ flowchart TD
     Main -->|WAF| WAF_A1["🐍 IP 分析"] --> WAF_A2["🐍 自定义规则"] --> WAF_A3["🐍 速率限制"] --> WAF_M["🐍 合并 + 校验"] --> WAF_S{"🐍 拆分?"} -->|"≤50 IP sets"| WAF_G["🐍 生成 CFN (2 WebACL)"] --> WAF_Done([CloudFormation ✅])
     WAF_S -->|">50 IP sets"| WAF_SP["🐍 按域名拆分"] --> WAF_GP["🐍 生成 CFN (per-domain)"] --> WAF_Done
 
-    Main -->|CDN| CDN1["🐍 DNS 解析"] -->|CSV| Pause[/"⏸ 用户填写 CSV"/]
-    Pause --> CDN2["🐍 输入校验"]
-    CDN2 --> CDN3["🐍 预处理"]
+    Main -->|CDN| CDN1["🐍 DNS 解析"] --> CDN3["🐍 预处理"]
     CDN3 --> CDN4["🐍 V1 校验"]
     CDN4 -->|通过| CDN5["🐍 合并"]
     CDN5 --> CDN6["🐍 V2 校验"]
