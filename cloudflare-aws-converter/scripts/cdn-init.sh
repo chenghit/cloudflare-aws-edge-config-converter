@@ -12,7 +12,7 @@ OUTPUT_PARENT="${1:?Usage: cdn-init.sh <output_parent_dir> [skills_root]}"
 SKILLS_ROOT="${2:-$HOME/.kiro/skills/cloudflare-aws-converter}"
 
 OUTPUT_DIR="${OUTPUT_PARENT}/cloudflare-to-aws-cdn"
-MODULE_SRC="${SKILLS_ROOT}/cf-cdn-tf-domain/references/modules/cloudfront_distribution"
+MODULE_SRC="${SKILLS_ROOT}/references/modules/cloudfront_distribution"
 MODULE_DST="${OUTPUT_DIR}/terraform/modules/cloudfront_distribution"
 
 # Create directory structure
