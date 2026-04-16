@@ -55,16 +55,7 @@ Determine what the user wants from their message. There are two dimensions:
 **Dimension 1 — Scope (what to process):**
 - **WAF only**: user mentions WAF, security rules, firewall, rate limiting, IP rules
 - **CDN only**: user mentions CDN, cache, origin rules, CloudFront, redirects, URL rewrites, header transforms
-- **Everything / Ambiguous**: user says "convert everything", "full migration", "all configs", or scope is unclear → **do NOT guess**. Ask the user to pick one of the following prompts (replace `{path}` with the backup path they already provided):
-  > Which pipeline do you need? Copy one of these:
-  >
-  > **WAF** (security rules → AWS WAF Terraform):
-  > `Convert Cloudflare WAF rules in {path} to AWS WAF`
-  >
-  > **CDN** (cache/redirect/origin rules → CloudFront Terraform):
-  > `Convert CDN configuration in {path} to CloudFront`
-  >
-  > To run both, run them in separate sessions to avoid token limits.
+- **Both / Everything**: user says "convert everything", "full migration", "all configs", or scope is unclear → run **WAF first, then CDN**. WAF pipeline is <1 second (zero LLM), so running both in one session is fine.
 
 **Dimension 2 — Depth (how far to go):**
 - **Analyze**: user says "analyze", "分析" → run analyzer + validator only, stop before generator/converter
@@ -75,10 +66,11 @@ Determine what the user wants from their message. There are two dimensions:
 
 | Scope | Depth: Analyze | Depth: Convert |
 |-------|---------------|----------------|
-| WAF only | waf-pipeline.sh (full pipeline, outputs CloudFormation) | waf-pipeline.sh (same — pipeline always generates CloudFormation) |
+| WAF only | waf-pipeline.sh | waf-pipeline.sh |
 | CDN only | CDN full pipeline | CDN full pipeline |
+| Both | WAF pipeline → CDN pipeline | WAF pipeline → CDN pipeline |
 
-**One pipeline per session.** Running both WAF and CDN in a single session risks hitting token limits. If the user explicitly asks for both, warn them and recommend separate sessions.
+**Both pipelines in one session is supported.** WAF pipeline uses zero LLM tokens (<1 second). CDN pipeline uses LLM only for Stages 1–2 (~4 min). Total token usage is manageable in a single session. Run WAF first (instant), then CDN (pauses for user input at Stage 1).
 
 ### Step 2: Extract config path and validate single-zone
 
