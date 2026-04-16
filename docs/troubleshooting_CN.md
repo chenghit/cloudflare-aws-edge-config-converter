@@ -130,3 +130,39 @@
    aws iam delete-role --role-name cfcdn-<sanitized_domain>-lambda-edge
    ```
    然后重新 `terraform apply`。
+
+
+## WAF CloudFormation "重复资源"错误
+
+**问题**：`aws cloudformation deploy` 失败，报错 `some resource in your request is a duplicate of an existing one`
+
+**原因**：之前的 CloudFormation stack 部署失败并回滚，但部分资源（IP sets、WebACLs）没有完全清理。CloudFormation 无法创建同名 + 同 Scope 的资源。
+
+**解决方法**：
+
+1. 删除失败的 stack：
+   ```bash
+   aws cloudformation delete-stack --stack-name cloudflare-waf-migration --region us-east-1
+   aws cloudformation wait stack-delete-complete --stack-name cloudflare-waf-migration --region us-east-1
+   ```
+
+2. 如果 stack 删除后仍有残留资源，手动删除：
+   ```bash
+   # 列出残留资源
+   aws wafv2 list-ip-sets --scope CLOUDFRONT --region us-east-1
+   aws wafv2 list-web-acls --scope CLOUDFRONT --region us-east-1
+
+   # 逐个删除（从 list 输出中获取 Id 和 LockToken）
+   aws wafv2 delete-ip-set --scope CLOUDFRONT --region us-east-1 \
+     --name <name> --id <id> --lock-token <lock-token>
+   aws wafv2 delete-web-acl --scope CLOUDFRONT --region us-east-1 \
+     --name <name> --id <id> --lock-token <lock-token>
+   ```
+
+3. 重新部署：
+   ```bash
+   aws cloudformation deploy \
+     --template-file waf-cloudformation.json \
+     --stack-name cloudflare-waf-migration \
+     --region us-east-1
+   ```
