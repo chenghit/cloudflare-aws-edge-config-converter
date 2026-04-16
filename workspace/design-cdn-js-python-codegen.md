@@ -640,3 +640,76 @@ This means Cloudflare's `sha256()` function CAN be converted (not MANUAL_REQUIRE
 | `bit_slice()` | Network firewall only | N/A |
 
 **Result**: Only 1 function is truly MANUAL_REQUIRED (`remove_bytes`). All others are either convertible or not applicable to CDN action expressions. This is a significant improvement over the v2 estimate of 5 MANUAL_REQUIRED functions.
+
+## v3b Corrections (from review-3)
+
+### Correction 13: import crypto vs require('crypto')
+
+CFF Runtime 2.0 supports both `require('crypto')` and `import crypto from 'crypto'`. Since the JS template already uses `import cf from 'cloudfront'` (ES module style), all imports should be consistent:
+
+```javascript
+import cf from 'cloudfront';
+import crypto from 'crypto';  // only if sha256/hmac functions used
+```
+
+Place all imports at the top of the file. Never mix `import` and `require` in the same file.
+
+### Correction 14: sha256() returns Bytes, not hex string
+
+Cloudflare's `sha256()` returns a `Bytes` value. When used standalone, the result is typically passed to another function (e.g., `encode_base64(sha256(field))`).
+
+JS conversion rules:
+- `sha256(field)` standalone (rare) → `crypto.createHash('sha256').update(field).digest()` (returns Buffer)
+- `encode_base64(sha256(field))` → optimize to `crypto.createHash('sha256').update(field).digest('base64')` (single call)
+- `encode_base64(sha256(field), "u")` → `crypto.createHash('sha256').update(field).digest('base64url')`
+
+The dynamic expression parser should detect the `encode_base64(sha256(...))` pattern and emit the optimized single-call form. This is a peephole optimization in the JS codegen, not the parser.
+
+### Correction 15: encode_base64 flags parameter
+
+`encode_base64(input, flags)` — flags is optional:
+- No flags → standard Base64 without padding: `btoa(field).replace(/=+$/, '')`
+- `"p"` → standard Base64 with padding: `btoa(field)`
+- `"u"` → URL-safe Base64 without padding: `Buffer.from(field).toString('base64url')`
+- `"up"` → URL-safe Base64 with padding: `Buffer.from(field).toString('base64url')` + manual padding
+
+Note: `btoa()` always includes padding. Cloudflare's default (no flags) does NOT include padding. So the default case needs `.replace(/=+$/, '')`.
+
+Simplest implementation using Buffer (available in Runtime 2.0):
+- No flags → `Buffer.from(field, 'utf8').toString('base64').replace(/=+$/, '')`
+- `"p"` → `Buffer.from(field, 'utf8').toString('base64')`
+- `"u"` → `Buffer.from(field, 'utf8').toString('base64url')`
+- `"up"` → `Buffer.from(field, 'utf8').toString('base64url')` + pad to multiple of 4 with `=`
+
+### Correction 16: hmac table entry sync
+
+Remove `hmac(...)` → `MANUAL_REQUIRED` from the function table. The only HMAC function in Cloudflare is `is_timed_hmac_valid_v0()`, which is a WAF condition function (not a CDN action expression function). Already correctly marked as N/A in the final table.
+
+### Correction 17: lookup_json_string multi-level key access
+
+`lookup_json_string(field, key1, key2, ...)` supports:
+- String keys: `lookup_json_string(field, "product", "id")` → `JSON.parse(field)["product"]["id"]`
+- Integer keys (array index): `lookup_json_string(field, "networks", 1)` → `JSON.parse(field)["networks"][1]`
+- Mixed: `lookup_json_string(field, 1, "product_id")` → `JSON.parse(field)[1]["product_id"]`
+
+Dynamic expression parser must:
+1. Accept variable number of arguments (2+) for `lookup_json_string` and `lookup_json_integer`
+2. Each key argument can be a string literal or integer
+
+JS codegen:
+```javascript
+// lookup_json_string(http.request.body.raw, "product", "id")
+(() => { try { return JSON.parse(requestBody)["product"]["id"]; } catch(e) { return ''; } })()
+
+// lookup_json_integer(http.request.body.raw, "networks", 0)
+(() => { try { return JSON.parse(requestBody)["networks"][0]; } catch(e) { return 0; } })()
+```
+
+Wrap in try-catch IIFE because:
+- `JSON.parse()` throws on invalid JSON
+- Property access on `undefined` throws
+- Cloudflare returns empty string/0 on failure; JS should match this behavior
+
+### Updated MANUAL_REQUIRED count
+
+After all corrections: only **1 function** is truly MANUAL_REQUIRED: `remove_bytes()`. Everything else is either convertible or N/A for CDN action expressions.
