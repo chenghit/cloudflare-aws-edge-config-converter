@@ -132,11 +132,11 @@ def conditions_to_statement(cond, ctx):
         if op == "and":
             stmts = [conditions_to_statement(c, ctx) for c in cond["items"]]
             stmts = _flatten_statements(stmts, "AndStatement")
-            return {"AndStatement": {"Statements": stmts}}
+            return stmts[0] if len(stmts) == 1 else {"AndStatement": {"Statements": stmts}}
         if op == "or":
             stmts = [conditions_to_statement(c, ctx) for c in cond["items"]]
             stmts = _flatten_statements(stmts, "OrStatement")
-            return {"OrStatement": {"Statements": stmts}}
+            return stmts[0] if len(stmts) == 1 else {"OrStatement": {"Statements": stmts}}
         if op == "not":
             inner = conditions_to_statement(cond["item"], ctx)
             # Flatten NOT(NOT(X)) → X
