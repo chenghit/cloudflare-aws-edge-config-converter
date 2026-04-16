@@ -412,7 +412,10 @@ def serialize(cond: dict) -> str:
     if operator == "eq" and value is True:
         return field
 
-    return f'{field} {operator} {_format_value(value)}'
+    # Serializer operator name mapping (internal → Cloudflare expression syntax)
+    op_out = "strict wildcard" if operator == "strict_wildcard" else operator
+
+    return f'{field} {op_out} {_format_value(value)}'
 
 
 def _serialize_child(cond: dict, parent_op: str) -> str:
