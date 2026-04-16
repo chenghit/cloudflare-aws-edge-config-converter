@@ -231,7 +231,7 @@ cd cloudflare-aws-edge-config-converter
 > # 3. 编辑 install.sh（或 install.bat）——修改文件开头的 SKILLS_DIR 和 AGENTS_DIR 变量
 > ```
 
-高级用户可通过 `/agent swap <subagent-name>` 单独运行 CDN 各流程阶段。可用 subagent：`cf-cdn-dns-parser`、`cf-cdn-input-validator`。CDN Stage 3–9 为 Python 脚本（非 subagent），直接通过 `python3` 运行。WAF pipeline 没有 subagent——完全通过 `waf-pipeline.sh` 运行 Python 脚本。
+高级用户可直接通过 `python3` 运行各流程阶段。WAF pipeline 通过 `waf-pipeline.sh` 运行。CDN 各阶段是 `cloudflare-aws-converter/scripts/` 中的独立脚本。
 
 ## Subagent 权限与安全
 

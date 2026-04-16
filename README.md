@@ -230,7 +230,7 @@ Update: `git pull && ./install.sh`
 > # 3. Edit install.sh (or install.bat) — change SKILLS_DIR and AGENTS_DIR at the top of the file
 > ```
 
-For advanced users: `/agent swap <subagent-name>` to run individual CDN pipeline stages. Available subagents: `cf-cdn-dns-parser`, `cf-cdn-input-validator`. CDN Stages 3–9 are Python scripts (not subagents) — run them directly via `python3`. The WAF pipeline has no subagents — it runs entirely as Python scripts via `waf-pipeline.sh`.
+For advanced users: all pipeline stages are Python scripts — run them directly via `python3`. The WAF pipeline runs via `waf-pipeline.sh`. CDN stages are individual scripts in `cloudflare-aws-converter/scripts/`.
 
 ## Subagent Permissions and Security
 
