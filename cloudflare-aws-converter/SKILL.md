@@ -315,6 +315,8 @@ After the summary, include deployment instructions:
 4. Associate WebACLs with your CloudFront distributions in the AWS Console or CLI.
 ```
 
+If the user's message is not in English, read `cloudflare-to-aws-waf/README_aws-waf-deployment.md`, translate it to the user's language, and save as `cloudflare-to-aws-waf/README_aws-waf-deployment_{lang}.md` (e.g., `_CN.md`, `_JA.md`). Keep the original English version as-is.
+
 **For the CDN full pipeline**, include a summary table showing:
 - Number of domains processed successfully
 - Number of domains SKIPPED (V1 failure after retry) — list each with failure reason
