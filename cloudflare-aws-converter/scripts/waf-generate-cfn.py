@@ -1253,8 +1253,11 @@ def main():
     num_webacls = sum(1 for r in template["Resources"].values() if r["Type"] == "AWS::WAFv2::WebACL")
     num_ip_sets = sum(1 for r in template["Resources"].values() if r["Type"] == "AWS::WAFv2::IPSet")
 
+    seen = set()
     for w in warnings:
-        print(f"  WARN: {w}", file=sys.stderr)
+        if w not in seen:
+            seen.add(w)
+            print(f"  WARN: {w}", file=sys.stderr)
 
     if errors:
         for e in errors:
