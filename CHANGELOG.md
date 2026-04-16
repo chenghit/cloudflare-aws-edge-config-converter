@@ -17,6 +17,7 @@ The WAF pipeline now generates a **CloudFormation JSON template** instead of Ter
 - `waf-validate-ir.py` — Python round-trip validation (replaces LLM validator)
 - `waf-generate-cfn.py` — CloudFormation template generator with WCU tracking and quota validation
 - `waf-pipeline.sh` — single entry point for the entire WAF pipeline
+- `docs/why-cloudformation.md` — explains why CloudFormation instead of Terraform for WAF (nesting limit, `rule_json` drift detection gap, full comparison)
 
 ### Changed
 

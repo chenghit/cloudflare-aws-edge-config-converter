@@ -257,6 +257,7 @@ Most subagents only have file I/O and search permissions (`fs_read`, `fs_write`,
 - [Limitations and Caveats](./docs/limitations.md)
 - [Troubleshooting](./docs/troubleshooting.md)
 - [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md)
+- [Why CloudFormation Instead of Terraform for WAF?](./docs/why-cloudformation.md)
 
 ## Related Resources
 

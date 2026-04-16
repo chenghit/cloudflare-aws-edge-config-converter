@@ -257,6 +257,7 @@ cd cloudflare-aws-edge-config-converter
 - [限制与注意事项](./docs/limitations_CN.md)
 - [故障排除](./docs/troubleshooting_CN.md)
 - [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming_CN.md)
+- [为什么 WAF 用 CloudFormation 而不是 Terraform？](./docs/why-cloudformation_CN.md)
 
 ## 相关资源
 
