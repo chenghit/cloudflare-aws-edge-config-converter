@@ -886,14 +886,20 @@ def process_domain(ir, output_dir):
             with open(ft_path) as f:
                 ft_content = f.read()
             lambda_block = (
-                f'\nresource "aws_lambda_function" "{sanitized}_origin_request" {{\n'
-                f'  filename         = "${{path.module}}/lambda/origin_request_handler.js.zip"\n'
-                f'  function_name    = "{sanitized}-origin-request"\n'
-                f'  role             = var.lambda_edge_role_arn\n'
+                f'\ndata "archive_file" "{sanitized}_origin_request_zip" {{\n'
+                f'  type        = "zip"\n'
+                f'  source_file = "${{path.module}}/lambda/origin_request_handler.js"\n'
+                f'  output_path = "${{path.module}}/lambda/origin_request_handler.js.zip"\n'
+                f'}}\n\n'
+                f'resource "aws_lambda_function" "{sanitized}_origin_request" {{\n'
+                f'  provider         = aws.us_east_1\n'
+                f'  filename         = data.archive_file.{sanitized}_origin_request_zip.output_path\n'
+                f'  source_code_hash = data.archive_file.{sanitized}_origin_request_zip.output_base64sha256\n'
+                f'  function_name    = "cfcdn-{sanitized}-origin-request"\n'
+                f'  role             = aws_iam_role.{sanitized}_lambda_edge.arn\n'
                 f'  handler          = "origin_request_handler.handler"\n'
                 f'  runtime          = "nodejs20.x"\n'
                 f'  publish          = true\n'
-                f'  source_code_hash = filebase64sha256("${{path.module}}/lambda/origin_request_handler.js.zip")\n'
                 f'}}\n'
             )
             ft_content = ft_content.replace("# LAMBDA_EDGE_PLACEHOLDER", lambda_block)
