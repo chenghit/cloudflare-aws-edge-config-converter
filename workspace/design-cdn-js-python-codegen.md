@@ -776,7 +776,7 @@ def wildcard_pattern_to_regex(pattern):
         elif ch == '*':
             result += '.*'
             i += 1
-        elif ch in r'\.+?^${}()|[]':
+        elif ch in r'\.+?^${}()|[]/':  # includes / for JS regex literal
             result += '\\' + ch
             i += 1
         else:
@@ -993,7 +993,7 @@ Replaces ALL previous function tables in this document.
 | `decode_base64(field)` | `atob(field)` or `Buffer.from(field, 'base64').toString('utf8')` | ✅ |
 | `lookup_json_string(field, k1, k2, ...)` | `(() => { try { return JSON.parse(field)[k1][k2]; } catch(e) { return ''; } })()` | ✅ |
 | `lookup_json_integer(field, k1, k2, ...)` | `(() => { try { return JSON.parse(field)[k1][k2]; } catch(e) { return 0; } })()` | ✅ |
-| `sha256(field)` | `(() => { import crypto from 'crypto'; return crypto.createHash('sha256').update(field).digest(); })()` | ✅ |
+| `sha256(field)` | `crypto.createHash('sha256').update(field).digest()` (requires `import crypto from 'crypto'` at file top) | ✅ |
 | `encode_base64(sha256(field))` | `crypto.createHash('sha256').update(field).digest('base64')` (optimized) | ✅ |
 | `encode_base64(sha256(field), "u")` | `crypto.createHash('sha256').update(field).digest('base64url')` | ✅ |
 | `split(field, sep)` | `field.split(sep)` | ✅ |
