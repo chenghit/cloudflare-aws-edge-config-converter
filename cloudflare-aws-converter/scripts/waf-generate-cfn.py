@@ -138,7 +138,11 @@ def conditions_to_statement(cond, ctx):
             stmts = _flatten_statements(stmts, "OrStatement")
             return {"OrStatement": {"Statements": stmts}}
         if op == "not":
-            return {"NotStatement": {"Statement": conditions_to_statement(cond["item"], ctx)}}
+            inner = conditions_to_statement(cond["item"], ctx)
+            # Flatten NOT(NOT(X)) → X
+            if "NotStatement" in inner:
+                return inner["NotStatement"]["Statement"]
+            return {"NotStatement": {"Statement": inner}}
 
     # Leaf condition
     field = cond.get("field", "")
