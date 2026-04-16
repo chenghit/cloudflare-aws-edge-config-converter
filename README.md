@@ -4,12 +4,6 @@
 
 This tool reads [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) exports and generates ready-to-deploy AWS WAF (CloudFormation) and CloudFront (Terraform) configurations — including cache policies, CloudFront Functions, Lambda@Edge, and KVS data.
 
-> **⚠️ Kiro CLI 1.28.0 is incompatible with this tool.** Version 1.28.0 (released 2026-03-20) had two bugs that broke subagent pipelines: shell approval blocking ([#4751](https://github.com/kirodotdev/Kiro/issues/4751)) and subagent result return failure ([#6163](https://github.com/kirodotdev/Kiro/issues/6163)). Both were fixed in **1.28.1**. If you're on 1.28.0, upgrade:
-> ```bash
-> curl -fsSL https://cli.kiro.dev/install | bash
-> ```
-> Kiro CLI 1.24–1.27 and 1.28.1+ all work correctly.
-
 ## Quick Start
 
 ```bash
@@ -42,7 +36,7 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 
 ## Prerequisites
 
-- **Kiro CLI** >= 1.24 — [Installation guide](https://kiro.dev/docs/getting-started/installation/). ⚠️ Kiro IDE is not recommended (does not support `skill://` resource binding in subagents). **Avoid Kiro CLI 1.28.0** — it has two bugs ([#4751](https://github.com/kirodotdev/Kiro/issues/4751), [#6163](https://github.com/kirodotdev/Kiro/issues/6163)) that break subagent pipelines. Both are fixed in 1.28.1. **Kiro CLI 1.29.x** has a regression where subagents without an explicit `model` field fail with `Missing modelId` ([#7321](https://github.com/kirodotdev/Kiro/issues/7321)). Workaround: add `"model": "claude-sonnet-4.6"` to every agent config in `~/.kiro/agents/`.
+- **Kiro CLI** >= 1.24 — [Installation guide](https://kiro.dev/docs/getting-started/installation/).
 - **Terraform** >= 1.8.0 with AWS Provider >= 6.x — [Install Terraform](https://developer.hashicorp.com/terraform/install). Required for CDN pipeline only. WAF pipeline uses CloudFormation (no Terraform needed).
 - **Python 3** — Required by both WAF and CDN pipeline scripts. WAF pipeline is entirely Python-based (expression parsing, analysis, validation, CloudFormation generation). CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–7.6). Pre-installed on macOS and most Linux distributions. No third-party packages needed for the conversion pipeline (stdlib only). **Post-conversion**: CDN domains with KVS (bulk redirects, IP lists, error pages) generate a `seed-kvs.py` script that requires `boto3` — install with `pip install boto3` before deploying.
 - **Model**: No model requirement for the conversion pipeline itself — all scripts are deterministic Python with zero LLM invocations. Any model supported by Kiro CLI works, since the orchestrator only needs to understand user intent, run shell commands, and translate deployment guides for non-English users.
@@ -237,9 +231,7 @@ Most subagents only have file I/O and search permissions (`fs_read`, `fs_write`,
 | `cf-cdn-js-validator` | ✅ Yes | Replaced by Python script `cdn-validate-js.py` — no longer uses `execute_bash`. |
 | All other subagents | ❌ No | Only need to read/write files and search text. |
 
-**If your security policy flags `execute_bash`:** The CDN JS validator is now a Python script that doesn't use `execute_bash`. Only the orchestrator and CDN Stages 1–2 subagents use it for running pipeline scripts.
-
-> **Note:** Kiro CLI 1.28.0 had two bugs that broke subagent pipelines: shell approval blocking ([#4751](https://github.com/kirodotdev/Kiro/issues/4751)) and subagent result return failure ([#6163](https://github.com/kirodotdev/Kiro/issues/6163)). Both are fixed in 1.28.1. If you encounter subagent issues, check your Kiro CLI version with `kiro-cli --version`.
+**If your security policy flags `execute_bash`:** The orchestrator uses it to run pipeline scripts. All conversion logic is in Python scripts — the orchestrator only invokes them via shell commands.
 
 ## More Information
 

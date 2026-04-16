@@ -4,12 +4,6 @@
 
 本工具读取 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 导出的备份文件，生成可直接部署的 AWS WAF（CloudFormation）和 CloudFront（Terraform）配置——包括缓存策略、CloudFront Functions、Lambda@Edge 和 KVS 数据。
 
-> **⚠️ Kiro CLI 1.28.0 与本工具不兼容。** 1.28.0 版本（2026-03-20 发布）存在两个导致 subagent pipeline 无法运行的 bug：shell 审批阻塞（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)）和 subagent 结果返回失败（[#6163](https://github.com/kirodotdev/Kiro/issues/6163)）。两个 bug 均已在 **1.28.1** 中修复。如果你使用的是 1.28.0，请升级：
-> ```bash
-> curl -fsSL https://cli.kiro.dev/install | bash
-> ```
-> Kiro CLI 1.24–1.27 和 1.28.1+ 均可正常使用。
-
 ## 快速开始
 
 ```bash
@@ -42,7 +36,7 @@ kiro-cli chat
 
 ## 前提条件
 
-- **Kiro CLI** >= 1.24 — [安装文档](https://kiro.dev/docs/getting-started/installation/)。⚠️ 不推荐使用 Kiro IDE（不支持 subagent 中的 `skill://` 资源绑定）。**避免使用 Kiro CLI 1.28.0** — 该版本有两个 bug（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)、[#6163](https://github.com/kirodotdev/Kiro/issues/6163)）会导致 subagent pipeline 无法运行，已在 1.28.1 中修复。**Kiro CLI 1.29.x** 存在回归 bug：未显式指定 `model` 字段的 subagent 会报 `Missing modelId` 错误（[#7321](https://github.com/kirodotdev/Kiro/issues/7321)）。临时解决方案：在 `~/.kiro/agents/` 下的每个 agent 配置中添加 `"model": "claude-sonnet-4.6"`。
+- **Kiro CLI** >= 1.24 — [安装文档](https://kiro.dev/docs/getting-started/installation/)。
 - **Terraform** >= 1.8.0，AWS Provider >= 6.x — [安装 Terraform](https://developer.hashicorp.com/terraform/install)。仅 CDN pipeline 需要。WAF pipeline 使用 CloudFormation（不需要 Terraform）。
 - **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF pipeline 完全基于 Python（表达式解析、分析、验证、CloudFormation 生成）。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）。macOS 和大多数 Linux 发行版已预装。转换流程无需第三方包（仅用标准库）。**部署阶段**：有 KVS 的 CDN 域名（批量重定向、IP 列表、错误页面）会生成 `seed-kvs.py` 脚本，需要 `boto3`——部署前运行 `pip install boto3` 安装。
 - **模型**：转换 pipeline 本身无模型要求——所有脚本都是确定性 Python，零 LLM 调用。Kiro CLI 支持的任何模型都可以，编排器只需要理解用户意图、运行 shell 命令，以及为非英文用户翻译部署文档。
@@ -237,9 +231,7 @@ cd cloudflare-aws-edge-config-converter
 | `cf-cdn-js-validator` | ✅ 有 | 已替换为 Python 脚本 `cdn-validate-js.py`——不再使用 `execute_bash`。 |
 | 其他所有 subagent | ❌ 无 | 只需要读写文件和搜索文本。 |
 
-**如果你的安全策略对 `execute_bash` 有告警：** CDN JS 校验器现在是 Python 脚本，不使用 `execute_bash`。仅 orchestrator 和 CDN Stage 1–2 subagent 使用它来运行 pipeline 脚本。
-
-> **注意：** Kiro CLI 1.28.0 有两个导致 subagent pipeline 无法运行的 bug：shell 审批阻塞（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)）和 subagent 结果返回失败（[#6163](https://github.com/kirodotdev/Kiro/issues/6163)）。两个 bug 均已在 1.28.1 中修复。如果遇到 subagent 问题，请用 `kiro-cli --version` 检查版本。
+**如果你的安全策略对 `execute_bash` 有告警：** 编排器使用它来运行 pipeline 脚本。所有转换逻辑都在 Python 脚本中——编排器只通过 shell 命令调用它们。
 
 ## 更多信息
 
