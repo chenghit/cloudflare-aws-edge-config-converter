@@ -48,7 +48,6 @@ kiro-cli chat
 - **模型**：最低 `claude-sonnet-4.6-1m`。在 Kiro 中通过 `/model` 切换。Kiro CLI 仅支持 Amazon Bedrock 上的 Claude 模型。
   - **WAF 迁移**：无模型要求——WAF pipeline 完全是确定性 Python，零 LLM 调用。任何模型都可以，因为编排器只运行 shell 命令。
   - **CDN 迁移**：无论域名数量，统一使用 `claude-sonnet-4.6-1m`。CDN Stage 3–9 是 Python 脚本（无 LLM 开销）。仅 Stage 1–2（DNS 解析、输入校验）使用 LLM subagent，单次生成约 200 行输出，远低于 Sonnet 的 64K output 上限。
-  - 完整的兼容模型列表（含其他 agent 框架的可用选项），请参阅[支持的模型](./docs/supported-models_CN.md)。
 - **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。运行前申请通配符证书（如 `*.example.com`），或在 CSV 中留空让 Terraform 自动查找已签发的证书。
 - **输入格式**：仅支持 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 导出。不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)——详见 [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)
 
@@ -249,7 +248,6 @@ cd cloudflare-aws-edge-config-converter
 ## 更多信息
 
 - [最佳实践](./docs/best-practices_CN.md)
-- [支持的模型](./docs/supported-models_CN.md)
 - [部署指南](./docs/deployment-guide_CN.md)
 - [限制与注意事项](./docs/limitations_CN.md)
 - [故障排除](./docs/troubleshooting_CN.md)

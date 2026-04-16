@@ -246,7 +246,6 @@ Most subagents only have file I/O and search permissions (`fs_read`, `fs_write`,
 ## More Information
 
 - [Best Practices](./docs/best-practices.md)
-- [Supported Models](./docs/supported-models.md)
 - [Deployment Guide](./docs/deployment-guide.md)
 - [Limitations and Caveats](./docs/limitations.md)
 - [Troubleshooting](./docs/troubleshooting.md)
