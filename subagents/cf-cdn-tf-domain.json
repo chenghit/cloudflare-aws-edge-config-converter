@@ -1,9 +1,0 @@
-{
-  "name": "cf-cdn-tf-domain",
-  "description": "Generates all Terraform configuration files for a single domain's CloudFront distribution under terraform/domains/{hostname}/. Reads ir/final/{hostname}.yaml and shared/dedup_manifest.json to emit: main.tf (module call to cloudfront_distribution with all origins, cache behaviors, and viewer certificate settings), variables.tf (domain-specific input variables with defaults from the IR), outputs.tf (distribution ID, ARN, domain name for DNS CNAME setup), and optionally functions/{name}.js (domain-specific CloudFront Function source files if not already in shared). Handles ACM certificate ARN injection, price class selection, IPv6 toggle, and HTTP/2+3 settings. Must be invoked once per domain (parallelizable). Accepts a --domain argument.",
-  "resources": [
-    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md"
-  ],
-  "tools": ["fs_read", "fs_write", "glob", "grep"],
-  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
-}

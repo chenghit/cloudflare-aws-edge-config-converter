@@ -473,31 +473,50 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "## Deployment Steps",
         "",
         "### 1. Set AWS credentials",
+        "",
+        "You need an AWS IAM user or role with permissions for CloudFront, Lambda, IAM, "
+        "ACM, and CloudFront KeyValueStore. Configure credentials using one of:",
+        "",
         "```bash",
+        "# Option A: Named profile (recommended)",
         "export AWS_PROFILE=<your-profile-name>",
+        "",
+        "# Option B: Environment variables",
+        "export AWS_ACCESS_KEY_ID=<your-access-key>",
+        "export AWS_SECRET_ACCESS_KEY=<your-secret-key>",
+        "export AWS_DEFAULT_REGION=us-east-1",
         "```",
+        "",
+        "Verify credentials work: `aws sts get-caller-identity`",
         "",
         "### 2. Deploy shared policies",
         "```bash",
         "cd cloudflare-to-aws-cdn/terraform/shared",
-        "terraform init && terraform apply",
+        "terraform init -upgrade && terraform apply",
         "```",
         "",
         "### 3. Deploy each domain",
+        "",
+        "Use `terraform init -upgrade` (not just `terraform init`) to avoid provider "
+        "checksum mismatch errors when deploying multiple domains sequentially.",
+        "",
         "```bash",
     ]
     for m in domain_list:
         san = m["sanitized_name"]
-        lines.append(f"cd cloudflare-to-aws-cdn/terraform/domains/{san} && terraform init && terraform apply")
+        lines.append(f"cd cloudflare-to-aws-cdn/terraform/domains/{san} && terraform init -upgrade && terraform apply")
     lines += ["```", ""]
 
     if domains_with_kvs:
+        step_kvs = 4
         lines += [
-            "### 4. Seed KVS data",
+            f"### {step_kvs}. Seed KVS data",
             "",
             "**Requires `boto3`**: `pip install boto3` (not included in stdlib).",
             "",
-            "After `terraform apply`, seed each domain's KVS with its data:",
+            "Run `seed-kvs.py` for each domain **after its `terraform apply` succeeds**. "
+            "The script reads the KVS ARN from `terraform output` — it will fail if "
+            "`terraform apply` has not completed.",
             "",
             "```bash",
         ]
@@ -573,6 +592,32 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
             '}',
             "```",
         ]
+
+    lines += [
+        "", "---", "",
+        "## Troubleshooting",
+        "",
+        "### `terraform init` fails with provider checksum mismatch",
+        "",
+        "```",
+        "Error: the cached package for registry.terraform.io/hashicorp/aws does not match any of the checksums recorded in the dependency lock file",
+        "```",
+        "",
+        "Fix: use `terraform init -upgrade` to re-download the provider.",
+        "",
+        "### `seed-kvs.py` fails with `KVS ARN must be a valid ARN`",
+        "",
+        "This means `terraform apply` did not complete successfully for this domain. "
+        "The KVS resource was not created, so `terraform output` returns an empty ARN. "
+        "Fix: re-run `terraform apply` for the domain, then re-run `seed-kvs.py`.",
+        "",
+        "### `terraform apply` fails with `ResourceNotFoundException` for Lambda@Edge",
+        "",
+        "Lambda@Edge functions replicate globally and take time to delete. If you're "
+        "re-deploying after a `terraform destroy`, wait 15–30 minutes for replicas to "
+        "be cleaned up, then retry.",
+        "",
+    ]
 
     return "\n".join(lines) + "\n"
 

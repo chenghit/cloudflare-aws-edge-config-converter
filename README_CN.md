@@ -47,7 +47,7 @@ kiro-cli chat
 - **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF pipeline 完全基于 Python（表达式解析、分析、验证、CloudFormation 生成）。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）。macOS 和大多数 Linux 发行版已预装。转换流程无需第三方包（仅用标准库）。**部署阶段**：有 KVS 的 CDN 域名（批量重定向、IP 列表、错误页面）会生成 `seed-kvs.py` 脚本，需要 `boto3`——部署前运行 `pip install boto3` 安装。
 - **模型**：最低 `claude-sonnet-4.6-1m`。在 Kiro 中通过 `/model` 切换。Kiro CLI 仅支持 Amazon Bedrock 上的 Claude 模型。
   - **WAF 迁移**：无模型要求——WAF pipeline 完全是确定性 Python，零 LLM 调用。任何模型都可以，因为编排器只运行 shell 命令。
-  - **CDN 迁移**：无论域名数量，统一使用 `claude-sonnet-4.6-1m`。CDN Stage 3–7.6 是 Python 脚本（无 LLM 开销）。剩余的 LLM 阶段（DNS 解析、输入校验、JS 生成、JS 校验）每个域名独立处理，单次生成约 200 行输出，远低于 Sonnet 的 64K output 上限。token 容量不需要 Opus，但如果 Sonnet 对复杂 Cloudflare 表达式（regex_replace、带捕获组的 wildcard_replace）生成的 JavaScript 有误，可以考虑切换到 Opus。
+  - **CDN 迁移**：无论域名数量，统一使用 `claude-sonnet-4.6-1m`。CDN Stage 3–9 是 Python 脚本（无 LLM 开销）。仅 Stage 1–2（DNS 解析、输入校验）使用 LLM subagent，单次生成约 200 行输出，远低于 Sonnet 的 64K output 上限。
   - 完整的兼容模型列表（含其他 agent 框架的可用选项），请参阅[支持的模型](./docs/supported-models_CN.md)。
 - **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。运行前申请通配符证书（如 `*.example.com`），或在 CSV 中留空让 Terraform 自动查找已签发的证书。
 - **输入格式**：仅支持 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 导出。不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)——详见 [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)
@@ -76,9 +76,9 @@ kiro-cli chat
 
 **WAF 流程**（全 Python，零 LLM）：分析 IP 列表 → 分析自定义规则 → 分析速率限制 → 合并 → 校验 → 生成 CloudFormation
 
-**CDN 流程**（4 个 LLM 阶段 + 7 个 Python 脚本）：解析 DNS → 校验用户输入 → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → 生成每域名 JS → 校验 JS
+**CDN 流程**（2 个 LLM 阶段 + 9 个 Python 脚本）：解析 DNS → 校验用户输入 → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → **🐍 生成每域名 JS** → **🐍 校验 JS**
 
-CDN Stage 3–7.6 是确定性 Python 脚本，替代了原来的 LLM subagent。它们负责规则解析、字段映射、表达式分析、缓存行为组装、策略去重、IR 校验、共享策略生成和每域名 Terraform 骨架——全是查表和结构化操作，不需要 LLM 判断。这使得 Stage 3–7.6 瞬间完成（任意域名数量 <1 秒）、完全可复现，并省去了每个 zone 约 30 分钟的 LLM 处理时间。Stage 7.6 生成每域名的部署后验证测试脚本。剩余的 LLM 阶段（8–9）负责 JS 代码生成和校验，这些确实需要语言模型能力。
+CDN Stage 3–9 是确定性 Python 脚本，替代了原来的 LLM subagent。它们负责规则解析、字段映射、表达式分析、缓存行为组装、策略去重、IR 校验、共享策略生成、每域名 Terraform 骨架、JS 代码生成和 JS 校验——全是查表和结构化操作，不需要 LLM 判断。这使得 Stage 3–9 瞬间完成（任意域名数量 <1 秒）、完全可复现，并省去了每个 zone 约 30 分钟的 LLM 处理时间。仅 Stage 1–2（DNS 解析、输入校验）使用 LLM subagent。
 
 ```mermaid
 flowchart TD
@@ -96,7 +96,7 @@ flowchart TD
     CDN7 --> CDN75["🐍 TF 骨架"]
     CDN75 --> CDN76["🐍 测试脚本"]
     CDN76 --> CDN8["TF 域名 × N"]
-    CDN8 --> CDN9["JS 校验 × N"]
+    CDN8 --> CDN9["🐍 JS 校验"]
     CDN9 -->|通过| CDN_Done([CDN Terraform + JS ✅])
 
     style Main fill:#f9f,stroke:#333
@@ -152,7 +152,6 @@ cloudflare-to-aws-cdn/
 
 - **设计目标：** 已测试最多 50 个代理域名。更大的 zone 也应该可以工作——每个 subagent 独立处理一个域名。
 - **单 zone 运行。** 检测到多个 zone → 编排器要求你选择一个。
-- **并行批次大小：2**（默认）。适合 Anthropic Tier 1（50 RPM）和 AWS Bedrock 默认配额。修改方法：打开 `cloudflare-aws-converter/SKILL.md`，搜索底部 "Important Rules" 部分的 `batch size 2`，将 `2` 改为 `4`（Kiro CLI 最大值）。Tier 2+ 或 Bedrock 已提额可安全使用 4。
 - **KVS 配额：** 默认 50 个/账号（软限制）。如 > 50 个域名使用批量重定向，请[申请提额](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html)。
 
 </details>
@@ -160,23 +159,20 @@ cloudflare-to-aws-cdn/
 <details>
 <summary>预计转换时间</summary>
 
-转换时间取决于规则/域名数量、LLM API 延迟和并行批次大小。以下基准使用项目自带的 `examples/cloudflare-configs/`（1 个 zone、7 个代理域名、34 条 CDN 规则 + 8 条 WAF 规则，覆盖 12 种规则类型——包括正则表达式、OR 条件、地理路由、CORS、批量重定向和内联错误页面），模型 `claude-sonnet-4.6-1m`，Anthropic API：
+转换时间取决于规则/域名数量和 LLM API 延迟。以下基准使用项目自带的 `examples/cloudflare-configs/`（1 个 zone、7 个代理域名、34 条 CDN 规则 + 8 条 WAF 规则，覆盖 12 种规则类型——包括正则表达式、OR 条件、地理路由、CORS、批量重定向和内联错误页面），模型 `claude-sonnet-4.6-1m`，Anthropic API：
 
 | 流程 | 时间 |
 |------|------|
 | WAF | <1 秒（全 Python，无 LLM） |
-| CDN（批次大小 2） | ~32 分钟 |
-| CDN（批次大小 4） | ~20 分钟 |
+| CDN | ~7 分钟（14 个域名） |
 
 时间分布：
 - **WAF**：全 Python pipeline，总计 <1 秒（无 LLM 调用）。
-- **CDN**：Python 脚本 Stage 3–7.6 总计 <1 秒。Stage 8 JS 生成（7 域名、批次 2 约 15 分钟）和 Stage 9 JS 校验（~10 分钟）占主要时间。DNS 解析和输入校验各约 2 分钟。
+- **CDN**：Python 脚本 Stage 3–9 总计 <1 秒。Stage 1 DNS 解析（~2 分钟）和 Stage 2 输入校验（~2 分钟）是仅有的 LLM 阶段。
 
 影响因素：
-- **并行批次大小**是最大的调节杠杆。批次 4（Kiro CLI 最大值）可将 CDN Stage 8+9 时间减半。编辑 `cloudflare-aws-converter/SKILL.md`，搜索 "batch size" 修改数字。
 - **LLM API 延迟**因服务商、区域和时段而异。Anthropic 直连 API 通常比 AWS Bedrock 快。
-- **域名数量**对 CDN Stage 8+9 线性增长（每个域名一次 subagent 调用）。50 个域名、批次 2 ≈ 25 批 × 每批约 2 分钟 ≈ Stage 8 约 50 分钟。
-- **规则复杂度**影响单个 subagent 耗时。重定向/重写规则多或表达式复杂的域名 JS 生成更慢。
+- **域名数量**不影响 CDN Stage 3–9（Python 一次处理所有域名）。仅 Stage 1–2 随域名数量增长，但速度很快（总计约 4 分钟）。
 
 </details>
 
@@ -232,7 +228,7 @@ cd cloudflare-aws-edge-config-converter
 > # 3. 编辑 install.sh（或 install.bat）——修改文件开头的 SKILLS_DIR 和 AGENTS_DIR 变量
 > ```
 
-高级用户可通过 `/agent swap <subagent-name>` 单独运行 CDN 各流程阶段。可用 subagent：`cf-cdn-dns-parser`、`cf-cdn-input-validator`、`cf-cdn-tf-domain`、`cf-cdn-js-validator`。CDN Stage 3–7.6 为 Python 脚本（非 subagent），直接通过 `python3` 运行。WAF pipeline 没有 subagent——完全通过 `waf-pipeline.sh` 运行 Python 脚本。
+高级用户可通过 `/agent swap <subagent-name>` 单独运行 CDN 各流程阶段。可用 subagent：`cf-cdn-dns-parser`、`cf-cdn-input-validator`。CDN Stage 3–9 为 Python 脚本（非 subagent），直接通过 `python3` 运行。WAF pipeline 没有 subagent——完全通过 `waf-pipeline.sh` 运行 Python 脚本。
 
 ## Subagent 权限与安全
 
@@ -242,10 +238,10 @@ cd cloudflare-aws-edge-config-converter
 
 | Subagent | 有 `execute_bash` | 原因 |
 |----------|-------------------|------|
-| `cf-cdn-js-validator` | ✅ 有 | 运行 `node --check <file>` 做 JavaScript 语法检查，以及 `wc -c` 做文件大小检查。这是它唯一需要的两个命令——仅靠文件读写工具无法完成 JS 语法校验和精确的字节大小测量。 |
+| `cf-cdn-js-validator` | ✅ 有 | 已替换为 Python 脚本 `cdn-validate-js.py`——不再使用 `execute_bash`。 |
 | 其他所有 subagent | ❌ 无 | 只需要读写文件和搜索文本。 |
 
-**如果你的安全策略对 `execute_bash` 有告警：** 你可以查看该 validator 的 SKILL.md 确认它只运行 `node --check` 和 `wc -c`。从 `cf-cdn-js-validator.json` 中移除 `execute_bash` 会导致 JS 语法检查（CFF-01、LE-01）和精确文件大小校验（CFF-06、LE-03）被禁用——validator 会跳过这些检查并在输出 JSON 中标记为 `SKIP`。
+**如果你的安全策略对 `execute_bash` 有告警：** CDN JS 校验器现在是 Python 脚本，不使用 `execute_bash`。仅 orchestrator 和 CDN Stage 1–2 subagent 使用它来运行 pipeline 脚本。
 
 > **注意：** Kiro CLI 1.28.0 有两个导致 subagent pipeline 无法运行的 bug：shell 审批阻塞（[#4751](https://github.com/kirodotdev/Kiro/issues/4751)）和 subagent 结果返回失败（[#6163](https://github.com/kirodotdev/Kiro/issues/6163)）。两个 bug 均已在 1.28.1 中修复。如果遇到 subagent 问题，请用 `kiro-cli --version` 检查版本。
 
