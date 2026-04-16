@@ -164,7 +164,7 @@ cloudflare-to-aws-cdn/
 | 流程 | 时间 |
 |------|------|
 | WAF | <1 秒（全 Python，无 LLM） |
-| CDN | ~5 分钟 |
+| CDN | ~7 分钟（14 个域名） |
 
 时间分布：
 - **WAF**：全 Python pipeline，总计 <1 秒（无 LLM 调用）。

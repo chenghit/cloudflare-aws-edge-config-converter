@@ -166,7 +166,7 @@ Conversion time depends on the number of rules/domains and LLM API latency. Benc
 | Pipeline | Time |
 |----------|------|
 | WAF | <1 second (all Python, no LLM) |
-| CDN | ~5 min |
+| CDN | ~7 min (14 domains) |
 
 Where the time goes:
 - **WAF**: Entire Python pipeline finishes in <1 second (zero LLM invocations).
