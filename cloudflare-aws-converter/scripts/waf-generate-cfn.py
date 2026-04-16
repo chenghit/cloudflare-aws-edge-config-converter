@@ -112,15 +112,30 @@ POSITIONAL_CONSTRAINT = {
 }
 
 
+def _flatten_statements(stmts, key):
+    """Flatten same-type compound statements. E.g., OR containing OR → siblings.
+    AWS WAF does not allow AND-in-AND or OR-in-OR."""
+    flat = []
+    for s in stmts:
+        if key in s:
+            # Same type nested — lift children up
+            flat.extend(s[key].get("Statements", []))
+        else:
+            flat.append(s)
+    return flat
+
+
 def conditions_to_statement(cond, ctx):
     """Recursively convert conditions tree to AWS WAF Statement JSON."""
     if "op" in cond:
         op = cond["op"]
         if op == "and":
             stmts = [conditions_to_statement(c, ctx) for c in cond["items"]]
+            stmts = _flatten_statements(stmts, "AndStatement")
             return {"AndStatement": {"Statements": stmts}}
         if op == "or":
             stmts = [conditions_to_statement(c, ctx) for c in cond["items"]]
+            stmts = _flatten_statements(stmts, "OrStatement")
             return {"OrStatement": {"Statements": stmts}}
         if op == "not":
             return {"NotStatement": {"Statement": conditions_to_statement(cond["item"], ctx)}}
@@ -607,10 +622,13 @@ def generate(ir):
 
         # Scope-down: wrap in AND with NOT label_match
         if rule.get("scope_down", {}).get("skip_all_remaining_custom_rules"):
-            stmt = {"AndStatement": {"Statements": [
-                {"NotStatement": {"Statement": {"LabelMatchStatement": {
-                    "Scope": "LABEL", "Key": "skip:all_remaining_custom_rules"}}}},
-                stmt]}}
+            not_label = {"NotStatement": {"Statement": {"LabelMatchStatement": {
+                "Scope": "LABEL", "Key": "skip:all_remaining_custom_rules"}}}}
+            # Flatten: if stmt is already AndStatement, add as sibling instead of nesting
+            if "AndStatement" in stmt:
+                stmt["AndStatement"]["Statements"].insert(0, not_label)
+            else:
+                stmt = {"AndStatement": {"Statements": [not_label, stmt]}}
             wcu.add(rule["name"], 1)
 
         # Determine action
@@ -664,7 +682,12 @@ def generate(ir):
                 "Scope": "LABEL", "Key": "skip:http_ratelimit"}}}})
             wcu.add(rule["name"], 1)
         if cond:
-            scope_parts.append(conditions_to_statement(cond, ctx))
+            cond_stmt = conditions_to_statement(cond, ctx)
+            # Flatten: if cond_stmt is AndStatement and we're building an AndStatement, merge
+            if scope_parts and "AndStatement" in cond_stmt:
+                scope_parts.extend(cond_stmt["AndStatement"]["Statements"])
+            else:
+                scope_parts.append(cond_stmt)
 
         if scope_parts:
             if len(scope_parts) == 1:
