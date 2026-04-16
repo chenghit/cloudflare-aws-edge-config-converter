@@ -336,6 +336,12 @@ After the summary table, include deployment instructions:
 See docs/deployment-guide.md for the full deployment order and DNS cutover steps.
 ```
 
+**Step 4c: Translate CDN deployment guide (non-English users)**
+
+**CRITICAL — do NOT skip this step if the user's message is not in English.**
+
+If the user's message is not in English, read `cloudflare-to-aws-cdn/conversion_report.md`, translate it to the user's language, and save as `cloudflare-to-aws-cdn/conversion_report_{lang}.md` (e.g., `_CN.md`, `_JA.md`). Keep the original English version as-is.
+
 ## Important Rules
 
 - **Never read config files yourself** — always delegate to subagents (CDN pipeline) or scripts (WAF pipeline)
