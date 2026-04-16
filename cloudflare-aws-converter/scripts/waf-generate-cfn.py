@@ -368,7 +368,11 @@ def _build_string_set_statement(field, items, text_transforms, ctx):
 ACTION_MAP = {
     "block": {"Block": {}},
     "allow": {"Allow": {}},
+    "whitelist": {"Allow": {}},
     "challenge": {"Challenge": {}},
+    "js_challenge": {"Challenge": {}},
+    "managed_challenge": {"Challenge": {}},
+    "interactive_challenge": {"Captcha": {}},
     "captcha": {"Captcha": {}},
     "count": {"Count": {}},
 }
