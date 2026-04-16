@@ -1,9 +1,0 @@
-{
-  "name": "cf-cdn-js-validator",
-  "description": "Validates CloudFront Function JavaScript files generated for a single domain's distribution under terraform/domains/{hostname}/functions/. Checks that each .js file: exports a valid handler function with the correct CloudFront Functions runtime signature (event object with request/response), uses only CloudFront Functions runtime APIs (no Node.js built-ins, no fetch, no setTimeout), stays within the 10KB compressed size limit, contains no syntax errors, correctly handles the request and response objects according to CloudFront Functions event structure, and that redirect logic uses correct HTTP status codes. Outputs a per-domain JS validation report. Annotates issues inline if fixable (e.g., unsupported API calls replaced with CloudFront equivalents). Must be invoked once per domain (parallelizable). Accepts a --domain argument.",
-  "resources": [
-    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-js-validator/SKILL.md"
-  ],
-  "tools": ["fs_read", "fs_write", "glob", "grep", "execute_bash"],
-  "allowedTools": ["fs_read", "fs_write", "glob", "grep", "execute_bash"]
-}

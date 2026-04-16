@@ -26,15 +26,11 @@ rm -rf \
   "$SKILLS_DIR/cf-cdn-ir-finalizer" \
   "$SKILLS_DIR/cf-cdn-ir-final-validator" \
   "$SKILLS_DIR/cf-cdn-tf-shared-policies" \
-  "$SKILLS_DIR/cf-cdn-tf-domain" \
-  "$SKILLS_DIR/cf-cdn-js-validator" \
   "$SKILLS_DIR/SKILL.md" \
   "$SKILLS_DIR/scripts"
 
 cp -r cf-cdn-dns-parser "$SKILLS_DIR/"
 cp -r cf-cdn-input-validator "$SKILLS_DIR/"
-cp -r cf-cdn-tf-domain "$SKILLS_DIR/"
-cp -r cf-cdn-js-validator "$SKILLS_DIR/"
 cp cloudflare-aws-converter/SKILL.md "$SKILLS_DIR/"
 cp -r cloudflare-aws-converter/references "$SKILLS_DIR/"
 cp -r cloudflare-aws-converter/scripts "$SKILLS_DIR/"
@@ -53,10 +49,13 @@ rm -f "$AGENTS_DIR/cloudflare-aws-converter.json"
 rm -f "$AGENTS_DIR/cf-waf-analyzer.json"
 rm -f "$AGENTS_DIR/cf-waf-analyzer-validator.json"
 rm -f "$AGENTS_DIR/cf-waf-terraform-generator.json"
+# Remove old CDN JS subagent configs (replaced by Python scripts)
+rm -f "$AGENTS_DIR/cf-cdn-tf-domain.json"
+rm -f "$AGENTS_DIR/cf-cdn-js-validator.json"
+rm -rf "$SKILLS_DIR/cf-cdn-tf-domain"
+rm -rf "$SKILLS_DIR/cf-cdn-js-validator"
 cp subagents/cf-cdn-dns-parser.json "$AGENTS_DIR/"
 cp subagents/cf-cdn-input-validator.json "$AGENTS_DIR/"
-cp subagents/cf-cdn-tf-domain.json "$AGENTS_DIR/"
-cp subagents/cf-cdn-js-validator.json "$AGENTS_DIR/"
 
 echo ""
 echo "✅ Installation complete!"

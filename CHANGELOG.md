@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-04-16
+
+### CDN JS generation and validation replaced with deterministic Python
+
+CDN Stages 8 (JS generation) and 9 (JS validation) previously used LLM subagents (`cf-cdn-tf-domain`, `cf-cdn-js-validator`) invoked once per domain. These are now deterministic Python scripts (`cdn-generate-js.py`, `cdn-validate-js.py`) that process all domains in a single invocation.
+
+**Performance impact**: CDN pipeline time drops from ~32 min to ~5 min for the example config (7 domains). For 50-domain zones, the improvement is even larger — Stages 8+9 go from ~50 min to <1 second.
+
+**What changed**:
+- New: `cdn-generate-js.py` — full JS codegen with condition mapping, dynamic expression translation (concat, regex_replace, wildcard_replace, and 15+ other Cloudflare functions), Lambda@Edge escalation
+- New: `cdn-validate-js.py` — forbidden syntax, required structure, IR coverage, KVS consistency, size limit checks
+- New: `parse_expression_full()` in `cdn_expr_parser.py` — recursive descent parser eliminating raw_expression fallback
+- New: `parse_dynamic_expression()` — parses Cloudflare action expressions
+- Deleted: `cf-cdn-tf-domain/` subagent and all reference docs
+- Deleted: `cf-cdn-js-validator/` subagent and all reference docs
+- CDN pipeline now uses LLM only for Stages 1–2 (DNS parsing, input validation)
+
 ## 2026-04-15
 
 ### Breaking: WAF pipeline output changed from Terraform to CloudFormation

@@ -34,8 +34,13 @@ Orchestrate conversion of Cloudflare configurations to AWS by delegating to spec
 |----------|---------|---------------------------|
 | `cf-cdn-dns-parser` | DNS export → domain manifest + input template | CDN, full migration, domains, DNS |
 | `cf-cdn-input-validator` | Validates user_input.csv → domain_scope.json | (invoked automatically after user fills input) |
-| `cf-cdn-tf-domain` | Per-domain final IR → JS files for CloudFront distribution | (invoked once per domain, parallelizable) |
-| `cf-cdn-js-validator` | Validates each domain's CloudFront Function JS | (invoked once per domain, parallelizable) |
+
+| Component | Type | Description |
+|-----------|------|-------------|
+| `cdn-generate-js.py` | Python | IR → CloudFront Function JS + Lambda@Edge handlers (all domains) |
+| `cdn-validate-js.py` | Python | Validates generated JS files (all domains) |
+
+**Stages 8–9 are deterministic Python scripts.** No LLM subagents are used for JS generation or validation.
 
 ## Workflow
 
@@ -122,7 +127,7 @@ Skip this step if `cloudflare-to-aws-cdn/` already exists **in the current worki
 
 `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/{subagent-name}/SKILL.md and follow its workflow. You MUST use tools to read input files and write output files — do NOT generate output from memory or skip tool calls. "`
 
-Where `{subagent-name}` matches the subagent directory name (e.g., `cf-cdn-dns-parser`, `cf-cdn-tf-domain`).
+Where `{subagent-name}` matches the subagent directory name (e.g., `cf-cdn-dns-parser`, `cf-cdn-input-validator`).
 
 ---
 
@@ -247,38 +252,22 @@ python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-tests.py "c
 ```
 Generates `test-cdn-rules.py` per domain for post-deployment validation. Proceed to Stage 8.
 
-**Stage 8: Per-Domain JS Generation** (parallelizable — invoke once per domain)
-1. For each domain `{domain}`, invoke `cf-cdn-tf-domain` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. You MUST use tools to read IR files and write JS output — do NOT skip tool calls. The Cloudflare backup directory is {config_path}. Generate JavaScript files for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json. Terraform scaffold files (main.tf, functions.tf, etc.) have already been generated at cloudflare-to-aws-cdn/terraform/domains/. Only generate JS files (viewer_request.js, viewer_response.js, Lambda@Edge handlers if needed). If Lambda@Edge files are generated, update functions.tf by replacing the LAMBDA_EDGE_PLACEHOLDER comment with L@E resource blocks. Do NOT modify main.tf. Generate output files in {user_language}."`
-2. **Verify output** (CRITICAL — run this exact script, do NOT simplify or omit the lambda check):
-   ```bash
-   for d in cloudflare-to-aws-cdn/terraform/domains/*/; do
-     san=$(basename "$d")
-     echo -n "$san/functions: "; ls "$d/functions/" 2>/dev/null | tr '\n' ' '; echo
-     echo -n "$san/lambda: "; ls "$d/lambda/" 2>/dev/null | tr '\n' ' '; echo
-   done
-   ```
-   For each domain:
-   - `functions/` must contain at least `*_viewer_request.js`. If missing → re-invoke once.
-   - If the domain's IR has `lambda_edge.origin_response` non-null, `lambda/` must contain `default_cache_origin_response.js`. If missing → re-invoke once.
-   - If `lambda/origin_request_handler.js` exists (CFF overflow), verify `functions.tf` contains `origin_request` (PLACEHOLDER was replaced). If not → re-invoke once.
-3. Wait for all domains to complete.
+**Stage 8: JS Generation** (Python script, no LLM)
+```bash
+python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-js.py "cloudflare-to-aws-cdn"
+```
+Parse the `---RESULT---` block:
+- `STATUS: OK` → proceed to Stage 9
+- `STATUS: PARTIAL` → some domains exceeded 10KB CFF size limit (`SIZE_EXCEEDED`). Report failed domains to user. Remaining domains proceed.
+- `STATUS: FATAL` → stop pipeline, report error
 
-**Stage 9: CloudFront Function JS Validation** (parallelizable — invoke once per domain)
-1. For each domain `{domain}` that has a `functions/` directory, invoke `cf-cdn-js-validator` with: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-js-validator/SKILL.md and follow its workflow. You MUST use tools to read JS files and write validation report. The Cloudflare backup directory is {config_path}. Validate all CloudFront Function AND Lambda@Edge JavaScript files for domain {domain} — check both the functions/ and lambda/ directories (the skill will derive the sanitized directory name from the hostname). Output a validation report to cloudflare-to-aws-cdn/ir/validation/js/{domain}-v3.json. Generate output files in {user_language}."`
-2. **Verify output**: check that `cloudflare-to-aws-cdn/ir/validation/js/{domain}-v3.json` exists. If missing → re-invoke once.
-3. Check the `overall_status` field in the written JSON report:
-   - `"PASS"` → domain JS is valid
-   - `"FAIL"` → **auto-retry once** with the following procedure:
-     a. Use `fs_read` to read `cloudflare-to-aws-cdn/ir/validation/js/{hostname}-v3.json` and extract the failed checks (entries where `status == "FAIL"`).
-     b. Derive the sanitized hostname (replace every `.` and `-` with `_`, e.g., `cdn.c.example.com` → `cdn_c_example_com`). Use `execute_bash` to delete the JS output and regenerate scaffold (to restore LAMBDA_EDGE_PLACEHOLDER in functions.tf):
-        ```bash
-        rm -rf cloudflare-to-aws-cdn/terraform/domains/{sanitized}/functions/ cloudflare-to-aws-cdn/terraform/domains/{sanitized}/lambda/
-        python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-tf-scaffold.py "cloudflare-to-aws-cdn"
-        ```
-     c. Re-invoke `cf-cdn-tf-domain` with the error hint: `"FIRST read your skill file at ~/.kiro/skills/cloudflare-aws-converter/cf-cdn-tf-domain/SKILL.md and follow its workflow. You MUST use tools to read IR files and write JS output — do NOT skip tool calls. The Cloudflare backup directory is {config_path}. Generate JavaScript files for domain {domain} using the final IR at cloudflare-to-aws-cdn/ir/final/{domain}.json. IMPORTANT: A previous generation attempt produced JavaScript validation errors. Pay special attention to these issues: {failed_checks}. Generate all JS files from scratch — do NOT read any existing JS files. Generate output files in {user_language}."`
-     d. Re-invoke `cf-cdn-js-validator` for this domain.
-     e. If the second attempt also FAILs → mark this domain as `JS_VALIDATION_FAILED` (record the errors), continue processing other domains.
-3. Once all domains have completed (PASS or JS_VALIDATION_FAILED), proceed to Step 4 (final reporting).
+**Stage 9: JS Validation** (Python script, no LLM)
+```bash
+python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-validate-js.py "cloudflare-to-aws-cdn"
+```
+Parse the `---RESULT---` block:
+- `STATUS: OK` → all domains passed, proceed to Step 4 (final reporting)
+- `STATUS: ERROR` → some domains failed validation. Report failed domains and their check failures to user.
 
 ---
 
@@ -324,7 +313,7 @@ If the user's message is not in English, read `cloudflare-to-aws-waf/README_aws-
 **For the CDN full pipeline**, include a summary table showing:
 - Number of domains processed successfully
 - Number of domains SKIPPED (V1 failure after retry) — list each with failure reason
-- Number of domains with JS_VALIDATION_FAILED (V3 failure after retry) — list each with failure reason
+- Number of domains with SIZE_EXCEEDED (JS exceeded 10KB CFF limit) — list each
 - Number of CloudFront distributions generated
 - Number of shared policies created (cache, origin request, response headers)
 - Number of CloudFront Functions generated
@@ -352,9 +341,6 @@ See docs/deployment-guide.md for the full deployment order and DNS cutover steps
 - **Never read config files yourself** — always delegate to subagents (CDN pipeline) or scripts (WAF pipeline)
 - **Pass the exact path** the user provided; do not modify or resolve it
 - **WAF pipeline**: single `waf-pipeline.sh` call, no LLM subagents, no retry logic needed
-- **CDN pipeline**: serial execution for pipeline stages; parallel execution where the same LLM stage runs across multiple domains (Stages 8, 9). Stages 3–6 are single Python script invocations (no parallelization needed).
-- **Parallel batch size: 2** (default, CDN pipeline only). For parallelizable stages, dispatch at most 2 subagents at a time.
+- **CDN pipeline**: serial execution for pipeline stages. Stages 3–9 are single Python script invocations (no parallelization needed). Stages 1–2 use LLM subagents.
 - If the user's request is ambiguous about which conversion is needed, infer from context rather than asking
-- **When re-invoking the same subagent** (CDN pipeline), always explicitly state what action to perform and what inputs to use. Never assume the subagent remembers a previous invocation.
 - **CDN full pipeline requires a user pause at Stage 1** — always wait for the user to fill in `user_input.csv` before invoking Stage 2. Do not attempt to auto-fill the CSV.
-- **Domain list for parallelizable stages** — always extract the domain list from `domain_scope.json` or the finalized IR directory listing, not from earlier intermediate state that may have changed.

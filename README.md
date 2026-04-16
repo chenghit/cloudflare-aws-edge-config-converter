@@ -47,7 +47,7 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 - **Python 3** — Required by both WAF and CDN pipeline scripts. WAF pipeline is entirely Python-based (expression parsing, analysis, validation, CloudFormation generation). CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–7.6). Pre-installed on macOS and most Linux distributions. No third-party packages needed for the conversion pipeline (stdlib only). **Post-conversion**: CDN domains with KVS (bulk redirects, IP lists, error pages) generate a `seed-kvs.py` script that requires `boto3` — install with `pip install boto3` before deploying.
 - **Model**: `claude-sonnet-4.6-1m` minimum. Switch with `/model` in Kiro. Kiro CLI only supports Claude models on Amazon Bedrock.
   - **WAF migration**: No model requirement — the WAF pipeline is fully deterministic Python with zero LLM invocations. Any model works since the orchestrator only runs shell commands.
-  - **CDN migration**: `claude-sonnet-4.6-1m` regardless of domain count. CDN Stages 3–7.6 are Python scripts (no LLM cost). The remaining LLM stages (DNS parsing, input validation, JS generation, JS validation) each process one domain independently and generate ~200 lines of output, well within Sonnet's 64K output limit. Opus is not needed for token capacity, but consider switching to Opus if Sonnet produces incorrect JavaScript for complex Cloudflare expressions (regex_replace, wildcard_replace with capture groups).
+  - **CDN migration**: `claude-sonnet-4.6-1m` regardless of domain count. CDN Stages 3–9 are Python scripts (no LLM cost). Only Stages 1–2 (DNS parsing, input validation) use LLM subagents — each generates ~200 lines of output, well within Sonnet's 64K output limit.
   - For a full list of compatible models (including options for other agent frameworks), see [Supported Models](./docs/supported-models.md).
 - **ACM certificates** (CDN only): CloudFront requires certs in us-east-1. Provision wildcard certificates (e.g., `*.example.com`) before running, or leave blank in the CSV to let Terraform auto-discover existing ISSUED certs.
 - **Input format**: Only works with [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) exports. NOT compatible with [cf-terraforming](https://github.com/cloudflare/cf-terraforming) — see [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md).
@@ -152,9 +152,8 @@ Shared policies → Lambda@Edge (if any) → each domain independently → KVS d
 <details>
 <summary>Scaling and rate limits</summary>
 
-- **Design target:** Tested with up to 50 proxied domains per zone. Larger zones should work — each subagent processes one domain in isolation.
+- **Design target:** Tested with up to 50 proxied domains per zone. Larger zones should work — Python scripts process all domains in a single invocation.
 - **Single zone per run.** Multiple zones detected → orchestrator asks you to pick one.
-- **Parallel batch size: 2** (default). Conservative for Anthropic Tier 1 (50 RPM) and AWS Bedrock default quotas. To increase: open `cloudflare-aws-converter/SKILL.md`, search for `batch size 2` in the "Important Rules" section near the bottom, change `2` to `4` (Kiro CLI max). Tier 2+ or Bedrock with approved quota increase can safely use 4.
 - **KVS quota:** Default 50 per account (soft limit). [Request increase](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html) if > 50 domains use bulk redirects.
 
 </details>
@@ -162,23 +161,20 @@ Shared policies → Lambda@Edge (if any) → each domain independently → KVS d
 <details>
 <summary>Expected conversion time</summary>
 
-Conversion time depends on the number of rules/domains, LLM API latency, and parallel batch size. Benchmark with the included `examples/cloudflare-configs/` (1 zone, 7 proxied domains, 34 CDN rules + 8 WAF rules across 12 rule types — including regex expressions, OR conditions, geo-based routing, CORS, bulk redirects, and inline error pages), using `claude-sonnet-4.6-1m` on Anthropic API:
+Conversion time depends on the number of rules/domains and LLM API latency. Benchmark with the included `examples/cloudflare-configs/` (1 zone, 7 proxied domains, 34 CDN rules + 8 WAF rules across 12 rule types — including regex expressions, OR conditions, geo-based routing, CORS, bulk redirects, and inline error pages), using `claude-sonnet-4.6-1m` on Anthropic API:
 
 | Pipeline | Time |
 |----------|------|
 | WAF | <1 second (all Python, no LLM) |
-| CDN (batch size 2) | ~32 min |
-| CDN (batch size 4) | ~20 min |
+| CDN | ~5 min |
 
 Where the time goes:
 - **WAF**: Entire Python pipeline finishes in <1 second (zero LLM invocations).
-- **CDN**: Python scripts Stages 3–7.6 finish in <1 second total. Stage 8 JS generation (~15 min for 7 domains at batch size 2) and Stage 9 JS validation (~10 min) dominate. DNS parsing and input validation are ~2 min each.
+- **CDN**: Python scripts Stages 3–9 finish in <1 second total. Stage 1 DNS parsing (~2 min) and Stage 2 input validation (~2 min) are the only LLM stages.
 
 Factors that affect conversion time:
-- **Parallel batch size** is the biggest lever. Batch size 4 (Kiro CLI max) cuts CDN Stage 8+9 time nearly in half. Edit `cloudflare-aws-converter/SKILL.md` — search for "batch size" and change the number.
 - **LLM API latency** varies by provider, region, and time of day. Anthropic direct API is typically faster than AWS Bedrock.
-- **Number of domains** scales linearly for CDN Stages 8+9 (each domain is one subagent call). 50 domains at batch size 2 ≈ 25 batches × ~2 min each ≈ ~50 min for Stage 8 alone.
-- **Rule complexity** affects individual subagent duration. Domains with many redirect/rewrite rules or complex expressions take longer for JS generation.
+- **Number of domains** does NOT affect CDN Stages 3–9 (Python processes all domains in one invocation). Only Stages 1–2 scale with domain count, and they're fast (~4 min total).
 
 </details>
 
@@ -234,7 +230,7 @@ Update: `git pull && ./install.sh`
 > # 3. Edit install.sh (or install.bat) — change SKILLS_DIR and AGENTS_DIR at the top of the file
 > ```
 
-For advanced users: `/agent swap <subagent-name>` to run individual CDN pipeline stages. Available subagents: `cf-cdn-dns-parser`, `cf-cdn-input-validator`, `cf-cdn-tf-domain`, `cf-cdn-js-validator`. CDN Stages 3–7.6 are Python scripts (not subagents) — run them directly via `python3`. The WAF pipeline has no subagents — it runs entirely as Python scripts via `waf-pipeline.sh`.
+For advanced users: `/agent swap <subagent-name>` to run individual CDN pipeline stages. Available subagents: `cf-cdn-dns-parser`, `cf-cdn-input-validator`. CDN Stages 3–9 are Python scripts (not subagents) — run them directly via `python3`. The WAF pipeline has no subagents — it runs entirely as Python scripts via `waf-pipeline.sh`.
 
 ## Subagent Permissions and Security
 
@@ -242,10 +238,10 @@ Most subagents only have file I/O and search permissions (`fs_read`, `fs_write`,
 
 | Subagent | Has `execute_bash` | Why |
 |----------|-------------------|-----|
-| `cf-cdn-js-validator` | ✅ Yes | Runs `node --check <file>` for JavaScript syntax validation and `wc -c` for file size checks. These are the only two commands it needs — there is no way to validate JS syntax or measure byte-accurate file size with file I/O tools alone. |
+| `cf-cdn-js-validator` | ✅ Yes | Replaced by Python script `cdn-validate-js.py` — no longer uses `execute_bash`. |
 | All other subagents | ❌ No | Only need to read/write files and search text. |
 
-**If your security policy flags `execute_bash`:** You can review the validator's SKILL.md to confirm it only runs `node --check` and `wc -c`. Removing `execute_bash` from `cf-cdn-js-validator.json` will disable JS syntax checking (CFF-01, LE-01) and byte-accurate size validation (CFF-06, LE-03) — the validator will skip these checks and report them as `SKIP` in the output JSON.
+**If your security policy flags `execute_bash`:** The CDN JS validator is now a Python script that doesn't use `execute_bash`. Only the orchestrator and CDN Stages 1–2 subagents use it for running pipeline scripts.
 
 > **Note:** Kiro CLI 1.28.0 had two bugs that broke subagent pipelines: shell approval blocking ([#4751](https://github.com/kirodotdev/Kiro/issues/4751)) and subagent result return failure ([#6163](https://github.com/kirodotdev/Kiro/issues/6163)). Both are fixed in 1.28.1. If you encounter subagent issues, check your Kiro CLI version with `kiro-cli --version`.
 
