@@ -220,19 +220,6 @@ cd cloudflare-aws-edge-config-converter
 
 高级用户可直接通过 `python3` 运行各流程阶段。WAF pipeline 通过 `waf-pipeline.sh` 运行。CDN 各阶段是 `cloudflare-aws-converter/scripts/` 中的独立脚本。
 
-## Subagent 权限与安全
-
-## Subagent 权限与安全
-
-大多数 subagent 只有文件读写和搜索权限（`fs_read`、`fs_write`、`glob`、`grep`）。只有一个 subagent 需要 shell 执行权限：
-
-| Subagent | 有 `execute_bash` | 原因 |
-|----------|-------------------|------|
-| `cf-cdn-js-validator` | ✅ 有 | 已替换为 Python 脚本 `cdn-validate-js.py`——不再使用 `execute_bash`。 |
-| 其他所有 subagent | ❌ 无 | 只需要读写文件和搜索文本。 |
-
-**如果你的安全策略对 `execute_bash` 有告警：** 编排器使用它来运行 pipeline 脚本。所有转换逻辑都在 Python 脚本中——编排器只通过 shell 命令调用它们。
-
 ## 更多信息
 
 - [最佳实践](./docs/best-practices_CN.md)

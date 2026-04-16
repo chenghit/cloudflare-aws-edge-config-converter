@@ -222,17 +222,6 @@ Update: `git pull && ./install.sh`
 
 For advanced users: all pipeline stages are Python scripts — run them directly via `python3`. The WAF pipeline runs via `waf-pipeline.sh`. CDN stages are individual scripts in `cloudflare-aws-converter/scripts/`.
 
-## Subagent Permissions and Security
-
-Most subagents only have file I/O and search permissions (`fs_read`, `fs_write`, `glob`, `grep`). One subagent requires shell execution:
-
-| Subagent | Has `execute_bash` | Why |
-|----------|-------------------|-----|
-| `cf-cdn-js-validator` | ✅ Yes | Replaced by Python script `cdn-validate-js.py` — no longer uses `execute_bash`. |
-| All other subagents | ❌ No | Only need to read/write files and search text. |
-
-**If your security policy flags `execute_bash`:** The orchestrator uses it to run pipeline scripts. All conversion logic is in Python scripts — the orchestrator only invokes them via shell commands.
-
 ## More Information
 
 - [Best Practices](./docs/best-practices.md)
