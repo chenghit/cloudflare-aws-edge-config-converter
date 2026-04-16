@@ -525,7 +525,7 @@ def extract_ip_sets(cond: dict, rule_name: str, position: int = 0) -> list[dict]
             return
 
         # Leaf: check for inline IP set
-        if node.get("field", "").startswith("ip.src") and node.get("operator") in ("in", "not_in"):
+        if node.get("field", "") == "ip.src" and node.get("operator") in ("in", "not_in"):
             value = node.get("value", "")
             if isinstance(value, str) and value.startswith("{") and not value.startswith("${"):
                 addrs = value[1:-1].split()
