@@ -45,10 +45,7 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 - **Kiro CLI** >= 1.24 — [Installation guide](https://kiro.dev/docs/getting-started/installation/). ⚠️ Kiro IDE is not recommended (does not support `skill://` resource binding in subagents). **Avoid Kiro CLI 1.28.0** — it has two bugs ([#4751](https://github.com/kirodotdev/Kiro/issues/4751), [#6163](https://github.com/kirodotdev/Kiro/issues/6163)) that break subagent pipelines. Both are fixed in 1.28.1. **Kiro CLI 1.29.x** has a regression where subagents without an explicit `model` field fail with `Missing modelId` ([#7321](https://github.com/kirodotdev/Kiro/issues/7321)). Workaround: add `"model": "claude-sonnet-4.6"` to every agent config in `~/.kiro/agents/`.
 - **Terraform** >= 1.8.0 with AWS Provider >= 6.x — [Install Terraform](https://developer.hashicorp.com/terraform/install). Required for CDN pipeline only. WAF pipeline uses CloudFormation (no Terraform needed).
 - **Python 3** — Required by both WAF and CDN pipeline scripts. WAF pipeline is entirely Python-based (expression parsing, analysis, validation, CloudFormation generation). CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–7.6). Pre-installed on macOS and most Linux distributions. No third-party packages needed for the conversion pipeline (stdlib only). **Post-conversion**: CDN domains with KVS (bulk redirects, IP lists, error pages) generate a `seed-kvs.py` script that requires `boto3` — install with `pip install boto3` before deploying.
-- **Model**: `claude-sonnet-4.6-1m` minimum. Switch with `/model` in Kiro. Kiro CLI only supports Claude models on Amazon Bedrock.
-  - **WAF migration**: No model requirement — the WAF pipeline is fully deterministic Python with zero LLM invocations. Any model works since the orchestrator only runs shell commands.
-  - **CDN migration**: `claude-sonnet-4.6-1m` regardless of domain count. CDN Stages 3–9 are Python scripts (no LLM cost). Only Stages 1–2 (DNS parsing, input validation) use LLM subagents — each generates ~200 lines of output, well within Sonnet's 64K output limit.
-  - For a full list of compatible models (including options for other agent frameworks), see [Supported Models](./docs/supported-models.md).
+- **Model**: No model requirement — both WAF and CDN pipelines are fully deterministic Python with zero LLM invocations. Any model works since the orchestrator only runs shell commands.
 - **ACM certificates** (CDN only): CloudFront requires certs in us-east-1. Provision wildcard certificates (e.g., `*.example.com`) before running, or leave blank in the CSV to let Terraform auto-discover existing ISSUED certs.
 - **Input format**: Only works with [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) exports. NOT compatible with [cf-terraforming](https://github.com/cloudflare/cf-terraforming) — see [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md).
 
@@ -78,9 +75,9 @@ The tool runs as a Kiro CLI skill with an orchestrator that dispatches to specia
 
 The WAF pipeline automatically detects when inline IP sets exceed the 50 per-WebACL reference limit and switches to per-domain WebACLs (one per proxied domain). In per-domain mode, host-specific rules are placed only in the relevant domain's WebACL, and host conditions are stripped (redundant when a WebACL serves one domain). Each WebACL includes search engine labeling (Googlebot/Bingbot/YandexBot), Anti-DDoS with search engine exclusion, and an always-on challenge rule (Count mode — user activates after review).
 
-**CDN pipeline** (2 LLM stages + 9 Python scripts): parse DNS → validate user input → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → **generate shared policies (Python)** → **generate per-domain Terraform scaffold (Python)** → **generate per-domain test scripts (Python)** → **generate per-domain JS (Python)** → **validate JS (Python)**
+**CDN pipeline** (0 LLM stages + 11 Python scripts): **parse DNS (Python)** → **validate user input (Python)** → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → **generate shared policies (Python)** → **generate per-domain Terraform scaffold (Python)** → **generate per-domain test scripts (Python)** → **generate per-domain JS (Python)** → **validate JS (Python)**
 
-CDN Stages 3–9 are deterministic Python scripts that replaced LLM subagents. They handle rule parsing, field mapping, expression analysis, cache behavior assembly, policy deduplication, IR validation, shared policy generation, per-domain Terraform scaffold, JS code generation, and JS validation — all table-lookup and structural operations that don't need LLM judgment. This makes Stages 3–9 instant (<1 second for any number of domains), fully reproducible, and eliminates ~30 minutes of LLM processing per zone. Only Stages 1–2 (DNS parsing, input validation) use LLM subagents.
+All CDN stages are deterministic Python scripts. No LLM subagents. Stages 1–2 (DNS parsing, input validation) were the last LLM stages — now replaced by `cdn-parse-dns.py` and `cdn-validate-input.py`. The entire tool (WAF + CDN) is zero LLM.
 
 ```mermaid
 flowchart TD
@@ -89,8 +86,8 @@ flowchart TD
     Main -->|WAF| WAF_A1["🐍 IP Analyzer"] --> WAF_A2["🐍 Custom Rules"] --> WAF_A3["🐍 Rate Limits"] --> WAF_M["🐍 Merge + Validate"] --> WAF_S{"🐍 Split?"} -->|"≤50 IP sets"| WAF_G["🐍 Generate CFN (2 WebACLs)"] --> WAF_Done([CloudFormation ✅])
     WAF_S -->|">50 IP sets"| WAF_SP["🐍 Split by Host"] --> WAF_GP["🐍 Generate CFN (per-domain)"] --> WAF_Done
 
-    Main -->|CDN| CDN1["DNS Parser"] -->|CSV| Pause[/"⏸ User fills CSV"/]
-    Pause --> CDN2["Input Validator"]
+    Main -->|CDN| CDN1["🐍 DNS Parser"] -->|CSV| Pause[/"⏸ User fills CSV"/]
+    Pause --> CDN2["🐍 Input Validator"]
     CDN2 --> CDN3["🐍 Preprocess"]
     CDN3 --> CDN4["🐍 V1 Validate"]
     CDN4 -->|PASS| CDN5["🐍 Finalize"]
@@ -169,11 +166,11 @@ Conversion time depends on the number of rules/domains and LLM API latency. Benc
 | Pipeline | Time |
 |----------|------|
 | WAF | <1 second (all Python, no LLM) |
-| CDN | ~7 min (14 domains) |
+| CDN | <1 second + user input pause (all Python, no LLM) |
 
 Where the time goes:
 - **WAF**: Entire Python pipeline finishes in <1 second (zero LLM invocations).
-- **CDN**: Python scripts Stages 3–9 finish in <1 second total. Stage 1 DNS parsing (~2 min) and Stage 2 input validation (~2 min) are the only LLM stages.
+- **CDN**: All 11 Python stages finish in <1 second total. The only delay is the user pause between Stage 1 and Stage 2 (filling in `user_input.csv`).
 
 Factors that affect conversion time:
 - **LLM API latency** varies by provider, region, and time of day. Anthropic direct API is typically faster than AWS Bedrock.

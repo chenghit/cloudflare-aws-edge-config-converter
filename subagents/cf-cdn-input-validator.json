@@ -1,9 +1,0 @@
-{
-  "name": "cf-cdn-input-validator",
-  "description": "Validates the operator-filled user_input.csv against dns_manifest.yaml to ensure every proxied domain is accounted for with valid default cache behavior selection (Y/N) and optional ACM certificate ARN. Checks for required columns, valid enum values, correct ARN format, and completeness against the manifest. On success, produces domain_scope.json — a machine-readable domain registry enriched with origin content and type from the manifest, consumed by all downstream CDN pipeline subagents. Reports validation errors with clear remediation hints.",
-  "resources": [
-    "skill://~/.kiro/skills/cloudflare-aws-converter/cf-cdn-input-validator/SKILL.md"
-  ],
-  "tools": ["fs_read", "fs_write", "glob", "grep"],
-  "allowedTools": ["fs_read", "fs_write", "glob", "grep"]
-}

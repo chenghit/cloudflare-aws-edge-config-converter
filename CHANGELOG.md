@@ -2,6 +2,21 @@
 
 ## 2026-04-16
 
+### CDN Stages 1-2 replaced with Python — entire tool is now zero LLM
+
+CDN Stages 1 (DNS parsing) and 2 (input validation) were the last LLM subagents. Both performed purely structural operations (JSON/CSV/YAML parsing, field validation) that required zero judgment. Now replaced by `cdn-parse-dns.py` and `cdn-validate-input.py`.
+
+**Impact**: The entire tool (WAF + CDN) now runs with zero LLM invocations. No model dependency. CDN pipeline time drops from ~7 min to <1 second (excluding user input pause).
+
+**What changed**:
+- New: `cdn-parse-dns.py` — DNS.txt parser with SaaS detection, origin classification, CloudFront loop exclusion, A/AAAA non-convertible handling
+- New: `cdn-validate-input.py` — CSV validator with BOM handling, ACM ARN format check, completeness verification
+- Deleted: `cf-cdn-dns-parser/` subagent
+- Deleted: `cf-cdn-input-validator/` subagent
+- Deleted: `subagents/` directory (empty after removal)
+- Updated: `SKILL.md` — all stages are now Python script calls, no subagent invocation logic
+- Updated: `install.sh` — no subagent copying, only cleanup of old configs
+
 ### WAF: Per-domain WebACL with host-based rule splitting
 
 When a customer's Cloudflare config has many inline IP lists (>50 total IP sets), the WAF pipeline now automatically switches to per-domain WebACLs — one per proxied domain. This solves the AWS WAF limit of 50 IP set + regex set references per WebACL.

@@ -78,9 +78,9 @@ kiro-cli chat
 
 WAF pipeline 自动检测 inline IP set 是否超过每个 WebACL 50 个引用限制，超过时自动切换为 per-domain WebACL（每个 proxied 域名一个）。Per-domain 模式下，host-specific 规则只放到对应域名的 WebACL，host 条件被剥离（WebACL 只服务一个域名时冗余）。每个 WebACL 包含搜索引擎标签规则（Googlebot/Bingbot/YandexBot）、Anti-DDoS（排除搜索引擎）和 always-on challenge 规则（Count 模式——用户确认后手动改为 Challenge）。
 
-**CDN 流程**（2 个 LLM 阶段 + 9 个 Python 脚本）：解析 DNS → 校验用户输入 → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → **🐍 生成每域名 JS** → **🐍 校验 JS**
+**CDN 流程**（0 个 LLM 阶段 + 11 个 Python 脚本）：**🐍 解析 DNS** → **🐍 校验用户输入** → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → **🐍 生成每域名 JS** → **🐍 校验 JS**
 
-CDN Stage 3–9 是确定性 Python 脚本，替代了原来的 LLM subagent。它们负责规则解析、字段映射、表达式分析、缓存行为组装、策略去重、IR 校验、共享策略生成、每域名 Terraform 骨架、JS 代码生成和 JS 校验——全是查表和结构化操作，不需要 LLM 判断。这使得 Stage 3–9 瞬间完成（任意域名数量 <1 秒）、完全可复现，并省去了每个 zone 约 30 分钟的 LLM 处理时间。仅 Stage 1–2（DNS 解析、输入校验）使用 LLM subagent。
+所有 CDN 阶段都是确定性 Python 脚本，零 LLM 调用。整个工具（WAF + CDN）完全不依赖模型。
 
 ```mermaid
 flowchart TD
@@ -89,8 +89,8 @@ flowchart TD
     Main -->|WAF| WAF_A1["🐍 IP 分析"] --> WAF_A2["🐍 自定义规则"] --> WAF_A3["🐍 速率限制"] --> WAF_M["🐍 合并 + 校验"] --> WAF_S{"🐍 拆分?"} -->|"≤50 IP sets"| WAF_G["🐍 生成 CFN (2 WebACL)"] --> WAF_Done([CloudFormation ✅])
     WAF_S -->|">50 IP sets"| WAF_SP["🐍 按域名拆分"] --> WAF_GP["🐍 生成 CFN (per-domain)"] --> WAF_Done
 
-    Main -->|CDN| CDN1["DNS 解析"] -->|CSV| Pause[/"⏸ 用户填写 CSV"/]
-    Pause --> CDN2["输入校验"]
+    Main -->|CDN| CDN1["🐍 DNS 解析"] -->|CSV| Pause[/"⏸ 用户填写 CSV"/]
+    Pause --> CDN2["🐍 输入校验"]
     CDN2 --> CDN3["🐍 预处理"]
     CDN3 --> CDN4["🐍 V1 校验"]
     CDN4 -->|通过| CDN5["🐍 合并"]
@@ -167,11 +167,11 @@ cloudflare-to-aws-cdn/
 | 流程 | 时间 |
 |------|------|
 | WAF | <1 秒（全 Python，无 LLM） |
-| CDN | ~7 分钟（14 个域名） |
+| CDN | <1 秒 + 用户输入等待（全 Python，无 LLM） |
 
 时间分布：
 - **WAF**：全 Python pipeline，总计 <1 秒（无 LLM 调用）。
-- **CDN**：Python 脚本 Stage 3–9 总计 <1 秒。Stage 1 DNS 解析（~2 分钟）和 Stage 2 输入校验（~2 分钟）是仅有的 LLM 阶段。
+- **CDN**：全部 11 个 Python 阶段总计 <1 秒。唯一的延迟是 Stage 1 和 Stage 2 之间的用户暂停（填写 `user_input.csv`）。
 
 影响因素：
 - **LLM API 延迟**因服务商、区域和时段而异。Anthropic 直连 API 通常比 AWS Bedrock 快。
