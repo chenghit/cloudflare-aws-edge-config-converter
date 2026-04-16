@@ -59,11 +59,13 @@ def count_inline_ip_sets(ir):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: waf-check-split.py <output_dir>", file=sys.stderr)
+    force_split = "--force-split" in sys.argv
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if not args:
+        print("Usage: waf-check-split.py <output_dir> [--force-split]", file=sys.stderr)
         sys.exit(1)
 
-    output_dir = os.path.expanduser(sys.argv[1])
+    output_dir = os.path.expanduser(args[0])
     ir_path = os.path.join(output_dir, "waf_ir.json")
 
     with open(ir_path) as f:
@@ -72,7 +74,13 @@ def main():
     total = count_ip_sets(ir)
     inline = count_inline_ip_sets(ir)
 
-    if total <= 50:
+    if force_split:
+        mode = "split"
+        dedup = inline > 100
+        reason = f"forced split (--force-split); {total} IP sets, {inline} inline"
+        if dedup:
+            reason += "; dedup enabled"
+    elif total <= 50:
         mode = "legacy"
         dedup = False
         reason = f"{total} IP sets <= 50 limit"
