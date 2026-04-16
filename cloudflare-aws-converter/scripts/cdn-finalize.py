@@ -619,6 +619,67 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "",
     ]
 
+    # Cloudflare default caching note
+    lines += [
+        "---", "",
+        "## Cloudflare Default Caching Behavior (Not Migrated)",
+        "",
+        "Cloudflare automatically caches responses for the following ~70 file extensions "
+        "with a default TTL of 2 hours. This behavior applies to **all** proxied domains "
+        "and is NOT part of Cache Rules — it is a platform default.",
+        "",
+        "**This default caching behavior is not automatically migrated to CloudFront.** "
+        "CloudFront does not have an equivalent built-in feature. If your domains rely on "
+        "this behavior, you need to add a Lambda@Edge origin-response function to replicate it.",
+        "",
+        "### Cached file extensions",
+        "",
+        "```",
+        "7z, avif, bmp, bz2, css, csv, doc, docx, eot, eps, gif, gz, ico, jar, jpeg, jpg,",
+        "js, json, mid, midi, mp3, mp4, ogg, otf, pdf, pict, pls, png, ppt, pptx, ps,",
+        "rar, svg, svgz, swf, tar, tif, tiff, ttf, webm, webp, woff, woff2, xls, xlsx,",
+        "xml, zip, zst, class, dmg, ejs, exe, flv, gzip, m4v, mov, ogv, pps, ppsx, tgz,",
+        "wmv, avi, bin, cab, dat, iso, msi, pkg, qt, rss, tsv, wav",
+        "```",
+        "",
+        "### Example Lambda@Edge origin-response function",
+        "",
+        "Associate this function with the `origin-response` event on distributions that "
+        "need Cloudflare-equivalent default caching.",
+        "",
+        "```javascript",
+        "'use strict';",
+        "",
+        "const CACHED_EXTENSIONS = new Set([",
+        "  '7z','avif','bmp','bz2','css','csv','doc','docx','eot','eps','gif','gz','ico',",
+        "  'jar','jpeg','jpg','js','json','mid','midi','mp3','mp4','ogg','otf','pdf',",
+        "  'pict','pls','png','ppt','pptx','ps','rar','svg','svgz','swf','tar','tif',",
+        "  'tiff','ttf','webm','webp','woff','woff2','xls','xlsx','xml','zip','zst',",
+        "  'class','dmg','ejs','exe','flv','gzip','m4v','mov','ogv','pps','ppsx','tgz',",
+        "  'wmv','avi','bin','cab','dat','iso','msi','pkg','qt','rss','tsv','wav',",
+        "]);",
+        "",
+        "exports.handler = (event, context, callback) => {",
+        "  const response = event.Records[0].cf.response;",
+        "  const request = event.Records[0].cf.request;",
+        "  const uri = request.uri;",
+        "  const ext = uri.includes('.') ? uri.split('.').pop().toLowerCase() : '';",
+        "",
+        "  // Only add cache header if origin didn't set one and extension matches",
+        "  const cc = response.headers['cache-control'];",
+        "  if (!cc && CACHED_EXTENSIONS.has(ext)) {",
+        "    response.headers['cache-control'] = [{",
+        "      key: 'Cache-Control',",
+        "      value: 'public, max-age=7200'  // 2 hours, matching Cloudflare default",
+        "    }];",
+        "  }",
+        "",
+        "  callback(null, response);",
+        "};",
+        "```",
+        "",
+    ]
+
     return "\n".join(lines) + "\n"
 
 
