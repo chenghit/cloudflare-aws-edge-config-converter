@@ -9,7 +9,7 @@ Usage:
 
 Exit codes: 0 = OK, 1 = error, 2 = quota exceeded.
 """
-import json, sys, os, re, math
+import copy, json, sys, os, re, math
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -815,7 +815,7 @@ def generate(ir):
     website_rules = [se_rule, ddos_website]
     p = 2
     for r in all_rules[:rate_end_idx]:
-        r_copy = dict(r)
+        r_copy = copy.deepcopy(r)
         r_copy["Priority"] = p
         website_rules.append(r_copy)
         p += 1
@@ -823,12 +823,12 @@ def generate(ir):
     website_rules.append(aoc_rule)
     p += 1
     for r in all_rules[rate_end_idx:]:
-        r_copy = dict(r)
+        r_copy = copy.deepcopy(r)
         r_copy["Priority"] = p
         website_rules.append(r_copy)
         p += 1
     for mr in managed_rules:
-        mr_copy = dict(mr)
+        mr_copy = copy.deepcopy(mr)
         mr_copy["Priority"] = p
         website_rules.append(mr_copy)
         p += 1
@@ -841,12 +841,12 @@ def generate(ir):
     api_rules = [ddos_api]
     p = 1
     for r in all_rules:
-        r_copy = dict(r)
+        r_copy = copy.deepcopy(r)
         r_copy["Priority"] = p
         api_rules.append(r_copy)
         p += 1
     for mr in managed_rules:
-        mr_copy = dict(mr)
+        mr_copy = copy.deepcopy(mr)
         mr_copy["Priority"] = p
         api_rules.append(mr_copy)
         p += 1
@@ -890,7 +890,6 @@ def generate_split(split_ir, dedup):
     """Generate CloudFormation template with per-domain WebACLs."""
     resources = {}
     warnings = []
-    wcu = WCUTracker()
     used_ids = set()
 
     def unique_id(base):
@@ -982,8 +981,12 @@ def generate_split(split_ir, dedup):
 
     skip_labels_present = split_ir.get("skip_labels_present", {})
     total_rules = 0
+    max_wcu = 0
+    max_wcu_domain = ""
+    seen_warnings = set()
 
     for domain, domain_data in split_ir.get("domains", {}).items():
+        domain_wcu = WCUTracker()
         refs = RefCounter()
         used_rule_names = set()
 
@@ -1004,13 +1007,13 @@ def generate_split(split_ir, dedup):
 
         # Injected: search engine label
         acl_rules.append(build_search_engine_label_rule(p))
-        wcu.add(f"search-engine-{domain}", 6)
+        domain_wcu.add("search-engine-label", 6)
         p += 1
 
         # Injected: Anti-DDoS with scope-down
         acl_rules.append(build_anti_ddos_rule(p, advanced=False,
                                                scope_down_exclude_labels=["awswaf:search-engine"]))
-        wcu.add(f"AntiDDoS-{domain}", 250)
+        domain_wcu.add("AntiDDoS", 250)
         p += 1
 
         # IP Access Rules
@@ -1020,7 +1023,7 @@ def generate_split(split_ir, dedup):
             cond = rule.get("conditions")
             if not cond:
                 continue
-            ctx = {"wcu": wcu, "refs": refs, "warnings": warnings,
+            ctx = {"wcu": domain_wcu, "refs": refs, "warnings": warnings,
                    "rule_name": rule["name"], "ip_list_map": ip_list_map,
                    "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
                    "current_rule_ip_sets": rule.get("ip_sets", [])}
@@ -1042,7 +1045,7 @@ def generate_split(split_ir, dedup):
             cond = rule.get("conditions") or rule.get("convertible_conditions")
             if not cond:
                 continue
-            ctx = {"wcu": wcu, "refs": refs, "warnings": warnings,
+            ctx = {"wcu": domain_wcu, "refs": refs, "warnings": warnings,
                    "rule_name": rule["name"], "ip_list_map": ip_list_map,
                    "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
                    "current_rule_ip_sets": rule.get("ip_sets", [])}
@@ -1055,7 +1058,7 @@ def generate_split(split_ir, dedup):
                     stmt["AndStatement"]["Statements"].insert(0, not_label)
                 else:
                     stmt = {"AndStatement": {"Statements": [not_label, stmt]}}
-                wcu.add(rule["name"], 1)
+                domain_wcu.add(rule["name"], 1)
 
             action = rule.get("action", "block")
             if action == "skip":
@@ -1081,7 +1084,7 @@ def generate_split(split_ir, dedup):
             if rule.get("convertibility") == "no":
                 continue
             cond = rule.get("conditions") or rule.get("convertible_conditions")
-            ctx = {"wcu": wcu, "refs": refs, "warnings": warnings,
+            ctx = {"wcu": domain_wcu, "refs": refs, "warnings": warnings,
                    "rule_name": rule["name"], "ip_list_map": ip_list_map,
                    "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
                    "current_rule_ip_sets": rule.get("ip_sets", [])}
@@ -1090,12 +1093,12 @@ def generate_split(split_ir, dedup):
                 "AggregateKeyType": "IP",
                 "EvaluationWindowSec": rule.get("aws_evaluation_window_sec", 60),
             }}
-            wcu.add(rule["name"], 2)
+            domain_wcu.add(rule["name"], 2)
             scope_parts = []
             if rule.get("scope_down", {}).get("skip_http_ratelimit"):
                 scope_parts.append({"NotStatement": {"Statement": {"LabelMatchStatement": {
                     "Scope": "LABEL", "Key": "skip:http_ratelimit"}}}})
-                wcu.add(rule["name"], 1)
+                domain_wcu.add(rule["name"], 1)
             if cond:
                 cond_stmt = conditions_to_statement(cond, ctx)
                 if scope_parts and "AndStatement" in cond_stmt:
@@ -1120,18 +1123,36 @@ def generate_split(split_ir, dedup):
 
         # Injected: always-on challenge (after rate rules, before managed)
         acl_rules.append(build_always_on_challenge_rule(p))
-        wcu.add(f"always-on-challenge-{domain}", 3)
+        domain_wcu.add("always-on-challenge", 3)
         p += 1
 
         # Managed rules
-        managed, p = build_managed_rules(p, skip_labels_present, wcu)
+        managed, p = build_managed_rules(p, skip_labels_present, domain_wcu)
         acl_rules.extend(managed)
 
         total_rules += len(acl_rules)
 
+        # Track max WCU
+        if domain_wcu.total > max_wcu:
+            max_wcu = domain_wcu.total
+            max_wcu_domain = domain
+        if domain_wcu.total > MAX_WCU:
+            warnings.append(f"Domain {domain}: WCU {domain_wcu.total} exceeds {MAX_WCU}")
+        elif domain_wcu.total > WARN_WCU:
+            w = f"WCU {domain_wcu.total} exceeds {WARN_WCU} (extra charges apply)"
+            if w not in seen_warnings:
+                seen_warnings.add(w)
+                warnings.append(f"Domain {domain}: {w}")
+
         # Check per-WebACL IP set refs
         if refs.count > MAX_REF_STATEMENTS:
             warnings.append(f"Domain {domain}: {refs.count} IP set refs > {MAX_REF_STATEMENTS} limit")
+
+        # Deduplicate warnings
+        for w in list(warnings):
+            if w in seen_warnings:
+                continue
+            seen_warnings.add(w)
 
         webacl_name = sanitize_webacl_name(domain)
         lid = f"WebACL{sanitize_logical_id(domain)}"
@@ -1176,7 +1197,7 @@ def generate_split(split_ir, dedup):
         "Outputs": outputs,
     }
 
-    return template, wcu, warnings, errors
+    return template, max_wcu, max_wcu_domain, warnings, errors
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -1205,7 +1226,8 @@ def main():
             sys.exit(1)
         with open(split_path) as f:
             split_ir = json.load(f)
-        template, wcu, warnings, errors = generate_split(split_ir, dedup)
+        template, max_wcu_val, max_wcu_domain, warnings, errors = generate_split(split_ir, dedup)
+        wcu_display = f"WCU={max_wcu_val} (max, {max_wcu_domain})"
     else:
         ir_path = os.path.join(output_dir, "waf_ir.json")
         if not os.path.exists(ir_path):
@@ -1214,6 +1236,8 @@ def main():
         with open(ir_path) as f:
             ir = json.load(f)
         template, wcu, warnings, errors = generate(ir)
+        max_wcu_val = wcu.total
+        wcu_display = f"WCU={wcu.total}"
 
     # Write template
     out_path = os.path.join(output_dir, "waf-cloudformation.json")
@@ -1239,10 +1263,10 @@ def main():
         sys.exit(2)
 
     print(f"OK: {num_resources} resources, {num_webacls} WebACLs, "
-          f"{num_ip_sets} IP sets, WCU={wcu.total} → {out_path}")
+          f"{num_ip_sets} IP sets, {wcu_display} → {out_path}")
     print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nOUTPUT_FILE: {out_path}\n"
           f"RESOURCES: {num_resources}\nWEBACLS: {num_webacls}\n"
-          f"IP_SETS: {num_ip_sets}\nWCU: {wcu.total}\nMODE: {mode}")
+          f"IP_SETS: {num_ip_sets}\nWCU: {max_wcu_val}\nMODE: {mode}")
 
 
 if __name__ == "__main__":
