@@ -192,6 +192,17 @@ Or leave the cert ARN blank in the CSV — the tool generates a `data "aws_acm_c
 
 </details>
 
+<details>
+<summary>AWS WAF quotas to be aware of</summary>
+
+- **IP sets per account per region**: 100 (soft limit, can request increase via support case)
+- **IP set + regex set references per WebACL**: 50 (hard limit, cannot be increased)
+- **WebACLs per account per region**: 100 (soft limit)
+
+The pipeline automatically switches to per-domain WebACLs when total IP sets exceed 50, and enables cross-rule IP set deduplication when inline IP sets exceed 100. See [Why CloudFormation](./docs/why-cloudformation.md) for details.
+
+</details>
+
 ## Installation
 
 ```bash

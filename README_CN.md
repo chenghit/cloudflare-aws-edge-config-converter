@@ -190,6 +190,17 @@ aws acm request-certificate \
 
 </details>
 
+<details>
+<summary>需要了解的 AWS WAF 配额</summary>
+
+- **每账号每区域 IP set 数量**：100（软限制，可通过 support case 申请提额）
+- **每个 WebACL 的 IP set + regex set 引用数**：50（硬限制，不可提额）
+- **每账号每区域 WebACL 数量**：100（软限制）
+
+当总 IP set 超过 50 时，pipeline 自动切换为 per-domain WebACL；当 inline IP set 超过 100 时，启用跨规则 IP set 去重。详见 [为什么用 CloudFormation](./docs/why-cloudformation_CN.md)。
+
+</details>
+
 ## 安装
 
 ```bash
