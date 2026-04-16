@@ -156,20 +156,19 @@ cloudflare-to-aws-cdn/
 <details>
 <summary>预计转换时间</summary>
 
-转换时间取决于规则/域名数量和 LLM API 延迟。以下基准使用项目自带的 `examples/cloudflare-configs/`（1 个 zone、7 个代理域名、34 条 CDN 规则 + 8 条 WAF 规则，覆盖 12 种规则类型——包括正则表达式、OR 条件、地理路由、CORS、批量重定向和内联错误页面），模型 `claude-sonnet-4.6-1m`，Anthropic API：
+转换时间取决于规则/域名数量。以下基准使用项目自带的 `examples/cloudflare-configs/`（1 个 zone、7 个代理域名、34 条 CDN 规则 + 8 条 WAF 规则，覆盖 12 种规则类型——包括正则表达式、OR 条件、地理路由、CORS、批量重定向和内联错误页面）：
 
 | 流程 | 时间 |
 |------|------|
 | WAF | <1 秒（全 Python，无 LLM） |
-| CDN | <1 秒 + 用户输入等待（全 Python，无 LLM） |
+| CDN | <1 秒（全 Python，无 LLM，全自动） |
 
 时间分布：
 - **WAF**：全 Python pipeline，总计 <1 秒（无 LLM 调用）。
 - **CDN**：全部 10 个 Python 阶段总计 <1 秒。全自动，无用户交互。
 
 影响因素：
-- **LLM API 延迟**因服务商、区域和时段而异。Anthropic 直连 API 通常比 AWS Bedrock 快。
-- **域名数量**不影响 CDN Stage 3–9（Python 一次处理所有域名）。仅 Stage 1–2 随域名数量增长，但速度很快（总计约 4 分钟）。
+- **域名数量**不影响大部分阶段（Python 一次处理所有域名）。
 
 </details>
 
