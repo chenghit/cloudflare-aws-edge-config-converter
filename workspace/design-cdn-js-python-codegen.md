@@ -322,7 +322,7 @@ After generating viewer_request.js, check byte count:
 1. If total size ≤ 10,240 bytes → write as CloudFront Function. Done.
 2. If total size > 10,240 bytes:
    a. Check if `origin_override` ops exist. If yes → move ALL origin_override ops to `lambda/origin_request_handler.js`. Remove from CFF. Re-check CFF size.
-   b. If CFF still > 10,240 bytes after removing origin_override → mark domain as `SIZE_EXCEEDED`, write a comment in JS, record in validation report.
+   b. If CFF still > 10,240 bytes after removing origin_override → **FAIL this domain**. Record as `SIZE_EXCEEDED` in the `---RESULT---` block with the domain name and byte count. The pipeline does NOT silently trim rules — the user must simplify their Cloudflare rules or manually split the logic. This is a hard stop for this domain; other domains continue processing.
 3. If Lambda@Edge origin_request is generated:
    - Update `functions.tf`: replace `LAMBDA_EDGE_PLACEHOLDER` comment with Lambda@Edge resource blocks
    - The placeholder replacement uses a fixed Terraform template (same as `cdn-generate-tf-scaffold.py` output format)
@@ -1191,7 +1191,8 @@ Python-generated JS is naturally compact (no LLM verbosity), but for domains wit
      c. Collapse multiple spaces to single space
      d. Remove empty lines
    - Re-check after minification
-   - Still > 10,240 bytes → Lambda@Edge escalation (move origin_override ops)
+   - Still > 10,240 bytes → Lambda@Edge escalation (move origin_override ops to `lambda/origin_request_handler.js`, re-check CFF size)
+   - Still > 10,240 bytes after escalation → **FAIL this domain** with `SIZE_EXCEEDED`. Do NOT silently trim rules. Report domain name and byte count in `---RESULT---` block. Other domains continue.
 
 Minification is a post-processing step in `cdn-generate-js.py`, not a separate script. It's deterministic — same input always produces same minified output.
 
@@ -1211,3 +1212,129 @@ def minify_js(js_code):
 ```
 
 Note: This is NOT a full JS minifier (no variable renaming, no dead code elimination). It's sufficient because Python-generated JS already uses short patterns. If minification is still not enough, Lambda@Edge escalation handles it.
+
+## v3e: Lambda@Edge origin_request template + escalation flow
+
+### Correction 23: Lambda@Edge origin_request JS template
+
+CFF and Lambda@Edge have fundamentally different APIs. The codegen must use the correct template when escalating origin_override ops to Lambda@Edge.
+
+**Syntax differences:**
+
+| | CFF (viewer-request) | Lambda@Edge (origin-request) |
+|---|---|---|
+| Module system | `import cf from 'cloudfront'` | `exports.handler = async (event, context, callback) => { ... }` |
+| Request object | `event.request` | `event.Records[0].cf.request` |
+| Origin mutation | `cf.updateRequestOrigin({ domainName: '...' })` | `request.origin.custom.domainName = '...'` |
+| Origin port | `cf.updateRequestOrigin({ customOriginConfig: { port: N } })` | `request.origin.custom.port = N` |
+| Origin protocol | `cf.updateRequestOrigin({ customOriginConfig: { protocol: 'https' } })` | `request.origin.custom.protocol = 'https'` |
+| Host header | `request.headers.host = { value: '...' }` | `request.headers.host = [{ key: 'Host', value: '...' }]` |
+| Other headers | `request.headers['name'] = { value: '...' }` | `request.headers['name'] = [{ key: 'Name', value: '...' }]` |
+| Read header | `request.headers['name'].value` | `request.headers['name'][0].value` |
+| URI path | `request.uri` | `request.uri` (same) |
+| Query string | `request.rawQueryString()` | `request.querystring` |
+| Client IP | `event.viewer.ip` | `event.Records[0].cf.request.clientIp` |
+| Return | `return request` | `callback(null, request)` |
+
+**Lambda@Edge origin_request template:**
+
+```javascript
+'use strict';
+
+exports.handler = async (event, context, callback) => {
+    const request = event.Records[0].cf.request;
+    const uri = request.uri;
+    const host = request.headers.host[0].value;
+
+    // --- origin_override ops (moved from CFF viewer-request) ---
+
+    // Example: origin_override with condition
+    // if (uri.startsWith('/api/')) {
+    //     request.origin.custom.domainName = 'api-backend.example.com';
+    //     request.origin.custom.port = 443;
+    //     request.origin.custom.protocol = 'https';
+    //     request.headers.host = [{ key: 'Host', value: 'api-backend.example.com' }];
+    // }
+
+    callback(null, request);
+};
+```
+
+**Condition codegen differences for Lambda@Edge:**
+
+The condition → JS mapping is mostly the same, except:
+- Client IP: `event.Records[0].cf.request.clientIp` instead of `event.viewer.ip`
+- Query string: `request.querystring` instead of `request.rawQueryString()`
+- Header read: `request.headers['name'][0].value` instead of `request.headers['name'].value`
+- Header existence: `request.headers['name'] && request.headers['name'][0]` instead of `request.headers['name']`
+
+The codegen should have a `target` parameter (`'cff'` or `'lambda'`) that switches the accessor patterns.
+
+```python
+def get_accessor(field, target='cff'):
+    if target == 'lambda':
+        LAMBDA_ACCESSORS = {
+            'ip.src': "request.clientIp",
+            'uri.query': "request.querystring",
+            'host': "request.headers.host[0].value",
+            'user_agent': ("request.headers['user-agent']", True, "[0].value"),
+            # ... same fields, different access patterns
+        }
+        return LAMBDA_ACCESSORS.get(field, CFF_ACCESSORS.get(field))
+    return CFF_ACCESSORS.get(field)
+```
+
+### Correction 24: Complete escalation flow (final)
+
+```
+1. Generate viewer_request.js (CFF format, all ops)
+2. Check byte count
+3. If ≤ 10,240 → write to functions/, done
+4. If > 10,240 → minify (remove comments, collapse whitespace)
+5. If ≤ 10,240 → write minified to functions/, done
+6. If > 10,240 → check if origin_override ops exist
+   a. No origin_override ops → FAIL domain (SIZE_EXCEEDED)
+   b. Has origin_override ops →
+      i.   Remove origin_override ops from CFF JS
+      ii.  Re-check CFF size (should be smaller now)
+      iii. If still > 10,240 → FAIL domain (SIZE_EXCEEDED)
+      iv.  If ≤ 10,240 → write CFF to functions/
+      v.   Generate origin_request_handler.js (Lambda@Edge format) with the origin_override ops
+      vi.  Write to lambda/
+      vii. Update functions.tf: replace LAMBDA_EDGE_PLACEHOLDER with L@E resource block
+```
+
+Step 6.b.vii — the functions.tf replacement is a string substitution:
+```python
+def update_functions_tf_for_lambda(functions_tf_path, sanitized_name):
+    """Replace LAMBDA_EDGE_PLACEHOLDER in functions.tf with L@E resource block."""
+    with open(functions_tf_path) as f:
+        content = f.read()
+
+    lambda_block = f'''
+resource "aws_lambda_function" "{sanitized_name}_origin_request" {{
+  filename         = "${{path.module}}/lambda/origin_request_handler.js.zip"
+  function_name    = "{sanitized_name}-origin-request"
+  role             = var.lambda_edge_role_arn
+  handler          = "origin_request_handler.handler"
+  runtime          = "nodejs20.x"
+  publish          = true
+  source_code_hash = filebase64sha256("${{path.module}}/lambda/origin_request_handler.js.zip")
+}}
+'''
+
+    content = content.replace('# LAMBDA_EDGE_PLACEHOLDER', lambda_block)
+    with open(functions_tf_path, 'w') as f:
+        f.write(content)
+```
+
+### CloudFront event trigger compatibility (reference)
+
+| Trigger | CFF | Lambda@Edge | Can coexist? |
+|---|---|---|---|
+| viewer-request | ✅ | ✅ | ❌ One or the other |
+| viewer-response | ✅ | ✅ | ❌ One or the other |
+| origin-request | ❌ | ✅ | ✅ With CFF viewer-request |
+| origin-response | ❌ | ✅ | ✅ With CFF viewer-response |
+
+The escalation path (CFF viewer-request + L@E origin-request) is valid because they're different triggers and can coexist.
