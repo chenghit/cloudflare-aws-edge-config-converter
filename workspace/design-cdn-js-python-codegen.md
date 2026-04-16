@@ -61,7 +61,7 @@ From [Cloudflare docs](https://developers.cloudflare.com/ruleset-engine/rules-la
 | `decode_base64(field)` | ❌ No | Not available in CFF Runtime 2.0 → MANUAL_REQUIRED |
 | `lookup_json_string(field, key, ...)` | ❌ No | `JSON.parse(field)[key]` — but CFF has no `JSON.parse` → MANUAL_REQUIRED |
 | `lookup_json_integer(field, key, ...)` | ❌ No | Same as above → MANUAL_REQUIRED |
-| `remove_bytes(field, bytes)` | ❌ No | Custom JS → MANUAL_REQUIRED |
+| `remove_bytes(field, bytes)` | ❌ No | `field.replace(/[charclass]/g, '')` — build regex char class from bytes | Low |
 | `split(field, sep)` | ❌ No | `field.split(sep)` | Low |
 | `join(items, sep)` | ❌ No | `items.join(sep)` | Low |
 | `remove_query_args(field, args)` | ❌ No | Custom JS (parse + filter query string) | Medium |
@@ -161,7 +161,7 @@ dyn_expr     = func_call | field_ref | string_literal
 func_call    = func_name "(" arg ("," arg)* ")"
 func_name    = "concat" | "regex_replace" | "wildcard_replace" | "lower" | "upper"
              | "to_string" | "substring" | "len" | "url_decode" | "split" | "join"
-             | "remove_query_args"
+             | "remove_query_args" | "remove_bytes"
 arg          = dyn_expr | string_literal | number | raw_string
 field_ref    = cloudflare_field_name  (e.g., http.request.uri.path)
 ```
@@ -213,9 +213,10 @@ field_ref    = cloudflare_field_name  (e.g., http.request.uri.path)
 | `split(field, sep)` | `field.split(sep)` |
 | `join(items, sep)` | `items.join(sep)` |
 | `remove_query_args(field, ...)` | Custom: parse query string, filter, rejoin |
+| `remove_bytes(field, bytes)` | `field.replace(/[charclass]/g, '')` — parse each byte in `bytes` arg into a JS regex character class, escape regex-special chars |
 | `encode_base64`, `decode_base64`, `sha256`, `hmac` | → `MANUAL_REQUIRED` (not available in CFF Runtime 2.0) |
 | `lookup_json_string`, `lookup_json_integer` | → `MANUAL_REQUIRED` (CFF has no JSON.parse) |
-| `remove_bytes` | → `MANUAL_REQUIRED` |
+| `remove_bytes` | `field.replace(/[charclass]/g, '')` — build char class from byte args | ✅ |
 
 Field references in dynamic expressions use the same CDN field mapping table as conditions.
 
@@ -539,7 +540,7 @@ Updated function table:
 | `lookup_json_integer(field, key, ...)` | MANUAL_REQUIRED | ✅ Convertible | `JSON.parse(field)[key]` (same, returns number) |
 | `sha256(field)` | MANUAL_REQUIRED | ✅ Convertible | `require('crypto').createHash('sha256').update(field).digest('hex')` |
 | `uuidv4(seed)` | Not listed | MANUAL_REQUIRED | No `crypto.randomUUID()` in CFF. Workaround: `Math.random()` based UUID (not cryptographically secure). Flag in README. |
-| `remove_bytes(field, bytes)` | MANUAL_REQUIRED | Keep MANUAL_REQUIRED | No simple JS equivalent |
+| `remove_bytes(field, bytes)` | MANUAL_REQUIRED | ✅ Convertible | `field.replace(/[charclass]/g, '')` — parse bytes into regex character class |
 
 ### Correction 5: regex_replace is case-sensitive by default
 
@@ -632,14 +633,14 @@ This means Cloudflare's `sha256()` function CAN be converted (not MANUAL_REQUIRE
 | `join(items, sep)` | `items.join(sep)` | ✅ |
 | `remove_query_args(field, ...)` | Custom: parse QS, filter, rejoin | ✅ (helper function) |
 | `uuidv4(seed)` | Math.random()-based UUID v4 (with warning) | ⚠️ Functional but not crypto-secure |
-| `remove_bytes(field, bytes)` | No simple equivalent | ❌ MANUAL_REQUIRED |
+| `remove_bytes(field, bytes)` | `field.replace(/[charclass]/g, '')` — parse byte args into regex char class | ✅ |
 | `is_timed_hmac_valid_v0(...)` | Condition-only (WAF), not in CDN actions | N/A |
 | `any()` / `all()` | Condition-only, not in CDN actions | N/A |
 | `cidr()` / `cidr6()` | WAF-only | N/A |
 | `has_key()` / `has_value()` | Condition-only | N/A |
 | `bit_slice()` | Network firewall only | N/A |
 
-**Result**: Only 1 function is truly MANUAL_REQUIRED (`remove_bytes`). All others are either convertible or not applicable to CDN action expressions. This is a significant improvement over the v2 estimate of 5 MANUAL_REQUIRED functions.
+**Result**: All Cloudflare functions are either convertible or not applicable to CDN action expressions. Zero MANUAL_REQUIRED. This is a significant improvement over the v2 estimate of 5 MANUAL_REQUIRED functions.
 
 ## v3b Corrections (from review-3)
 
@@ -712,4 +713,365 @@ Wrap in try-catch IIFE because:
 
 ### Updated MANUAL_REQUIRED count
 
-After all corrections: only **1 function** is truly MANUAL_REQUIRED: `remove_bytes()`. Everything else is either convertible or N/A for CDN action expressions.
+After all corrections: **zero** MANUAL_REQUIRED functions. `remove_bytes()` is convertible via regex character class. Everything is either convertible or N/A for CDN action expressions.
+
+## v3c: Exhaustive branch definitions for JS codegen
+
+This section defines every if/elif branch the Python codegen must handle. No "as appropriate" — every case is explicit.
+
+### A. Wildcard condition → JS (all pattern types)
+
+The `wildcard` operator in conditions matches the **entire** field value (case-insensitive). The `strict_wildcard` variant is case-sensitive.
+
+Python classification function:
+
+```python
+def wildcard_to_js(accessor, pattern, strict=False):
+    """Convert wildcard pattern to optimal JS code."""
+    stars = pattern.count('*')
+    escaped_stars = pattern.count('\\*')
+    real_stars = stars - escaped_stars
+
+    if real_stars == 0:
+        # No wildcards — exact match
+        if strict:
+            return f"{accessor} === {js_string(pattern)}"
+        return f"{accessor}.toLowerCase() === {js_string(pattern.lower())}"
+
+    if pattern == '*':
+        # Match everything
+        return 'true'
+
+    if real_stars == 1:
+        if pattern.endswith('*') and '*' not in pattern[:-1]:
+            # Prefix match: "/api/*" → startsWith("/api/")
+            prefix = pattern[:-1]
+            if strict:
+                return f"{accessor}.startsWith({js_string(prefix)})"
+            return f"{accessor}.toLowerCase().startsWith({js_string(prefix.lower())})"
+
+        if pattern.startswith('*') and '*' not in pattern[1:]:
+            # Suffix match: "*.jpg" → endsWith(".jpg")
+            suffix = pattern[1:]
+            if strict:
+                return f"{accessor}.endsWith({js_string(suffix)})"
+            return f"{accessor}.toLowerCase().endsWith({js_string(suffix.lower())})"
+
+    # All other patterns (middle *, multiple *, complex) → regex
+    regex = wildcard_pattern_to_regex(pattern)
+    flags = '' if strict else 'i'
+    return f"/{regex}/{flags}.test({accessor})"
+
+
+def wildcard_pattern_to_regex(pattern):
+    """Convert wildcard pattern to anchored regex string.
+    Escapes regex metacharacters, replaces * with .*"""
+    result = '^'
+    i = 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == '\\' and i + 1 < len(pattern) and pattern[i+1] == '*':
+            result += '\\*'  # literal *
+            i += 2
+        elif ch == '*':
+            result += '.*'
+            i += 1
+        elif ch in r'\.+?^${}()|[]':
+            result += '\\' + ch
+            i += 1
+        else:
+            result += ch
+            i += 1
+    result += '$'
+    return result
+```
+
+### B. full_uri wildcard splitting
+
+`http.request.full_uri wildcard r"https://*.example.com/files/*"` must be split into host + path components because CloudFront Functions don't have a single "full URI" accessor.
+
+Splitting rules:
+
+```python
+def split_full_uri_wildcard(pattern):
+    """Split full_uri wildcard into (host_pattern, path_pattern) or None.
+
+    Returns:
+        (host_pattern, path_pattern) if splittable
+        None if not splittable (use regex on reconstructed full_uri)
+    """
+    # Strip r"..." or "..." wrapper
+    p = pattern.strip()
+    if p.startswith('r"') or p.startswith("r'"):
+        p = p[2:-1]
+    elif p.startswith('"') or p.startswith("'"):
+        p = p[1:-1]
+
+    # Must start with http:// or https://
+    m = re.match(r'https?://', p)
+    if not m:
+        return None  # not a full URI pattern
+
+    rest = p[m.end():]  # everything after protocol://
+
+    # Find the first / after the host part
+    slash_idx = rest.find('/')
+    if slash_idx == -1:
+        # No path — host-only pattern
+        return rest, '/*'
+
+    host_part = rest[:slash_idx]
+    path_part = rest[slash_idx:]
+
+    return host_part, path_part
+```
+
+JS codegen for split full_uri:
+```python
+def full_uri_wildcard_to_js(host_pattern, path_pattern, strict=False):
+    host_js = wildcard_to_js("request.headers.host.value", host_pattern, strict)
+    path_js = wildcard_to_js("request.uri", path_pattern, strict)
+
+    if host_js == 'true':
+        return path_js
+    if path_js == 'true':
+        return host_js
+    return f"({host_js} && {path_js})"
+```
+
+If `split_full_uri_wildcard` returns None (unusual pattern like `http*://...`), fall back to regex on reconstructed full URI:
+```javascript
+const fullUri = `https://${request.headers.host.value}${request.uri}`;
+if (/^http.*:\/\/.*$/i.test(fullUri)) { ... }
+```
+
+### C. `not_` prefix operators
+
+`cdn_expr_parser.py` outputs negated operators as `not_eq`, `not_contains`, etc. The JS codegen must handle every `not_` variant:
+
+```python
+def condition_to_js(cond):
+    field = cond['field']
+    op = cond['op']
+    value = cond['value']
+
+    # Handle not_ prefix
+    negated = False
+    if op.startswith('not_'):
+        negated = True
+        op = op[4:]  # strip "not_"
+
+    js_expr = _positive_condition_to_js(field, op, value)
+
+    if negated:
+        # For header fields that need existence check, negation logic differs:
+        # "not user_agent contains X" → !ua || !ua.value.includes(X)
+        # (if header doesn't exist, NOT condition is true)
+        if _needs_existence_check(field):
+            accessor, header_ref = _get_accessor_with_check(field)
+            positive = _positive_op_to_js(f"{header_ref}.value", op, value)
+            return f"(!{accessor} || !{positive.replace(f'{header_ref}.value', f'{accessor}.value')})"
+            # Simplified: just negate the whole expression
+        return f"!({js_expr})"
+
+    return js_expr
+```
+
+Complete list of `not_` variants to handle:
+
+| IR op | JS output |
+|---|---|
+| `not_eq` | `!== value` or `!(accessor === value)` |
+| `not_ne` | `=== value` (double negation) |
+| `not_contains` | `!accessor.includes(value)` |
+| `not_starts_with` | `!accessor.startsWith(value)` |
+| `not_ends_with` | `!accessor.endsWith(value)` |
+| `not_in` | `![...].includes(accessor)` |
+| `not_wildcard` | `!regex.test(accessor)` |
+| `not_matches` | `!regex.test(accessor)` |
+
+For header fields with existence check, `not_` means "header doesn't exist OR value doesn't match":
+```javascript
+// not http.user_agent contains "bot"
+const ua = request.headers['user-agent'];
+if (!ua || !ua.value.includes('bot')) { ... }
+```
+
+### D. Header existence check rules
+
+Complete classification of which fields need existence checks:
+
+```python
+# Fields that are ALWAYS available (no existence check needed)
+ALWAYS_AVAILABLE = {
+    'uri.path', 'uri', 'host', 'method', 'ip.src',
+}
+
+# Fields that need existence check (optional headers)
+NEEDS_EXISTENCE_CHECK = {
+    'user_agent', 'referer', 'http_version',
+    'country', 'city', 'region', 'region_code',
+    'subdivision_1', 'latitude', 'longitude',
+    'postal_code', 'metro_code', 'timezone', 'asnum',
+    'continent', 'is_eu',
+}
+
+# Special cases
+# 'uri.query' — rawQueryString() always returns a string (empty if no QS), no check needed
+# 'uri.path.extension' — derived from uri, always available
+# 'full_uri' — constructed from host + uri, always available
+# 'response_code' — only in viewer_response, always available as response.statusCode
+```
+
+For fields in `NEEDS_EXISTENCE_CHECK`, the JS pattern is:
+```javascript
+// Positive condition: header must exist AND match
+const header = request.headers['header-name'];
+if (header && header.value === 'X') { ... }
+
+// Negative condition: header doesn't exist OR doesn't match
+const header = request.headers['header-name'];
+if (!header || header.value !== 'X') { ... }
+```
+
+### E. viewer_response field mapping (complete)
+
+Fields available in viewer_response that differ from viewer_request:
+
+```python
+VIEWER_RESPONSE_FIELDS = {
+    # Response-specific fields
+    'response_code': 'response.statusCode',           # integer
+    # All request fields are also available via event.request:
+    'uri.path': 'event.request.uri',
+    'uri': 'event.request.uri',
+    'host': 'event.request.headers.host.value',
+    'method': 'event.request.method',
+    'ip.src': 'event.viewer.ip',
+    'user_agent': ('event.request.headers["user-agent"]', True),
+    # ... all other request fields use event.request instead of request
+    # Response header access:
+    # http.response.headers["name"] → response.headers["name"] && response.headers["name"].value
+}
+```
+
+Header mutations in viewer_response target `response.headers`:
+```javascript
+// set_header in viewer_response
+response.headers['x-custom'] = { value: 'val' };
+
+// remove_header in viewer_response
+delete response.headers['x-custom'];
+
+// add_header in viewer_response
+if (!response.headers['x-custom']) {
+    response.headers['x-custom'] = { value: 'val' };
+}
+```
+
+### F. Updated function conversion table (v3c — all MANUAL_REQUIRED eliminated)
+
+Replaces ALL previous function tables in this document.
+
+| Cloudflare function | JS equivalent in CFF Runtime 2.0 | Status |
+|---|---|---|
+| `concat(a, b, ...)` | `a + b + ...` | ✅ |
+| `regex_replace(field, pat, repl)` | `field.replace(/pat/, repl)` — no `g` flag, no `i` flag | ✅ |
+| `wildcard_replace(field, pat, repl[, flags])` | `field.replace(/^glob_regex$/[i], repl)` — lazy `(.*?)`, `i` unless flags=="s", anchored `^...$` | ✅ |
+| `lower(field)` | `field.toLowerCase()` | ✅ |
+| `upper(field)` | `field.toUpperCase()` | ✅ |
+| `to_string(field)` | `String(field)` | ✅ |
+| `substring(field, start[, end])` | `field.substring(start, end)` | ✅ |
+| `len(field)` | `field.length` | ✅ |
+| `url_decode(field)` | `decodeURIComponent(field)` | ✅ |
+| `url_decode(field, "r")` | Recursive decodeURIComponent loop | ✅ (helper) |
+| `url_decode(field, "u")` | `decodeURIComponent(field)` (handles Unicode natively) | ✅ |
+| `encode_base64(field)` | `Buffer.from(field, 'utf8').toString('base64').replace(/=+$/, '')` | ✅ |
+| `encode_base64(field, "p")` | `Buffer.from(field, 'utf8').toString('base64')` | ✅ |
+| `encode_base64(field, "u")` | `Buffer.from(field, 'utf8').toString('base64url')` | ✅ |
+| `encode_base64(field, "up")` | `Buffer.from(field, 'utf8').toString('base64url')` + pad with `=` | ✅ |
+| `decode_base64(field)` | `atob(field)` or `Buffer.from(field, 'base64').toString('utf8')` | ✅ |
+| `lookup_json_string(field, k1, k2, ...)` | `(() => { try { return JSON.parse(field)[k1][k2]; } catch(e) { return ''; } })()` | ✅ |
+| `lookup_json_integer(field, k1, k2, ...)` | `(() => { try { return JSON.parse(field)[k1][k2]; } catch(e) { return 0; } })()` | ✅ |
+| `sha256(field)` | `(() => { import crypto from 'crypto'; return crypto.createHash('sha256').update(field).digest(); })()` | ✅ |
+| `encode_base64(sha256(field))` | `crypto.createHash('sha256').update(field).digest('base64')` (optimized) | ✅ |
+| `encode_base64(sha256(field), "u")` | `crypto.createHash('sha256').update(field).digest('base64url')` | ✅ |
+| `split(field, sep)` | `field.split(sep)` | ✅ |
+| `join(items, sep)` | `items.join(sep)` | ✅ |
+| `remove_query_args(field, arg1, arg2, ...)` | Parse QS, filter out named args, rejoin (helper function) | ✅ (helper) |
+| `remove_bytes(field, bytes)` | Parse byte sequence → JS regex character class: `field.replace(/[chars]/g, '')` | ✅ |
+| `uuidv4(seed)` | Math.random()-based UUID v4 (with non-crypto-secure warning in generated JS comment + conversion_report.md) | ✅ (⚠️ warning) |
+| `has_key(map, key)` | Condition-only, not in CDN action expressions | N/A |
+| `has_value(collection, value)` | Condition-only | N/A |
+| `any()` / `all()` | Condition-only (array operations) | N/A |
+| `cidr()` / `cidr6()` | WAF custom/rate rules only | N/A |
+| `is_timed_hmac_valid_v0(...)` | WAF condition-only | N/A |
+| `bit_slice()` | Network firewall only | N/A |
+
+**MANUAL_REQUIRED count: 0.** All Cloudflare functions that can appear in CDN action expressions are convertible.
+
+### G. remove_bytes conversion logic
+
+```python
+def remove_bytes_to_js(field_js, bytes_literal):
+    """Convert remove_bytes(field, "\\x2e\\x77") to JS regex replacement.
+
+    bytes_literal is the raw string from Cloudflare, e.g., "\\x2e\\x77"
+    Each \\xNN is a single byte to remove.
+    """
+    # Parse hex escapes
+    chars = []
+    i = 0
+    raw = bytes_literal
+    while i < len(raw):
+        if raw[i:i+2] == '\\x' and i + 3 < len(raw):
+            hex_val = raw[i+2:i+4]
+            char = chr(int(hex_val, 16))
+            chars.append(char)
+            i += 4
+        else:
+            chars.append(raw[i])
+            i += 1
+
+    # Build JS regex character class, escaping regex-special chars
+    regex_chars = ''
+    for ch in chars:
+        if ch in r'\]^-':
+            regex_chars += '\\' + ch
+        elif ch == '.':
+            regex_chars += '\\.'
+        else:
+            regex_chars += ch
+
+    return f"{field_js}.replace(/[{regex_chars}]/g, '')"
+```
+
+### H. remove_query_args conversion logic
+
+```python
+def remove_query_args_to_js(field_js, *arg_names):
+    """Convert remove_query_args(field, "param1", "param2") to JS.
+
+    Generates a helper that parses the query string, filters out named params,
+    and rejoins.
+    """
+    args_array = ', '.join(f"'{a}'" for a in arg_names)
+    return f"""(() => {{
+  const qs = {field_js};
+  if (!qs) return '';
+  const remove = new Set([{args_array}]);
+  return qs.split('&').filter(p => !remove.has(p.split('=')[0])).join('&');
+}})()"""
+```
+
+### I. url_decode recursive ("r" flag) helper
+
+```python
+def url_decode_recursive_js(field_js):
+    """Generate JS for url_decode(field, "r") — recursive decoding."""
+    return f"""(() => {{
+  let prev = '', cur = {field_js};
+  while (cur !== prev) {{ prev = cur; cur = decodeURIComponent(cur); }}
+  return cur;
+}})()"""
+```
