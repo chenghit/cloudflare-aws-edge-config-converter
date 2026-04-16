@@ -2,7 +2,7 @@
 
 Author: chenghit
 Date: 2026-04-16
-Status: Draft (v2 — post-review)
+Status: Draft (v3 — post-review-2 + AWS/CF verification)
 Branch: `feat/cdn-js-python-codegen`
 
 ## Problem
@@ -493,3 +493,150 @@ Both phases must be complete for the project to ship.
 | `cdn-generate-js.py` | ~700–900 | 6 action types + conditions + dynamic exprs + L@E escalation |
 | `cdn-validate-js.py` | ~150 | 5 check categories |
 | **Total** | **~1,150–1,350** | |
+
+## v3 Corrections (from AWS/Cloudflare verification)
+
+### Correction 1: wildcard_replace uses LAZY matching (HIGH — semantic correctness)
+
+Cloudflare docs explicitly state: "This function uses lazy matching, that is, it tries to match each `*` metacharacter with the shortest possible string."
+
+Example: `wildcard_replace(path, "/apps/*/login", "/${1}/login")` on `/apps/calendar/admin/login`:
+- Cloudflare (lazy): `*` matches `calendar` → result: `/calendar/login`
+- JS `(.*)` (greedy): `*` matches `calendar/admin` → result: `/calendar/admin/login` ❌
+
+**Fix**: Use `(.*?)` (lazy quantifier) instead of `(.*)` in the glob-to-regex conversion for `wildcard_replace`. Note: the `wildcard` **operator** (used in conditions) matches the entire field value, so greedy vs lazy doesn't matter there — only `wildcard_replace` is affected.
+
+### Correction 2: wildcard_replace has optional `flags` parameter
+
+`wildcard_replace(source, pattern, replacement, flags)` — the 4th parameter `flags` can be `"s"` for case-sensitive matching. Default (no flags) is **case-insensitive**.
+
+**Fix**: Dynamic expression parser must handle 4th argument. JS conversion:
+- No flags or flags != "s" → add `/i` flag to regex: `source.replace(/pattern/i, replacement)`
+- flags == "s" → no `/i` flag: `source.replace(/pattern/, replacement)`
+
+### Correction 3: wildcard_replace matches ENTIRE source value
+
+Cloudflare docs: "the entire source value must match the wildcard_pattern parameter (it cannot match only part of the field value)."
+
+**Fix**: Always anchor the regex with `^` and `$`: `source.replace(/^pattern$/i, replacement)`
+
+### Correction 4: CFF Runtime 2.0 supports btoa/atob and JSON.parse
+
+Both AWS subagents confirmed:
+- `btoa()` / `atob()` — ✅ supported (new in Runtime 2.0)
+- `JSON.parse()` / `JSON.stringify()` — ✅ supported
+- `Buffer.from()` with base64 encoding — ✅ supported
+
+**Impact on design**: `encode_base64()` and `decode_base64()` can be converted to `btoa()`/`atob()` instead of MANUAL_REQUIRED. `lookup_json_string()` and `lookup_json_integer()` can be converted to `JSON.parse()` + key access.
+
+Updated function table:
+
+| Function | Previous status | Updated status | JS equivalent |
+|---|---|---|---|
+| `encode_base64(field)` | MANUAL_REQUIRED | ✅ Convertible | `btoa(field)` |
+| `decode_base64(field)` | MANUAL_REQUIRED | ✅ Convertible | `atob(field)` |
+| `lookup_json_string(field, key, ...)` | MANUAL_REQUIRED | ✅ Convertible | `JSON.parse(field)[key]` (chain for nested keys) |
+| `lookup_json_integer(field, key, ...)` | MANUAL_REQUIRED | ✅ Convertible | `JSON.parse(field)[key]` (same, returns number) |
+| `sha256(field)` | MANUAL_REQUIRED | ✅ Convertible | `require('crypto').createHash('sha256').update(field).digest('hex')` |
+| `uuidv4(seed)` | Not listed | MANUAL_REQUIRED | No `crypto.randomUUID()` in CFF. Workaround: `Math.random()` based UUID (not cryptographically secure). Flag in README. |
+| `remove_bytes(field, bytes)` | MANUAL_REQUIRED | Keep MANUAL_REQUIRED | No simple JS equivalent |
+
+### Correction 5: regex_replace is case-sensitive by default
+
+Cloudflare docs: "Match is case-sensitive by default: `regex_replace("/foo", "^/FOO$", "/x") == "/foo"`"
+
+JS `String.replace(/regex/, repl)` is also case-sensitive by default. ✅ Behavior matches — no flag needed.
+
+But: do NOT add `/i` flag to regex_replace conversions. Only wildcard_replace (without "s" flag) needs `/i`.
+
+### Correction 6: regex_replace only replaces first match
+
+Cloudflare docs: "When there are multiple matches, only one replacement occurs (the first one)."
+
+JS `String.replace(/regex/, repl)` without `g` flag also only replaces the first match. ✅ Behavior matches.
+
+**Explicit rule**: NEVER add `g` flag to regex in `regex_replace` conversion.
+
+### Correction 7: Response event structure
+
+AWS subagents confirmed:
+- `response.statusCode` — correct property name (integer, not string)
+- `response.status` does NOT exist
+- `event.viewer.ip` is available in viewer-response events
+
+viewer_response.js field mapping additions:
+
+| Cloudflare field | JS accessor (viewer_response) |
+|---|---|
+| `http.response.code` | `response.statusCode` |
+| `http.response.headers["name"]` | `response.headers["name"].value` |
+| `cf.response.1xxx_code` | Not available in CFF → MANUAL_REQUIRED |
+| `cf.response.error_type` | Not available in CFF → MANUAL_REQUIRED |
+
+### Correction 8: lower()/upper() can nest inside concat()
+
+Confirmed by real-world examples: `concat("https://", http.host, lower(regex_replace(...)))`.
+
+Dynamic expression parser must handle `lower()` and `upper()` as valid arguments inside `concat()`. The parser already supports recursive `func_call` in args — just need to add `lower` and `upper` to the recognized function names in the dynamic expression parser (they're already in the condition parser).
+
+### Correction 9: url_decode options parameter
+
+`url_decode(field, options)` — options can be `"r"` (recursive) or `"u"` (Unicode).
+
+- `url_decode(field)` → `decodeURIComponent(field)` ✅
+- `url_decode(field, "r")` → recursive decode: `while (decoded !== prev) { prev = decoded; decoded = decodeURIComponent(decoded); }` — implement as helper function
+- `url_decode(field, "u")` → Unicode decode: `decodeURIComponent(field)` handles Unicode by default in JS ✅
+
+### Correction 10: uuidv4() function
+
+`uuidv4(cf.random_seed)` can appear in request header transform value expressions (e.g., setting X-Request-ID header).
+
+CFF has no `crypto.randomUUID()`. Options:
+1. Generate UUID v4 using `Math.random()` (not cryptographically secure but functional)
+2. Flag as MANUAL_REQUIRED with note to use Lambda@Edge for secure UUIDs
+
+**Decision**: Implement Math.random()-based UUID v4 as default, add comment in generated JS warning it's not cryptographically secure. Record in conversion_report.md.
+
+### Correction 11: Maximum function size
+
+AWS docs say "10 KB" without specifying exact bytes. Use 10,240 bytes (1 KB = 1,024 bytes) as the threshold, consistent with current SKILL.md.
+
+### Correction 12: CFF crypto module
+
+CFF Runtime 2.0 has a built-in `crypto` module (Node.js-style, not Web Crypto):
+- `crypto.createHash('sha256')` → `.update(data).digest('hex'|'base64')`
+- `crypto.createHmac('sha256', key)` → `.update(data).digest('hex'|'base64')`
+
+This means Cloudflare's `sha256()` function CAN be converted (not MANUAL_REQUIRED as originally assumed).
+
+### Updated complete function conversion table
+
+| Cloudflare function | JS equivalent in CFF Runtime 2.0 | Status |
+|---|---|---|
+| `concat(a, b, ...)` | `a + b + ...` | ✅ |
+| `regex_replace(field, pat, repl)` | `field.replace(/pat/, repl)` — no `g` flag, no `i` flag | ✅ |
+| `wildcard_replace(field, pat, repl[, flags])` | `field.replace(/^glob_regex$/[i], repl)` — lazy `(.*?)`, `i` unless flags=="s" | ✅ |
+| `lower(field)` | `field.toLowerCase()` | ✅ |
+| `upper(field)` | `field.toUpperCase()` | ✅ |
+| `to_string(field)` | `String(field)` | ✅ |
+| `substring(field, start[, end])` | `field.substring(start, end)` | ✅ |
+| `len(field)` | `field.length` | ✅ |
+| `url_decode(field)` | `decodeURIComponent(field)` | ✅ |
+| `url_decode(field, "r")` | Recursive decodeURIComponent loop | ✅ (helper function) |
+| `encode_base64(field)` | `btoa(field)` | ✅ (Runtime 2.0) |
+| `decode_base64(field)` | `atob(field)` | ✅ (Runtime 2.0) |
+| `lookup_json_string(field, key, ...)` | `JSON.parse(field)[key]...` | ✅ (Runtime 2.0) |
+| `lookup_json_integer(field, key, ...)` | `JSON.parse(field)[key]...` | ✅ (Runtime 2.0) |
+| `sha256(field)` | `require('crypto').createHash('sha256').update(field).digest('hex')` | ✅ (Runtime 2.0) |
+| `split(field, sep)` | `field.split(sep)` | ✅ |
+| `join(items, sep)` | `items.join(sep)` | ✅ |
+| `remove_query_args(field, ...)` | Custom: parse QS, filter, rejoin | ✅ (helper function) |
+| `uuidv4(seed)` | Math.random()-based UUID v4 (with warning) | ⚠️ Functional but not crypto-secure |
+| `remove_bytes(field, bytes)` | No simple equivalent | ❌ MANUAL_REQUIRED |
+| `is_timed_hmac_valid_v0(...)` | Condition-only (WAF), not in CDN actions | N/A |
+| `any()` / `all()` | Condition-only, not in CDN actions | N/A |
+| `cidr()` / `cidr6()` | WAF-only | N/A |
+| `has_key()` / `has_value()` | Condition-only | N/A |
+| `bit_slice()` | Network firewall only | N/A |
+
+**Result**: Only 1 function is truly MANUAL_REQUIRED (`remove_bytes`). All others are either convertible or not applicable to CDN action expressions. This is a significant improvement over the v2 estimate of 5 MANUAL_REQUIRED functions.
