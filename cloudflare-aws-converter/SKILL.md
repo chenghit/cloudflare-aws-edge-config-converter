@@ -19,14 +19,18 @@ Orchestrate conversion of Cloudflare configurations to AWS by delegating to spec
 |-----------|------|-------------|
 | `waf-pipeline.sh` | Bash script | Single entry point — runs all steps below in sequence |
 | `waf-analyze-ip.py` | Python | IP Lists + IP Access Rules → IR JSON |
-| `waf-analyze-custom.py` | Python | Custom Rules → IR JSON (expression parser + convertibility) |
-| `waf-analyze-rate.py` | Python | Rate-Limiting Rules → IR JSON (rate calculation) |
+| `waf-analyze-custom.py` | Python | Custom Rules → IR JSON (expression parser + convertibility + host scope) |
+| `waf-analyze-rate.py` | Python | Rate-Limiting Rules → IR JSON (rate calculation + host scope) |
 | `waf-merge-ir.py` | Python | Merge 3 batch IR files |
 | `waf-count-validate.py` | Python | Verify rule counts match source |
 | `waf-validate-ir.py` | Python | Round-trip validation + consistency checks |
-| `waf-generate-cfn.py` | Python | IR JSON → CloudFormation template |
+| `waf-check-split.py` | Python | Auto-decide: legacy (2 WebACLs) vs per-domain split based on IP set count |
+| `waf-split-by-host.py` | Python | Split IR by domain — strip host conditions, re-derive scope-down |
+| `waf-generate-cfn.py` | Python | IR JSON → CloudFormation template (legacy or per-domain WebACLs) |
 
 **No LLM subagents are used in the WAF pipeline.** All analysis, validation, and generation is deterministic Python.
+
+**Auto-split**: If total IP sets > 50, the pipeline automatically switches to per-domain WebACLs. Use `--force-split` flag to force per-domain mode for testing.
 
 ### CDN Pipeline
 
@@ -146,6 +150,10 @@ Where `{subagent-name}` matches the subagent directory name (e.g., `cf-cdn-dns-p
 3. Run the pipeline:
    ```bash
    bash ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-pipeline.sh "{config_path}" "cloudflare-to-aws-waf"
+   ```
+   If the user explicitly requests per-domain WebACL splitting (e.g., "force split", "split per domain"):
+   ```bash
+   bash ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-pipeline.sh "{config_path}" "cloudflare-to-aws-waf" --force-split
    ```
    Parse the `---RESULT---` block:
    - `STATUS: OK` → proceed to Step 4.
