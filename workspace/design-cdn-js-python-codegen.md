@@ -1075,3 +1075,139 @@ def url_decode_recursive_js(field_js):
   return cur;
 }})()"""
 ```
+
+## v3d: Final pre-implementation corrections (5 items)
+
+### Correction 18: `in_kvs` operator
+
+`cdn_expr_parser.py` outputs `{"op": "in_kvs", "value": "list_name"}` for IP list matching via KVS. This is used when a Cloudflare IP list is stored in CloudFront KeyValueStore (one entry per IP).
+
+JS codegen:
+```python
+OP_TO_JS['in_kvs'] = lambda acc, val: f"await kvsHandle.exists('ip:{val}:' + {acc})"
+# acc is event.viewer.ip for ip.src field
+```
+
+Generated JS:
+```javascript
+// ip.src in_kvs "reject_ip"
+if (await kvsHandle.exists('ip:reject_ip:' + event.viewer.ip)) { ... }
+```
+
+Negated:
+```javascript
+// not ip.src in_kvs "reject_ip"
+if (!(await kvsHandle.exists('ip:reject_ip:' + event.viewer.ip))) { ... }
+```
+
+Requires KVS initialization (`const kvsHandle = cf.kvs('<KVS_ID>')`) — add to the KVS-needed check alongside bulk_redirects, continent, and is_eu.
+
+### Correction 19: `in_list` operator in final IR
+
+`in_list` is output by `cdn_expr_parser.py` for named list references (`$list_name`). During preprocess (Stage 3), IP-type lists are converted to `in_kvs`. Non-IP lists (hostname lists, ASN lists) may remain as `in_list` in the final IR.
+
+Handling in JS codegen:
+- If `in_list` reaches the JS codegen stage, it means the list was not converted to KVS during preprocess. This should not happen for well-formed configs — preprocess handles all list types.
+- **Defensive handling**: If `in_list` is encountered, emit a `// TODO: list "${value}" not resolved to KVS — manual conversion needed` comment and record in validation report. Do not crash.
+
+### Correction 20: `$viewer_ip` parameter value substitution
+
+When `params.value` is `"$viewer_ip"` in a `set_header` op (from Cloudflare's Managed Transforms "True-Client-IP" header), the JS codegen must substitute it with `event.viewer.ip`.
+
+```python
+def header_value_to_js(value):
+    """Convert header value, handling special substitutions."""
+    if value == '$viewer_ip':
+        return 'event.viewer.ip'
+    # Other potential substitutions (future-proof)
+    if value.startswith('$'):
+        # Unknown variable — emit as string literal with warning comment
+        return f"'{value}'  /* WARNING: unresolved variable */"
+    return js_string(value)
+```
+
+Generated JS:
+```javascript
+// set_header: True-Client-IP = $viewer_ip
+request.headers['true-client-ip'] = { value: event.viewer.ip };
+```
+
+### Correction 21: `continent` and `is_eu` KVS lookup patterns
+
+These two fields are NOT simple header reads — they require KVS lookup using the country code.
+
+Add to FIELD_TO_JS as special cases:
+
+```python
+# In condition_to_js(), handle continent and is_eu as special cases:
+
+def _continent_condition_to_js(op, value):
+    """Generate JS for continent matching. Requires KVS with country→continent mapping."""
+    # This generates a multi-line block that must be placed BEFORE the if statement
+    # The codegen must emit the lookup code as a preamble, then use the variable in the condition
+    return {
+        'preamble': [
+            "const countryHeader = request.headers['cloudfront-viewer-country'];",
+            "const country = countryHeader ? countryHeader.value : '';",
+            "let continent = '';",
+            "if (country) { try { continent = await kvsHandle.get('continent:' + country); } catch(e) {} }",
+        ],
+        'condition': f"continent {_op_to_js(op)} {js_string(value)}",
+        'requires_kvs': True,
+    }
+
+def _is_eu_condition_to_js(op, value):
+    """Generate JS for EU membership check. Requires KVS with country→EU mapping."""
+    return {
+        'preamble': [
+            "const countryHeader = request.headers['cloudfront-viewer-country'];",
+            "const country = countryHeader ? countryHeader.value : '';",
+            "let isEU = false;",
+            "if (country) { try { isEU = await kvsHandle.exists('eu:' + country); } catch(e) {} }",
+        ],
+        'condition': 'isEU' if (op == 'eq' and value is True) else f"isEU === {js_string(value)}",
+        'requires_kvs': True,
+    }
+```
+
+The codegen must:
+1. Detect continent/is_eu conditions during the condition-to-JS pass
+2. Emit preamble code ONCE (even if multiple ops reference continent/is_eu)
+3. Deduplicate: if both continent and is_eu are used, share the country header read
+4. Ensure KVS handle is initialized
+
+### Correction 22: Minification strategy
+
+Python-generated JS is naturally compact (no LLM verbosity), but for domains with many rules, the 10 KB limit may still be hit.
+
+**Strategy** (implemented in `cdn-generate-js.py`):
+
+1. Generate JS with minimal formatting (single-line conditions, no blank lines between ops, short variable names)
+2. After generation, check byte count:
+   - ≤ 10,240 bytes → done
+   - > 10,240 bytes → apply minification:
+     a. Remove all `// comment` lines
+     b. Remove leading whitespace (flatten indentation)
+     c. Collapse multiple spaces to single space
+     d. Remove empty lines
+   - Re-check after minification
+   - Still > 10,240 bytes → Lambda@Edge escalation (move origin_override ops)
+
+Minification is a post-processing step in `cdn-generate-js.py`, not a separate script. It's deterministic — same input always produces same minified output.
+
+```python
+def minify_js(js_code):
+    """Minify JS by removing comments, whitespace, and empty lines."""
+    lines = js_code.split('\n')
+    result = []
+    for line in lines:
+        # Remove single-line comments (but not URLs like https://)
+        stripped = re.sub(r'(?<!:)//.*$', '', line)
+        # Collapse whitespace
+        stripped = stripped.strip()
+        if stripped:
+            result.append(stripped)
+    return '\n'.join(result)
+```
+
+Note: This is NOT a full JS minifier (no variable renaming, no dead code elimination). It's sufficient because Python-generated JS already uses short patterns. If minification is still not enough, Lambda@Edge escalation handles it.
