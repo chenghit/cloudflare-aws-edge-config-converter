@@ -2,29 +2,24 @@
 
 # Troubleshooting
 
-## Subagent Not Activating Properly
+## Script Execution Errors
 
-**Problem**: Subagent doesn't follow the skill's workflow when invoked automatically by the orchestrator
-
-**Symptoms**:
-- Agent generates ad-hoc analysis instead of following defined steps
-- Output files are not created or have wrong names
-- Agent doesn't read reference documents
+**Problem**: A pipeline script fails with an error
 
 **Solution**:
-1. Try manual invocation first: `/agent swap cf-cdn-dns-parser` then give your instruction. If this works, the issue is with orchestrator routing, not the skill itself.
-2. Verify installation: Check if `~/.kiro/agents/cf-cdn-dns-parser.json` exists
-3. Restart Kiro CLI: Exit and start a new `kiro-cli chat` session
-4. List available agents: Use `/agent list` to see installed subagents
+1. Check the `---RESULT---` block in the output — it contains `STATUS`, `ACTION`, and `CONTEXT` fields
+2. `STATUS: FATAL` means unrecoverable — check `CONTEXT` for the root cause
+3. `STATUS: ERROR` with `ACTION: FIX` means user action needed (e.g., missing input file)
+4. Restart Kiro CLI: Exit and start a new `kiro-cli chat` session if the orchestrator gets confused
 
 ## Skill Not Activating via Keywords
 
-**Problem**: Orchestrator doesn't route to the correct subagent
+**Problem**: Orchestrator doesn't recognize the conversion request
 
 **Solution**: Use specific keywords in your request:
 - For WAF: say "convert **security rules**" or "convert to **AWS WAF**"
-- For CloudFront Functions: say "convert **transformation rules**" or "convert to **CloudFront Functions**"
-- For CDN: say "analyze **CDN configuration**" or "analyze **CDN config**"
+- For CDN: say "convert **CDN configuration**" or "convert to **CloudFront**"
+- For both: say "convert **everything**" or "**full migration**"
 
 **Example**:
 - ❌ Vague: "analyze my cloudflare config files"

@@ -1,15 +1,15 @@
 ---
 name: cloudflare-aws-converter
-description: Orchestrates Cloudflare-to-AWS conversion and analysis by delegating to specialized subagents. Use when the user mentions Cloudflare and any of: CDN, WAF, CloudFront, AWS, migration, conversion, analysis, configuration, rules, cache, redirect, firewall, security. Also triggers on Chinese equivalents: Cloudflare 配置分析、CDN 迁移、WAF 转换、转换到 AWS、迁移到 CloudFront. The user may or may not provide a config directory path in their initial message.
+description: Orchestrates Cloudflare-to-AWS conversion by running deterministic Python scripts. Use when the user mentions Cloudflare and any of: CDN, WAF, CloudFront, AWS, migration, conversion, analysis, configuration, rules, cache, redirect, firewall, security. Also triggers on Chinese equivalents: Cloudflare 配置分析、CDN 迁移、WAF 转换、转换到 AWS、迁移到 CloudFront. The user may or may not provide a config directory path in their initial message.
 metadata:
   author: chenghit
 ---
 
 # Cloudflare to AWS Converter
 
-Orchestrate conversion of Cloudflare configurations to AWS by delegating to specialized subagents. Do NOT read config files yourself — pass the config directory path directly to each subagent.
+Orchestrate conversion of Cloudflare configurations to AWS by running deterministic Python scripts. Do NOT read config files yourself — pass the config directory path to scripts.
 
-**Language Adaptation**: Respond to the user in the same language as their message. However, **always write subagent queries in English** — subagents rely on English keywords to correctly parse paths and instructions. Pass the output language as an explicit instruction within the query (e.g., `"Generate output files in Chinese"`).
+**Language Adaptation**: Respond to the user in the same language as their message.
 
 ## Available Subagents
 
@@ -73,9 +73,9 @@ Determine what the user wants from their message. There are two dimensions:
 
 ### Step 2: Extract config path and validate single-zone
 
-Extract the Cloudflare config directory path from the user's message. This is the path to pass to each subagent. Do not read or analyze the files yourself.
+Extract the Cloudflare config directory path from the user's message. This is the path to pass to scripts. Do not read or analyze the files yourself.
 
-**Multi-zone detection (CRITICAL — must check before invoking any subagent):**
+**Multi-zone detection (CRITICAL — must check before running any script):**
 
 This tool only supports converting ONE zone at a time. The CloudflareBackup tool creates directories as `<zone_name>/<timestamp>/`, so a backup directory containing multiple zones will have multiple zone subdirectories.
 
@@ -88,7 +88,7 @@ Before proceeding, check the structure of the provided path:
 5. If the path contains exactly one zone subdirectory, auto-resolve to that zone's latest timestamped backup and inform the user:
    > "Detected single zone: {zone_name}. Using backup at {resolved_path}."
 
-**When passing the path to subagents**, always pass the original `{config_path}` (backup root). Both WAF and CDN subagents use recursive glob to find files — WAF needs `account/IP-Lists.txt`, CDN needs `account/List-Items-redirect-*.txt` for bulk redirects. Do NOT resolve to the zone subdirectory before passing to subagents.
+**When passing the path to scripts**, always pass the original `{config_path}` (backup root). Both WAF and CDN scripts use recursive glob to find files — WAF needs `account/IP-Lists.txt`, CDN needs `account/List-Items-redirect-*.txt` for bulk redirects. Do NOT resolve to the zone subdirectory before passing to scripts.
 
 **Account directory check**: Verify that `{config_path}` contains an `account/` subdirectory. If not found, warn the user: "No `account/` directory found under the provided path. IP lists and bulk redirect lists may not be found. CloudflareBackup always creates an `account/` directory — make sure you provided the backup root directory, not a zone subdirectory."
 
@@ -97,7 +97,7 @@ If the user requests CDN full pipeline (Terraform generation), also check for:
 
 ### Step 2b: Initialize CDN output directory (CDN pipeline only)
 
-Before dispatching any CDN subagent, run the initialization script to create the
+Before running any CDN script, run the initialization script to create the
 output directory structure and copy static Terraform modules:
 
 ```bash

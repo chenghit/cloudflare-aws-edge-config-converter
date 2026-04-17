@@ -23,7 +23,7 @@
    - Causes context confusion and hallucination
 
 2. **Don't Mix Rule Types in One Conversation**
-   - Each rule type uses a different subagent with separate context. Mixing them in one conversation may cause the agent to lose track of previous work.
+   - Each pipeline (WAF vs CDN) has its own set of scripts. Both can run in one session since all scripts are deterministic Python.
 
 3. **Don't Use Vague Descriptions**
    - ❌ "Help me convert Cloudflare configuration"

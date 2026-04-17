@@ -47,7 +47,6 @@ managed rule groups. CloudFormation handles resource ordering automatically.
 
 ```
 cloudflare-to-aws-cdn/
-├── user_input_template.csv          # Fill this in, save as user_input.csv
 ├── dns_manifest.yaml                # Parsed DNS records
 ├── domain_scope.json                # Validated domain settings
 ├── conversion_report.md             # Non-convertible rules + warnings

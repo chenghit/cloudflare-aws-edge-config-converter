@@ -44,7 +44,6 @@ aws cloudformation deploy \
 
 ```
 cloudflare-to-aws-cdn/
-├── user_input_template.csv          # 填好后另存为 user_input.csv
 ├── dns_manifest.yaml                # 解析后的 DNS 记录
 ├── domain_scope.json                # 验证后的域名配置
 ├── conversion_report.md             # 无法转换的规则 + 警告

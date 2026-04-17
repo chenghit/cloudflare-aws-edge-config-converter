@@ -63,7 +63,7 @@ kiro-cli chat
 
 ## 工作原理
 
-本工具作为 Kiro CLI skill 运行，由编排器调度专用 subagent。每个 subagent 拥有隔离的上下文，负责一个流程阶段。
+本工具作为 Kiro CLI skill 运行，由编排器调度确定性 Python 脚本完成 WAF 和 CDN 两条 pipeline。
 
 **WAF 流程**（全 Python，零 LLM）：分析 IP 列表 → 分析自定义规则 → 分析速率限制 → 合并 → 校验 → **自动拆分决策** → 生成 CloudFormation
 
@@ -97,7 +97,7 @@ flowchart TD
     style CDN_Done fill:#9f9,stroke:#333
 ```
 
-**唯一的用户交互点：** 解析 DNS 后，你填写一个 CSV 模板（每域名的默认缓存行为 + 可选证书 ARN）。其余步骤完全自动化。
+**全自动：** 无需用户交互。DNS 解析自动生成域名配置。ACM 证书通过 Terraform data source 自动查找。
 
 ## CDN 流程详情
 
@@ -141,7 +141,7 @@ cloudflare-to-aws-cdn/
 <details>
 <summary>扩展性与限速</summary>
 
-- **设计目标：** 已测试最多 50 个代理域名。更大的 zone 也应该可以工作——每个 subagent 独立处理一个域名。
+- **设计目标：** 已测试最多 50 个代理域名。更大的 zone 也应该可以工作——Python 脚本在单次调用中处理所有域名。
 - **单 zone 运行。** 检测到多个 zone → 编排器要求你选择一个。
 - **KVS 配额：** 默认 50 个/账号（软限制）。如 > 50 个域名使用批量重定向，请[申请提额](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html)。
 
@@ -206,26 +206,20 @@ aws acm request-certificate \
 ```bash
 git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
 cd cloudflare-aws-edge-config-converter
-./install.sh    # 将 skills 复制到 ~/.kiro/skills/，subagent 配置复制到 ~/.kiro/agents/
+./install.sh    # 将 skill + 脚本复制到 ~/.kiro/skills/
 ```
 
 更新：`git pull && ./install.sh`
 
-> **使用其他 Agent 工具？** 安装脚本和所有 SKILL.md 文件默认使用 `~/.kiro/skills/` 作为 skill 安装目录（Kiro CLI 约定）。如需配合其他 agent 工具使用：
+> **使用其他 Agent 工具？** 安装脚本和 SKILL.md 默认使用 `~/.kiro/skills/` 作为 skill 安装目录（Kiro CLI 约定）。如需配合其他 agent 工具使用：
 >
 > ```bash
 > cd cloudflare-aws-edge-config-converter
 >
-> # 1. 批量替换所有 SKILL.md 中的 skill 路径（subagent 之间通过绝对路径互相引用）
-> find . -name 'SKILL.md' | xargs sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g'
+> # 替换 SKILL.md 中的 skill 路径
+> sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g' cloudflare-aws-converter/SKILL.md
 >
-> # 2. 替换 subagent 配置文件中的 skill 路径（subagents/*.json）
-> # 注意：这些文件使用 Kiro 的 skill:// 协议进行资源绑定。
-> # 如果你的 agent 工具使用不同的机制，可能需要重写这些 JSON 文件——
-> # 以下 sed 命令只替换目录路径。
-> sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g' subagents/*.json
->
-> # 3. 编辑 install.sh（或 install.bat）——修改文件开头的 SKILLS_DIR 和 AGENTS_DIR 变量
+> # 编辑 install.sh——修改文件开头的 SKILLS_DIR 变量
 > ```
 
 高级用户可直接通过 `python3` 运行各流程阶段。WAF pipeline 通过 `waf-pipeline.sh` 运行。CDN 各阶段是 `cloudflare-aws-converter/scripts/` 中的独立脚本。

@@ -2,33 +2,28 @@
 
 # 故障排除
 
-## Subagent 未正确激活
+## 脚本执行错误
 
-**问题**：编排器自动调用 subagent 时，subagent 没有按 skill 的工作流执行
-
-**症状**：
-- Agent 生成临时分析而不是按定义的步骤执行
-- 输出文件未创建或文件名错误
-- Agent 没有读取参考文档
+**问题**：Pipeline 脚本执行失败
 
 **解决方案**：
-1. 先尝试手动调用：`/agent swap cf-cdn-dns-parser`，然后给出指令。如果手动调用正常，问题出在编排器路由，不是 skill 本身。
-2. 检查安装：确认 `~/.kiro/agents/cf-cdn-dns-parser.json` 是否存在
-3. 重启 Kiro CLI：退出并重新启动 `kiro-cli chat`
-4. 列出可用 agent：使用 `/agent list` 查看已安装的 subagent
+1. 检查输出中的 `---RESULT---` 块——包含 `STATUS`、`ACTION` 和 `CONTEXT` 字段
+2. `STATUS: FATAL` 表示不可恢复——查看 `CONTEXT` 了解根本原因
+3. `STATUS: ERROR` + `ACTION: FIX` 表示需要用户操作（如缺少输入文件）
+4. 重启 Kiro CLI：退出并启动新的 `kiro-cli chat` 会话
 
 ## 关键词未触发正确的 Skill
 
-**问题**：编排器没有路由到正确的 subagent
+**问题**：编排器未识别转换请求
 
 **解决方案**：在请求中使用明确的关键词：
-- WAF：说 "convert **security rules**" 或 "convert to **AWS WAF**"
-- CloudFront Functions：说 "convert **transformation rules**" 或 "convert to **CloudFront Functions**"
-- CDN：说 "analyze **CDN configuration**" 或 "analyze **CDN config**"
+- WAF：说"转换**安全规则**"或"转换到 **AWS WAF**"
+- CDN：说"转换 **CDN 配置**"或"转换到 **CloudFront**"
+- 两者都转：说"转换**所有配置**"或"**全量迁移**"
 
 **示例**：
-- ❌ 模糊："analyze my cloudflare config files"
-- ✅ 明确："convert **security rules** in /path/to/config to **AWS WAF**"
+- ❌ 模糊："分析我的 cloudflare 配置文件"
+- ✅ 明确："将 /path/to/config 中的**安全规则**转换为 **AWS WAF**"
 
 ## 转换结果不符合预期
 

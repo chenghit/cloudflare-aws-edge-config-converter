@@ -126,7 +126,6 @@ AI-generated configurations require manual review before production deployment. 
 
 ### Large-scale configurations
 
-- **Token consumption** increases with rule count. Use `claude-sonnet-4.6-1m` for zones with many domains or large rule sets.
 - **API rate limits** may slow down parallel processing. See the README for guidance on adjusting batch size.
 
 ### Features not configured by this tool

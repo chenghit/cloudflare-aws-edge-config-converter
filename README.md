@@ -63,7 +63,7 @@ Not all Cloudflare features have CloudFront equivalents. Non-convertible items a
 
 ## How It Works
 
-The tool runs as a Kiro CLI skill with an orchestrator that dispatches to specialized subagents (CDN) or runs deterministic Python scripts (WAF).
+The tool runs as a Kiro CLI skill with an orchestrator that runs deterministic Python scripts for both WAF and CDN pipelines.
 
 **WAF pipeline** (all Python, zero LLM): analyze IP lists → analyze custom rules → analyze rate limits → merge → validate → **auto-split decision** → generate CloudFormation
 
@@ -208,26 +208,20 @@ The pipeline automatically switches to per-domain WebACLs when total IP sets exc
 ```bash
 git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
 cd cloudflare-aws-edge-config-converter
-./install.sh    # Copies skills to ~/.kiro/skills/, subagent configs to ~/.kiro/agents/
+./install.sh    # Copies skill + scripts to ~/.kiro/skills/
 ```
 
 Update: `git pull && ./install.sh`
 
-> **Using a different agent tool?** The install scripts and all SKILL.md files use `~/.kiro/skills/` as the default skill directory (Kiro CLI convention). To use these skills with another agent tool:
+> **Using a different agent tool?** The install script and SKILL.md use `~/.kiro/skills/` as the default skill directory (Kiro CLI convention). To use with another agent tool:
 >
 > ```bash
 > cd cloudflare-aws-edge-config-converter
 >
-> # 1. Replace skill path in all SKILL.md files (subagent cross-references)
-> find . -name 'SKILL.md' | xargs sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g'
+> # Replace skill path in SKILL.md
+> sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g' cloudflare-aws-converter/SKILL.md
 >
-> # 2. Replace skill path in subagent config files (subagents/*.json)
-> # Note: these files use Kiro's skill:// protocol for resource binding.
-> # If your agent tool uses a different mechanism, you may need to rewrite
-> # these JSON files entirely — the sed command only fixes the directory path.
-> sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g' subagents/*.json
->
-> # 3. Edit install.sh (or install.bat) — change SKILLS_DIR and AGENTS_DIR at the top of the file
+> # Edit install.sh — change SKILLS_DIR at the top of the file
 > ```
 
 For advanced users: all pipeline stages are Python scripts — run them directly via `python3`. The WAF pipeline runs via `waf-pipeline.sh`. CDN stages are individual scripts in `cloudflare-aws-converter/scripts/`.
