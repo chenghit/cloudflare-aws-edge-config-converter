@@ -1,6 +1,6 @@
 #!/bin/bash
 # cdn-init.sh — Create output directory structure and copy static Terraform modules
-# Called by the orchestrator before dispatching any CDN pipeline subagent.
+# Called by the orchestrator before running CDN pipeline scripts.
 #
 # Usage: cdn-init.sh <output_parent_dir> [skills_root]
 #   output_parent_dir: cloudflare-to-aws-cdn/ will be created under this directory

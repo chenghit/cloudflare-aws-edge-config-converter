@@ -57,7 +57,7 @@
 2. For preprocess failures: check `cloudflare-to-aws-cdn/ir/accumulator/<domain>.error.json` for details
 3. For validation failures: check `cloudflare-to-aws-cdn/ir/validation/chunk/<domain>-v1.json` or `final/<domain>-v2.json`
 4. Common causes:
-   - `domain_scope.json` not found → run Stage 2 (Input Validator) first
+   - `domain_scope.json` not found → run Stage 1 (cdn-parse-dns.py) first
    - JSON parse error in Cloudflare config → check if CloudflareBackup export is complete
    - Zone directory not found → verify the config path points to the CloudflareBackup root (containing `account/` and zone subdirectories)
 5. To retry a single domain: `python3 cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`

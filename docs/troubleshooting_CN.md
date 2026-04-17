@@ -57,7 +57,7 @@
 2. 预处理失败：查看 `cloudflare-to-aws-cdn/ir/accumulator/<domain>.error.json`
 3. 校验失败：查看 `cloudflare-to-aws-cdn/ir/validation/chunk/<domain>-v1.json` 或 `final/<domain>-v2.json`
 4. 常见原因：
-   - `domain_scope.json` 未找到 → 先运行 Stage 2（Input Validator）
+   - `domain_scope.json` 未找到 → 先运行 Stage 1（cdn-parse-dns.py）
    - Cloudflare 配置 JSON 解析错误 → 检查 CloudflareBackup 导出是否完整
    - Zone 目录未找到 → 确认配置路径指向 CloudflareBackup 根目录（包含 `account/` 和 zone 子目录）
 5. 重试单个域名：`python3 cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`
