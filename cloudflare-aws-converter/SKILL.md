@@ -11,7 +11,7 @@ Orchestrate conversion of Cloudflare configurations to AWS by running determinis
 
 **Language Adaptation**: Respond to the user in the same language as their message.
 
-## Available Subagents
+## Available Components
 
 ### WAF Pipeline
 
@@ -105,7 +105,7 @@ bash ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-init.sh "$(pwd)"
 ```
 
 This creates `cloudflare-to-aws-cdn/` under the **current working directory** (where all
-skills expect it) and copies the CloudFront distribution Terraform module. Subagents
+skills expect it) and copies the CloudFront distribution Terraform module. Scripts
 can then write directly to their output paths without needing to create directories.
 
 **IMPORTANT**: The output directory is always `$(pwd)/cloudflare-to-aws-cdn/`, NOT inside
