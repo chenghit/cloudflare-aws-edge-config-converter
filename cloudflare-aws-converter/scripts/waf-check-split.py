@@ -60,9 +60,10 @@ def count_inline_ip_sets(ir):
 
 def main():
     force_split = "--force-split" in sys.argv
+    force_no_split = "--force-no-split" in sys.argv
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if not args:
-        print("Usage: waf-check-split.py <output_dir> [--force-split]", file=sys.stderr)
+        print("Usage: waf-check-split.py <output_dir> [--force-split|--force-no-split]", file=sys.stderr)
         sys.exit(1)
 
     output_dir = os.path.expanduser(args[0])
@@ -74,7 +75,11 @@ def main():
     total = count_ip_sets(ir)
     inline = count_inline_ip_sets(ir)
 
-    if force_split:
+    if force_no_split:
+        mode = "legacy"
+        dedup = False
+        reason = f"forced no-split (--force-no-split); {total} IP sets, {inline} inline"
+    elif force_split:
         mode = "split"
         dedup = inline > 100
         reason = f"forced split (--force-split); {total} IP sets, {inline} inline"

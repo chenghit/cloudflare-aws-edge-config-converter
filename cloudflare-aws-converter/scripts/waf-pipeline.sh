@@ -15,6 +15,8 @@ FORCE_SPLIT=""
 for arg in "$@"; do
     if [ "$arg" = "--force-split" ]; then
         FORCE_SPLIT="--force-split"
+    elif [ "$arg" = "--force-no-split" ]; then
+        FORCE_SPLIT="--force-no-split"
     fi
 done
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
