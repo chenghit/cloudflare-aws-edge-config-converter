@@ -98,7 +98,7 @@ def main():
         "",
         "### 2. Deploy the CloudFormation stack",
         "```bash",
-        f"cd {output_dir}",
+        f"cd cloudflare-to-aws-waf",
         "aws cloudformation deploy \\",
         "  --template-file waf-cloudformation.json \\",
         "  --stack-name cloudflare-waf-migration \\",

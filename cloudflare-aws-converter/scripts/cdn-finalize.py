@@ -251,10 +251,35 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
                 nc_rows.append((hostname, beh["path_pattern"], nc.get("description", ""), nc.get("reason", "")))
 
     if nc_rows:
-        lines.append("| Domain | Cache Behavior | Description | Reason |")
-        lines.append("|--------|---------------|-------------|--------|")
+        # Group: items that appear for ALL domains vs domain-specific
+        all_hostnames = set(ir["metadata"]["hostname"] for ir in all_irs)
+        # Group by (description, reason) → set of hostnames
+        from collections import defaultdict
+        nc_groups = defaultdict(set)
         for hostname, pp, desc, reason in nc_rows:
-            lines.append(f"| {hostname} | `{pp}` | {desc} | {reason} |")
+            nc_groups[(pp, desc, reason)].add(hostname)
+
+        global_nc = [(pp, desc, reason) for (pp, desc, reason), hosts in nc_groups.items()
+                     if hosts == all_hostnames]
+        domain_nc = [(hostname, pp, desc, reason) for hostname, pp, desc, reason in nc_rows
+                     if (pp, desc, reason) not in [(p, d, r) for p, d, r in global_nc]]
+
+        if global_nc:
+            lines.append(f"**Affects all {len(all_hostnames)} domains:**")
+            lines.append("")
+            lines.append("| Cache Behavior | Description | Reason |")
+            lines.append("|---------------|-------------|--------|")
+            for pp, desc, reason in global_nc:
+                lines.append(f"| `{pp}` | {desc} | {reason} |")
+            lines.append("")
+
+        if domain_nc:
+            lines.append("**Domain-specific:**")
+            lines.append("")
+            lines.append("| Domain | Cache Behavior | Description | Reason |")
+            lines.append("|--------|---------------|-------------|--------|")
+            for hostname, pp, desc, reason in domain_nc:
+                lines.append(f"| {hostname} | `{pp}` | {desc} | {reason} |")
     else:
         lines.append("No non-convertible items.")
 
