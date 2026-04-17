@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """waf-analyze-ip.py — WAF Stage A1: Analyze IP Lists + IP Access Rules.
 
-Replaces cf-waf-analyzer LLM subagent batch A1. Reads IP-Lists.txt,
+Reads IP-Lists.txt,
 List-Items-*.txt, and IP-Access-Rules.txt, then generates waf_ir_ip.json.
 
 Usage:

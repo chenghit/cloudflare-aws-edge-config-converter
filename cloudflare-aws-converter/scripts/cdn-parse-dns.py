@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""cdn-parse-dns.py — CDN Stage 1: Parse DNS.txt and produce manifest + CSV template.
+"""cdn-parse-dns.py — CDN Stage 1: Parse DNS.txt and produce manifest + domain scope.
 
-Replaces cf-cdn-dns-parser LLM subagent. Reads DNS.txt, extracts proxied CNAME
-records, detects SaaS, classifies origins, writes dns_manifest.yaml and
-user_input_template.csv.
+Reads DNS.txt, extracts proxied CNAME records, detects SaaS, classifies origins,
+writes dns_manifest.yaml and domain_scope.json.
 
 Usage:
     python3 cdn-parse-dns.py <config_path> <output_dir>
@@ -245,7 +244,7 @@ def main():
     with open(manifest_path, "w") as f:
         f.write("\n".join(lines) + "\n")
 
-    # Step 7: Write domain_scope.json (replaces user_input.csv + cdn-validate-input.py)
+    # Step 7: Write domain_scope.json
     # All domains: apply_default_cache_behavior=false, cert_arn=null (data_source)
     apex_cert_groups = {}
     for apex in sorted(apex_groups):

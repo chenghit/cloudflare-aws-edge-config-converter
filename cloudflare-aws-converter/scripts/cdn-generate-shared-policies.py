@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """cdn-generate-shared-policies.py — Stage 7: Generate shared policies.tf.
 
-Replaces cf-cdn-tf-shared-policies LLM subagent. Reads dedup_manifest.json
+Reads dedup_manifest.json
 and generates Terraform resources for all deduplicated CloudFront policies.
 
 Usage:

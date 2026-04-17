@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """waf-analyze-custom.py — WAF Stage A2: Analyze Custom Rules.
 
-Replaces cf-waf-analyzer LLM subagent batch A2. Reads WAF-Custom-Rules.txt,
+Reads WAF-Custom-Rules.txt,
 parses expressions into conditions trees, determines convertibility,
 extracts IP sets, and tracks skip labels.
 

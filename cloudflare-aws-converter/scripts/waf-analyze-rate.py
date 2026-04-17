@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """waf-analyze-rate.py — WAF Stage A3: Analyze Rate Limiting Rules.
 
-Replaces cf-waf-analyzer LLM subagent batch A3. Reads Rate-limits.txt,
+Reads Rate-limits.txt,
 parses expressions, calculates rate limits, reads skip labels from
 waf_ir_custom.json.
 
