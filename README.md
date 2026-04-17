@@ -40,7 +40,7 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 - **Terraform** >= 1.8.0 with AWS Provider >= 6.x — [Install Terraform](https://developer.hashicorp.com/terraform/install). Required for CDN pipeline only. WAF pipeline uses CloudFormation (no Terraform needed).
 - **Python 3** — Required by both WAF and CDN pipeline scripts. WAF pipeline is entirely Python-based (expression parsing, analysis, validation, CloudFormation generation). CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–7.6). Pre-installed on macOS and most Linux distributions. No third-party packages needed for the conversion pipeline (stdlib only). **Post-conversion**: CDN domains with KVS (bulk redirects, IP lists, error pages) generate a `seed-kvs.py` script that requires `boto3` — install with `pip install boto3` before deploying.
 - **Model**: No model requirement for the conversion pipeline itself — all scripts are deterministic Python with zero LLM invocations. Any model supported by Kiro CLI works, since the orchestrator only needs to understand user intent, run shell commands, and translate deployment guides for non-English users.
-- **ACM certificates** (CDN only): CloudFront requires certs in us-east-1. Provision wildcard certificates (e.g., `*.example.com`) before running, or leave blank in the CSV to let Terraform auto-discover existing ISSUED certs.
+- **ACM certificates** (CDN only): CloudFront requires certs in us-east-1. Provision wildcard certificates (e.g., `*.example.com`) before running. Terraform auto-discovers existing ISSUED certs via data source lookup.
 - **Input format**: Only works with [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) exports. NOT compatible with [cf-terraforming](https://github.com/cloudflare/cf-terraforming) — see [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md).
 
 ## What Gets Converted
@@ -92,7 +92,6 @@ flowchart TD
     CDN9 -->|PASS| CDN_Done([CDN Terraform + JS ✅])
 
     style Main fill:#f9f,stroke:#333
-    style Pause fill:#ff9,stroke:#f90
     style WAF_Done fill:#9f9,stroke:#333
     style CDN_Done fill:#9f9,stroke:#333
 ```
@@ -157,7 +156,7 @@ Conversion time depends on the number of rules/domains. Benchmark with the inclu
 | Pipeline | Time |
 |----------|------|
 | WAF | <1 second (all Python, no LLM) |
-| CDN | <1 second + user input pause (all Python, no LLM) |
+| CDN | <1 second (all Python, no LLM) |
 
 Where the time goes:
 - **WAF**: Entire Python pipeline finishes in <1 second (zero LLM invocations).
@@ -180,7 +179,7 @@ aws acm request-certificate \
   --region us-east-1
 ```
 
-Or leave the cert ARN blank in the CSV — the tool generates a `data "aws_acm_certificate"` lookup that finds your existing ISSUED cert at `terraform plan` time.
+The tool generates a `data "aws_acm_certificate"` lookup that finds your existing ISSUED cert at `terraform plan` time.
 
 </details>
 

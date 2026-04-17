@@ -92,7 +92,6 @@ flowchart TD
     CDN9 -->|通过| CDN_Done([CDN Terraform + JS ✅])
 
     style Main fill:#f9f,stroke:#333
-    style Pause fill:#ff9,stroke:#f90
     style WAF_Done fill:#9f9,stroke:#333
     style CDN_Done fill:#9f9,stroke:#333
 ```
@@ -178,7 +177,7 @@ aws acm request-certificate \
   --region us-east-1
 ```
 
-或在 CSV 中留空——工具会生成 `data "aws_acm_certificate"` 数据源，在 `terraform plan` 时自动查找已签发的证书。
+工具会生成 `data "aws_acm_certificate"` 数据源，在 `terraform plan` 时自动查找已签发的证书。
 
 </details>
 
