@@ -30,7 +30,7 @@ Orchestrate conversion of Cloudflare configurations to AWS by running determinis
 
 **No LLM subagents are used in the WAF pipeline.** All analysis, validation, and generation is deterministic Python.
 
-**Auto-split**: If total IP sets > 50, the pipeline automatically switches to per-domain WebACLs. Use `--force-split` flag to force per-domain mode for testing.
+**Auto-split**: If total IP sets > 50, the pipeline automatically switches to per-domain WebACLs.
 
 ### CDN Pipeline
 
@@ -136,10 +136,6 @@ No LLM subagents are used. All stages are Python scripts invoked via `execute_ba
 3. Run the pipeline:
    ```bash
    bash ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-pipeline.sh "{config_path}" "cloudflare-to-aws-waf"
-   ```
-   If the user explicitly requests per-domain WebACL splitting (e.g., "force split", "split per domain"):
-   ```bash
-   bash ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-pipeline.sh "{config_path}" "cloudflare-to-aws-waf" --force-split
    ```
    Parse the `---RESULT---` block:
    - `STATUS: OK` → proceed to Step 4.
