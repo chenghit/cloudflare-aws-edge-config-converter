@@ -213,7 +213,8 @@ def main():
     fail_count = sum(1 for r in results if r["overall_status"] == "FAIL")
 
     if fail_count == 0:
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nDOMAINS: {len(results)}\nPASSED: {pass_count}")
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nDOMAINS: {len(results)}\nPASSED: {pass_count}\n"
+              f"POST_ACTION: If user language is not English, translate conversion_report.md to user language and save as conversion_report_{{lang}}.md")
     else:
         failed_items = "\n".join(
             f"  {r['hostname']}: {', '.join(c['name'] + '=' + c['status'] for c in r['checks'] if c['status'] == 'FAIL')}"
