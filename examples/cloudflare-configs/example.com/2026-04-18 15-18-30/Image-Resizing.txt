@@ -1,0 +1,12 @@
+{
+  "result": {
+    "cf_zone_tag": "00000000000000000000000000000023",
+    "id": "image_resizing",
+    "editable": true,
+    "value": "off",
+    "modified_on": null
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

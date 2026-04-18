@@ -1,0 +1,212 @@
+{
+  "result": {
+    "description": "",
+    "id": "00000000000000000000000000000064",
+    "kind": "zone",
+    "last_updated": "2025-12-15T06:39:40.300921Z",
+    "name": "default",
+    "phase": "http_request_firewall_managed",
+    "rules": [
+      {
+        "action": "execute",
+        "action_parameters": {
+          "id": "00000000000000000000000000000065",
+          "overrides": {
+            "rules": [
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "00000000000000000000000000000066"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "00000000000000000000000000000067"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "00000000000000000000000000000068"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "00000000000000000000000000000069"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "0000000000000000000000000000006a"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "0000000000000000000000000000006b"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "0000000000000000000000000000006c"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "0000000000000000000000000000006d"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "0000000000000000000000000000006e"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "0000000000000000000000000000006f"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "00000000000000000000000000000070"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "00000000000000000000000000000071"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "00000000000000000000000000000072"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "00000000000000000000000000000073"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "00000000000000000000000000000074"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "00000000000000000000000000000075"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "00000000000000000000000000000076"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "00000000000000000000000000000077"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "00000000000000000000000000000078"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "00000000000000000000000000000079"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "0000000000000000000000000000007a"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "0000000000000000000000000000007b"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "0000000000000000000000000000007c"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "0000000000000000000000000000007d"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "0000000000000000000000000000007e"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "0000000000000000000000000000007f"
+              }
+            ]
+          },
+          "version": "latest"
+        },
+        "enabled": true,
+        "expression": "true",
+        "id": "00000000000000000000000000000080",
+        "last_updated": "2025-12-15T06:39:40.300921Z",
+        "ref": "00000000000000000000000000000080",
+        "version": "1"
+      },
+      {
+        "action": "execute",
+        "action_parameters": {
+          "id": "00000000000000000000000000000081",
+          "overrides": {
+            "categories": [
+              {
+                "category": "paranoia-level-3",
+                "enabled": false
+              },
+              {
+                "category": "paranoia-level-4",
+                "enabled": false
+              }
+            ],
+            "rules": [
+              {
+                "action": "managed_challenge",
+                "id": "00000000000000000000000000000082",
+                "score_threshold": 40
+              }
+            ]
+          },
+          "version": "latest"
+        },
+        "enabled": true,
+        "expression": "true",
+        "id": "00000000000000000000000000000083",
+        "last_updated": "2025-12-15T06:39:40.300921Z",
+        "ref": "00000000000000000000000000000083",
+        "version": "1"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "ruleset": "current"
+        },
+        "description": "Bypass-host-test.example.com",
+        "enabled": true,
+        "expression": "(any(http.request.headers[\"host\"][*] eq \"test.example.com\"))",
+        "id": "00000000000000000000000000000084",
+        "last_updated": "2025-12-15T06:39:40.300921Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "00000000000000000000000000000084",
+        "version": "1"
+      }
+    ],
+    "source": "firewall_managed",
+    "version": "1"
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}

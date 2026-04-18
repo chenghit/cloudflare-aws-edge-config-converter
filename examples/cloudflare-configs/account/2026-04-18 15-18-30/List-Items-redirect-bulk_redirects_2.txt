@@ -1,0 +1,29 @@
+{
+  "result": [
+    {
+      "id": "000000000000000000000000000000b2",
+      "redirect": {
+        "source_url": "cdn.c.example.com/new_feature2",
+        "target_url": "https://cdn.c.example.com/soon2",
+        "status_code": 302,
+        "preserve_query_string": false
+      },
+      "created_on": "2025-12-26T05:46:12Z",
+      "modified_on": "2025-12-26T05:46:12Z"
+    },
+    {
+      "id": "000000000000000000000000000000b3",
+      "redirect": {
+        "source_url": "c.example.com/about2",
+        "include_subdomains": true,
+        "target_url": "https://cdn.c.example.com/news2",
+        "status_code": 301
+      },
+      "created_on": "2025-12-26T05:46:12Z",
+      "modified_on": "2025-12-26T05:47:31Z"
+    }
+  ],
+  "success": true,
+  "errors": [],
+  "messages": []
+}

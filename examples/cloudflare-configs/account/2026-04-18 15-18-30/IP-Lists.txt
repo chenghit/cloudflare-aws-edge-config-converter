@@ -1,0 +1,88 @@
+{
+  "result": [
+    {
+      "id": "0000000000000000000000000000009d",
+      "name": "block_list_1",
+      "kind": "ip",
+      "num_items": 3,
+      "num_referencing_filters": 0,
+      "created_on": "2025-12-15T06:45:48Z",
+      "modified_on": "2025-12-15T06:46:35Z"
+    },
+    {
+      "id": "0000000000000000000000000000009e",
+      "name": "block_list_2",
+      "kind": "asn",
+      "num_items": 2,
+      "num_referencing_filters": 0,
+      "created_on": "2025-12-15T06:46:55Z",
+      "modified_on": "2025-12-15T06:47:06Z"
+    },
+    {
+      "id": "0000000000000000000000000000009f",
+      "name": "bulk_redirects_2",
+      "kind": "redirect",
+      "num_items": 2,
+      "num_referencing_filters": 0,
+      "created_on": "2025-12-26T05:40:14Z",
+      "modified_on": "2025-12-26T05:47:31Z"
+    },
+    {
+      "id": "000000000000000000000000000000a0",
+      "name": "bulk_redirects_test",
+      "kind": "redirect",
+      "num_items": 3,
+      "num_referencing_filters": 0,
+      "created_on": "2025-12-15T11:48:19Z",
+      "modified_on": "2025-12-26T05:39:26Z"
+    },
+    {
+      "id": "000000000000000000000000000000a1",
+      "name": "reject_ip",
+      "kind": "ip",
+      "num_items": 0,
+      "num_referencing_filters": 0,
+      "created_on": "2022-10-19T03:08:46Z",
+      "modified_on": "2022-10-19T03:08:46Z"
+    },
+    {
+      "id": "000000000000000000000000000000a2",
+      "name": "unused_1",
+      "kind": "ip",
+      "num_items": 2,
+      "num_referencing_filters": 0,
+      "created_on": "2026-04-18T07:06:59Z",
+      "modified_on": "2026-04-18T07:07:25Z"
+    },
+    {
+      "id": "000000000000000000000000000000a3",
+      "name": "unused_2",
+      "kind": "ip",
+      "num_items": 1,
+      "num_referencing_filters": 0,
+      "created_on": "2026-04-18T07:07:59Z",
+      "modified_on": "2026-04-18T07:08:08Z"
+    },
+    {
+      "id": "000000000000000000000000000000a4",
+      "name": "unused_asn_1",
+      "kind": "asn",
+      "num_items": 3,
+      "num_referencing_filters": 0,
+      "created_on": "2026-04-18T07:09:23Z",
+      "modified_on": "2026-04-18T07:09:42Z"
+    },
+    {
+      "id": "000000000000000000000000000000a5",
+      "name": "unused_host_1",
+      "kind": "hostname",
+      "num_items": 1,
+      "num_referencing_filters": 0,
+      "created_on": "2026-04-18T07:08:33Z",
+      "modified_on": "2026-04-18T07:09:02Z"
+    }
+  ],
+  "success": true,
+  "errors": [],
+  "messages": []
+}

@@ -1,0 +1,1 @@
+{"result":[{"id":"000000000000000000000000000000ae","title":"onedrive-BUCKET","supports_url_encoding":true},{"id":"000000000000000000000000000000af","title":"Subscribe","supports_url_encoding":true}],"errors":[],"messages":[],"success":true,"result_info":{"count":2,"page":1,"per_page":100,"total_count":2,"total_pages":1}}

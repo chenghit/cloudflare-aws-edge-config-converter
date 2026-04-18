@@ -1,0 +1,1 @@
+{"success":true,"result":[{"id":"00000000000000000000000000000091","description":"","enabled":true,"last_updated":"2026-04-09T03:33:49.656763Z","expression":"(http.request.method eq \"OPTIONS\" and http.host eq \"vnotestatic.c.example.com\" and http.request.uri.path matches r\"^/vnote/netspeedresult\")","snippet_name":"handle_vnote_options"}]}
