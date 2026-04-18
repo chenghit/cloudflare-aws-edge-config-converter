@@ -58,7 +58,8 @@ def main():
             "http_request_firewall_managed": False}, "rules": []},
               "non_convertible_notes": []}
         out_path = os.path.join(output_dir, "waf_ir_custom.json")
-        json.dump(ir, open(out_path, "w"), indent=2)
+        with open(out_path, "w") as f:
+            json.dump(ir, f, indent=2)
         print(f"OK: 0 custom rules → {out_path}")
         return
 

@@ -33,7 +33,7 @@ ALWAYS_AVAILABLE = {
 CFF_ACCESSORS = {
     "uri.path": "request.uri",
     "uri": "request.uri",
-    "uri.query": "request.rawQueryString()",
+    "uri.query": "_qs(request.querystring)",
     "uri.path.extension": "request.uri.split('.').pop()",
     "host": "request.headers.host.value",
     "method": "request.method",
@@ -56,6 +56,8 @@ CFF_ACCESSORS = {
 # Lambda@Edge accessor overrides
 LAMBDA_ACCESSORS = {
     "ip.src": "request.clientIp",
+    # uri.query: Lambda@Edge request.querystring is already a raw string,
+    # unlike CFF where it's a parsed object requiring _qs() reconstruction.
     "uri.query": "request.querystring",
     "host": "request.headers.host[0].value",
     "user_agent": ("request.headers['user-agent']", "request.headers['user-agent'][0].value"),
@@ -629,6 +631,17 @@ def _needs_kvs(ir):
     return any(kvs.values())
 
 
+def _needs_qs_helper(all_ops):
+    """Check if _qs helper is needed (bulk redirect or uri.query condition)."""
+    for op in all_ops:
+        if op.get("type") == "bulk_redirect":
+            return True
+        cond = op.get("condition")
+        if cond and _cond_has_field(cond, ("uri.query",)):
+            return True
+    return False
+
+
 def _needs_crypto(ir):
     """Check if any op uses sha256/hmac (needs crypto import)."""
     for beh in ir.get("cache_behaviors", []):
@@ -678,7 +691,7 @@ def _generate_bulk_redirect_block(indent="  "):
         f"{indent}  const sc = parseInt(pts[0], 10);",
         f"{indent}  let tgt = pts[2];",
         f"{indent}  if (pts[1] === '1') {{",
-        f"{indent}    const qs = request.rawQueryString();",
+        f"{indent}    const qs = _qs(request.querystring);",
         f"{indent}    if (qs) {{ tgt = tgt + (tgt.includes('?') ? '&' : '?') + qs; }}",
         f"{indent}  }}",
         f"{indent}  return {{statusCode: sc, headers: {{location: {{value: tgt}}}}}};",
@@ -740,6 +753,22 @@ def generate_viewer_request_js(ir, target="cff"):
     all_ops = []
     for beh in ir.get("cache_behaviors", []):
         all_ops.extend(beh.get("viewer_request_ops", []))
+
+    # Inject _qs helper when query string reconstruction is needed (CFF only).
+    # CFF request.querystring is a parsed object; _qs rebuilds the raw string.
+    # Lambda@Edge request.querystring is already a raw string — no helper needed.
+    if target == "cff" and _needs_qs_helper(all_ops):
+        lines.append("  function _qs(q) {")
+        lines.append("    var p = [];")
+        lines.append("    for (var k in q) {")
+        lines.append("      if (q[k].multiValue) {")
+        lines.append("        q[k].multiValue.forEach(function(mv) { p.push(k + '=' + mv.value); });")
+        lines.append("      } else {")
+        lines.append("        p.push(k + '=' + q[k].value);")
+        lines.append("      }")
+        lines.append("    }")
+        lines.append("    return p.join('&');")
+        lines.append("  }")
 
     # Continent/EU preamble
     if _has_continent_or_eu(all_ops):

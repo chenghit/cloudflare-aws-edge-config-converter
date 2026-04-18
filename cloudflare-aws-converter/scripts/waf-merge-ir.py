@@ -24,9 +24,12 @@ for name, path in files.items():
         sys.exit(1)
 
 try:
-    ip = json.load(open(files["ip"]))
-    custom = json.load(open(files["custom"]))
-    rate = json.load(open(files["rate"]))
+    with open(files["ip"]) as f:
+        ip = json.load(f)
+    with open(files["custom"]) as f:
+        custom = json.load(f)
+    with open(files["rate"]) as f:
+        rate = json.load(f)
 except json.JSONDecodeError as e:
     print(f"ERROR: JSON parse failed: {e}", file=sys.stderr)
     sys.exit(1)
@@ -40,5 +43,6 @@ merged = {
 }
 
 out_path = os.path.join(waf_dir, "waf_ir.json")
-json.dump(merged, open(out_path, "w"), indent=2)
+with open(out_path, "w") as f:
+    json.dump(merged, f, indent=2)
 print(f"OK: merged → {out_path}")

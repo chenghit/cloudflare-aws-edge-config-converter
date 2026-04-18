@@ -69,8 +69,14 @@ run_step "Check split" \
     python3 "$SCRIPTS_DIR/waf-check-split.py" "$OUTPUT_DIR" $SPLIT_FLAG
 
 # Read split decision
-SPLIT_MODE=$(python3 -c "import json; d=json.load(open('$OUTPUT_DIR/waf_split_decision.json')); print(d['mode'])")
-DEDUP=$(python3 -c "import json; d=json.load(open('$OUTPUT_DIR/waf_split_decision.json')); print(d['dedup'])")
+SPLIT_MODE=$(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: d = json.load(f)
+print(d['mode'])" "$OUTPUT_DIR/waf_split_decision.json")
+DEDUP=$(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: d = json.load(f)
+print(d['dedup'])" "$OUTPUT_DIR/waf_split_decision.json")
 
 if [ "$SPLIT_MODE" = "split" ]; then
     run_step "Split by host" \

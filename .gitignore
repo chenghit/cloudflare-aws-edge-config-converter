@@ -1,3 +1,5 @@
 **/.DS_Store
 /workspace/
 .kiro/settings/
+__pycache__/
+*.pyc

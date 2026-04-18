@@ -25,7 +25,8 @@ def find_file(base_path, filename):
 # WAF Custom Rules
 custom_path = find_file(config_path, "WAF-Custom-Rules.txt")
 if custom_path:
-    data = json.load(open(custom_path))
+    with open(custom_path) as f:
+        data = json.load(f)
     if isinstance(data.get("result"), dict) and "rules" in data["result"]:
         source["custom"] = len(data["result"]["rules"])
     elif isinstance(data.get("result"), list):
@@ -38,7 +39,8 @@ else:
 # Rate Limiting Rules
 rate_path = find_file(config_path, "Rate-limits.txt")
 if rate_path:
-    data = json.load(open(rate_path))
+    with open(rate_path) as f:
+        data = json.load(f)
     if isinstance(data.get("result"), dict) and "rules" in data["result"]:
         source["rate"] = len(data["result"]["rules"])
     elif isinstance(data.get("result"), list):
@@ -51,7 +53,8 @@ else:
 # IP Access Rules
 ip_path = find_file(config_path, "IP-Access-Rules.txt")
 if ip_path:
-    data = json.load(open(ip_path))
+    with open(ip_path) as f:
+        data = json.load(f)
     if isinstance(data.get("result"), list):
         source["ip"] = len(data["result"])
     else:
@@ -65,7 +68,8 @@ if not os.path.exists(ir_path):
     print(f"ERROR: {ir_path} not found")
     sys.exit(1)
 
-ir = json.load(open(ir_path))
+with open(ir_path) as f:
+    ir = json.load(f)
 
 ir_counts = {
     "custom_count": ir.get("custom_rules", {}).get("count", 0),
