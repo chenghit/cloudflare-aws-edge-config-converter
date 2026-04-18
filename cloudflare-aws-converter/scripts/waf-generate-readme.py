@@ -97,14 +97,76 @@ def main():
         "export AWS_PROFILE=<your-profile-name>",
         "```",
         "",
-        "### 2. Deploy the CloudFormation stack",
-        "```bash",
-        f"cd cloudflare-to-aws-waf",
-        "aws cloudformation deploy \\",
-        "  --template-file waf-cloudformation.json \\",
-        "  --stack-name cloudflare-waf-migration \\",
-        "  --region us-east-1",
-        "```",
+    ]
+
+    # Deployment instructions based on template count and size
+    template_count = meta.get("template_count", 1)
+    compact_size = meta.get("compact_size", 0)
+    template_files = meta.get("template_files", ["waf-cloudformation.json"])
+
+    if template_count == 1:
+        if compact_size <= 51200:
+            # Small enough for direct upload
+            lines += [
+                "### 2. Deploy the CloudFormation stack",
+                "```bash",
+                f"cd cloudflare-to-aws-waf",
+                "aws cloudformation deploy \\",
+                f"  --template-file {template_files[0]} \\",
+                "  --stack-name cloudflare-waf-migration \\",
+                "  --region us-east-1",
+                "```",
+            ]
+        else:
+            # Needs S3 bucket
+            lines += [
+                "### 2. Deploy the CloudFormation stack",
+                "",
+                f"Template size ({compact_size // 1024} KB) exceeds the 51 KB direct upload limit. "
+                "An S3 bucket is required for deployment.",
+                "",
+                "```bash",
+                f"cd cloudflare-to-aws-waf",
+                "aws cloudformation deploy \\",
+                f"  --template-file {template_files[0]} \\",
+                "  --stack-name cloudflare-waf-migration \\",
+                "  --s3-bucket <your-cfn-templates-bucket> \\",
+                "  --region us-east-1",
+                "```",
+            ]
+    else:
+        # Multi-stack deployment
+        lines += [
+            "### 2. Deploy CloudFormation stacks",
+            "",
+            f"The template was split into {template_count} stacks due to the 1 MB CloudFormation size limit. "
+            "Deploy in order — IP sets first, then WebACL stacks.",
+            "",
+            "```bash",
+            f"cd cloudflare-to-aws-waf",
+            "",
+            "# Step 1: Deploy IP sets",
+            "aws cloudformation deploy \\",
+            f"  --template-file {template_files[0]} \\",
+            "  --stack-name cloudflare-waf-ipsets \\",
+            "  --s3-bucket <your-cfn-templates-bucket> \\",
+            "  --region us-east-1",
+            "",
+            "# Step 2: Deploy WebACL stacks (auto-resolves IP set ARNs via ImportValue)",
+        ]
+        for tf in template_files[1:]:
+            stack_name = tf.replace(".json", "").replace("waf-cloudformation-", "cloudflare-waf-")
+            lines += [
+                "aws cloudformation deploy \\",
+                f"  --template-file {tf} \\",
+                f"  --stack-name {stack_name} \\",
+                "  --s3-bucket <your-cfn-templates-bucket> \\",
+                "  --region us-east-1",
+                "",
+            ]
+        lines += ["```"]
+
+    lines += [
         "",
         "### 3. Check deployment status",
         "```bash",
@@ -155,22 +217,48 @@ def main():
             "",
         ]
 
-    lines += [
-        "### 5. Update or destroy",
-        "```bash",
-        "# Update",
-        "aws cloudformation deploy \\",
-        "  --template-file waf-cloudformation.json \\",
-        "  --stack-name cloudflare-waf-migration \\",
-        "  --region us-east-1",
-        "",
-        "# Destroy",
-        "aws cloudformation delete-stack \\",
-        "  --stack-name cloudflare-waf-migration \\",
-        "  --region us-east-1",
-        "```",
-        "",
-    ]
+    if template_count == 1:
+        update_lines = [
+            "### 5. Update or destroy",
+            "```bash",
+            "# Update (re-run deploy with same stack name)",
+            "aws cloudformation deploy \\",
+            f"  --template-file {template_files[0]} \\",
+            "  --stack-name cloudflare-waf-migration \\",
+        ]
+        if compact_size > 51200:
+            update_lines.append("  --s3-bucket <your-cfn-templates-bucket> \\")
+        update_lines += [
+            "  --region us-east-1",
+            "",
+            "# Destroy",
+            "aws cloudformation delete-stack \\",
+            "  --stack-name cloudflare-waf-migration \\",
+            "  --region us-east-1",
+            "```",
+            "",
+        ]
+        lines += update_lines
+    else:
+        lines += [
+            "### 5. Destroy (reverse order)",
+            "```bash",
+        ]
+        for tf in reversed(template_files[1:]):
+            stack_name = tf.replace(".json", "").replace("waf-cloudformation-", "cloudflare-waf-")
+            lines += [
+                "aws cloudformation delete-stack \\",
+                f"  --stack-name {stack_name} \\",
+                "  --region us-east-1",
+            ]
+        lines += [
+            "# Delete IP sets last (WebACL stacks depend on them via ImportValue)",
+            "aws cloudformation delete-stack \\",
+            "  --stack-name cloudflare-waf-ipsets \\",
+            "  --region us-east-1",
+            "```",
+            "",
+        ]
 
     # Post-deployment checklist
     lines += [

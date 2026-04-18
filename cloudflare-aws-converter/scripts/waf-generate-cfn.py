@@ -1265,6 +1265,108 @@ def generate_split(split_ir):
     return template, max_wcu, max_wcu_domain, warnings, errors, exceeded_domains, dedup, domain_ref_counts
 
 
+# ── Template writing (compact + split if needed) ─────────────────────────────
+
+CFN_S3_LIMIT = 1_048_576  # 1 MB
+SPLIT_TARGET = 900_000    # 900 KB per stack (leave margin)
+
+
+def _write_templates(template, output_dir):
+    """Write CloudFormation template(s). Returns dict with file info.
+
+    - Always writes compact JSON for deployment + indented for reading.
+    - If compact > 1MB, splits into IP set stack + WebACL batch stacks
+      using Export/Fn::ImportValue for cross-stack references.
+    """
+    # Always write readable version (full template, indented)
+    readable_path = os.path.join(output_dir, "waf-cloudformation.readable.json")
+    with open(readable_path, "w") as f:
+        json.dump(template, f, indent=2, ensure_ascii=False)
+
+    compact = json.dumps(template, separators=(",", ":"), ensure_ascii=False)
+    compact_size = len(compact.encode("utf-8"))
+
+    if compact_size <= CFN_S3_LIMIT:
+        # Single file
+        out_path = os.path.join(output_dir, "waf-cloudformation.json")
+        with open(out_path, "w") as f:
+            f.write(compact)
+        return {"count": 1, "files": ["waf-cloudformation.json"], "compact_size": compact_size}
+
+    # Split: IP sets → one stack, WebACLs → batched stacks
+    resources = template["Resources"]
+    ipset_resources = {k: v for k, v in resources.items() if v["Type"] == "AWS::WAFv2::IPSet"}
+    webacl_resources = {k: v for k, v in resources.items() if v["Type"] == "AWS::WAFv2::WebACL"}
+
+    # Build IP set stack with Exports
+    ipset_outputs = {}
+    for lid in ipset_resources:
+        export_name = f"waf-ipsets-{lid}-Arn"
+        ipset_outputs[f"{lid}Arn"] = {
+            "Value": {"Fn::GetAtt": [lid, "Arn"]},
+            "Export": {"Name": export_name},
+        }
+    ipset_template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Description": "AWS WAF IP sets — converted from Cloudflare",
+        "Resources": ipset_resources,
+        "Outputs": ipset_outputs,
+    }
+    ipset_path = os.path.join(output_dir, "waf-cloudformation-ipsets.json")
+    with open(ipset_path, "w") as f:
+        json.dump(ipset_template, f, separators=(",", ":"), ensure_ascii=False)
+
+    # Build mapping: logical_id → export name (for Fn::ImportValue replacement)
+    lid_to_export = {lid: f"waf-ipsets-{lid}-Arn" for lid in ipset_resources}
+
+    # Batch WebACLs into stacks ≤ SPLIT_TARGET
+    batches = []
+    current_batch = {}
+    current_size = 200  # boilerplate overhead estimate
+
+    for lid, res in webacl_resources.items():
+        # Replace Fn::GetAtt with Fn::ImportValue in this WebACL
+        res_json = json.dumps(res, separators=(",", ":"))
+        for ip_lid, export_name in lid_to_export.items():
+            old = json.dumps({"Fn::GetAtt": [ip_lid, "Arn"]}, separators=(",", ":"))
+            new = json.dumps({"Fn::ImportValue": export_name}, separators=(",", ":"))
+            res_json = res_json.replace(old, new)
+        res_replaced = json.loads(res_json)
+        res_size = len(res_json.encode("utf-8"))
+
+        if current_size + res_size > SPLIT_TARGET and current_batch:
+            batches.append(current_batch)
+            current_batch = {}
+            current_size = 200
+        current_batch[lid] = res_replaced
+        current_size += res_size
+
+    if current_batch:
+        batches.append(current_batch)
+
+    # Write WebACL batch stacks
+    files = ["waf-cloudformation-ipsets.json"]
+    for i, batch in enumerate(batches, 1):
+        outputs = {}
+        for lid, res in batch.items():
+            name = res["Properties"]["Name"]
+            outputs[f"{lid}Arn"] = {"Description": f"{name} WebACL ARN",
+                                    "Value": {"Fn::GetAtt": [lid, "Arn"]}}
+        batch_template = {
+            "AWSTemplateFormatVersion": "2010-09-09",
+            "Description": f"AWS WAF WebACLs batch {i} — converted from Cloudflare",
+            "Resources": batch,
+            "Outputs": outputs,
+        }
+        fname = f"waf-cloudformation-webacls-{i}.json"
+        batch_path = os.path.join(output_dir, fname)
+        with open(batch_path, "w") as f:
+            json.dump(batch_template, f, separators=(",", ":"), ensure_ascii=False)
+        files.append(fname)
+
+    return {"count": len(files), "files": files, "compact_size": compact_size}
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1313,14 +1415,16 @@ def main():
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
 
-    # Write template
-    out_path = os.path.join(output_dir, "waf-cloudformation.json")
-    with open(out_path, "w") as f:
-        json.dump(template, f, indent=2, ensure_ascii=False)
+    # Write template(s)
+    template_files = _write_templates(template, output_dir)
+    compact_size = template_files["compact_size"]
 
-    template_size = os.path.getsize(out_path)
-    if template_size > 1_000_000:
-        warnings.append(f"Template size {template_size} bytes exceeds 1 MB")
+    # Update metadata with template info
+    meta["template_count"] = template_files["count"]
+    meta["template_files"] = template_files["files"]
+    meta["compact_size"] = compact_size
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
 
     # Report
     num_resources = len(template["Resources"])
@@ -1361,8 +1465,10 @@ def main():
     if exceeded_domains:
         failed_items = "\n".join(f"  {d}" for d in exceeded_domains)
         print(f"OK (partial): {num_resources} resources, {num_webacls} WebACLs, "
-              f"{num_ip_sets} IP sets, {wcu_display} → {out_path}")
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: PARTIAL\nOUTPUT_FILE: {out_path}\n"
+              f"{num_ip_sets} IP sets, {wcu_display}")
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: PARTIAL\n"
+              f"TEMPLATE_COUNT: {template_files['count']}\nTEMPLATES: {','.join(template_files['files'])}\n"
+              f"TEMPLATE_SIZE: {compact_size}\n"
               f"RESOURCES: {num_resources}\nWEBACLS: {num_webacls}\n"
               f"IP_SETS: {num_ip_sets}\nWCU: {max_wcu_val}\nMODE: {mode}\n"
               f"SUCCEEDED: {num_webacls}\nFAILED: {len(exceeded_domains)}\n"
@@ -1370,8 +1476,10 @@ def main():
         return  # exit 0
 
     print(f"OK: {num_resources} resources, {num_webacls} WebACLs, "
-          f"{num_ip_sets} IP sets, {wcu_display} → {out_path}")
-    print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nOUTPUT_FILE: {out_path}\n"
+          f"{num_ip_sets} IP sets, {wcu_display}")
+    print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\n"
+          f"TEMPLATE_COUNT: {template_files['count']}\nTEMPLATES: {','.join(template_files['files'])}\n"
+          f"TEMPLATE_SIZE: {compact_size}\n"
           f"RESOURCES: {num_resources}\nWEBACLS: {num_webacls}\n"
           f"IP_SETS: {num_ip_sets}\nWCU: {max_wcu_val}\nMODE: {mode}")
 

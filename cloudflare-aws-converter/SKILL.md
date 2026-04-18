@@ -266,25 +266,11 @@ After the pipeline completes, summarize what was done and where output files wer
 - Path to generated CloudFormation template
 - Any warnings from the generator
 
-After the summary, include deployment instructions:
-```
-## Next Steps: Deploy
+After the summary, refer the user to the generated deployment README for deployment instructions:
 
-1. Set your AWS profile (must have WAFv2 and CloudFormation permissions):
-   export AWS_PROFILE=<your-profile-name>
+> See `cloudflare-to-aws-waf/README_aws-waf-deployment.md` for deployment steps, quota usage, and post-deployment checklist.
 
-2. Deploy the CloudFormation stack:
-   cd cloudflare-to-aws-waf
-   aws cloudformation deploy \
-     --template-file waf-cloudformation.json \
-     --stack-name cloudflare-waf-migration \
-     --region us-east-1
-
-3. Check deployment status:
-   aws cloudformation describe-stacks --stack-name cloudflare-waf-migration --region us-east-1
-
-4. Associate WebACLs with your CloudFront distributions in the AWS Console or CLI.
-```
+The README contains deployment commands adapted to the template size (direct upload vs S3 bucket vs multi-stack split). Do NOT hardcode deployment commands — always refer to the README.
 
 **Step 4b: Translate deployment README (non-English users)**
 
