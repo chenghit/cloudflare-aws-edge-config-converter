@@ -73,4 +73,4 @@ CDN pipeline（CloudFront 分发、缓存策略、CloudFront Functions）继续�
 
 ## 按域名拆分 WebACL
 
-当客户的 Cloudflare 配置包含大量 inline IP 列表（总 IP set 超过 50 个）时，pipeline 自动切换为 **per-domain WebACL**——每个 proxied 域名一个 WebACL。这解决了 AWS WAF 每个 WebACL 最多引用 50 个 IP set + regex set 的限制。Host-specific 规则只放到对应域名的 WebACL，冗余的 host 条件被剥离。每个 WebACL 包含搜索引擎标签规则、Anti-DDoS 防护和 always-on challenge 规则。详见生成的部署指南中的部署后检查清单。
+当客户的 Cloudflare 配置包含大量 inline IP 列表时，pipeline 首先尝试 legacy 模式（2 个 WebACL）。如果 IP set 引用语句超过每个 WebACL 的**硬限制（50，不可通过 Service Quotas 提额）**，自动回退为 **per-domain WebACL**——每个 proxied 域名一个 WebACL。Host-specific 规则只放到对应域名的 WebACL，冗余的 host 条件被剥离。每个 WebACL 包含搜索引擎标签规则、Anti-DDoS 防护和 always-on challenge 规则。生成的部署手册包含 Quota Usage 表格，显示每个 WebACL 的实际引用数。详见生成的部署指南中的部署后检查清单。

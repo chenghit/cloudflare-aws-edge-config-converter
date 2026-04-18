@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-04-18
+
+### Bug fixes and improvements
+
+**CFF query string bug (P0)**: `request.rawQueryString()` does not exist in CloudFront Functions — replaced with `_qs()` helper that reconstructs raw query string from the parsed `request.querystring` object, handling multi-value parameters.
+
+**WAF IP set reference count bugs**: The pre-check script (`waf-check-split.py`) had three counting bugs — overcounting unreferenced IP lists, undercounting multi-rule references, and including non-convertible rules. Deleted the pre-check entirely. The pipeline now tries legacy mode first and automatically falls back to per-domain split when reference statements exceed the per-WebACL hard limit of 50.
+
+**What changed**:
+- Deleted: `waf-check-split.py` (inaccurate pre-check replaced by try-then-fallback)
+- Modified: `waf-generate-cfn.py` — CLI args (`--split`, `--force-no-split`), auto-fallback exit code, unreferenced IP set cleanup, dedup fully internal, per-domain PARTIAL support, quota metadata output
+- Modified: `waf-pipeline.sh` — three-way branch (default/force-split/force-no-split), `POST_ACTION` translation reminder
+- Modified: `waf-generate-readme.py` — Quota Usage section with actual IP set count and per-WebACL reference counts
+- Modified: `cdn-generate-js.py` — `_qs()` helper for CFF query string reconstruction
+- Fixed: unclosed file handles in `waf-merge-ir.py`, `waf-analyze-custom.py`, `waf-count-validate.py`
+- Fixed: shell variable injection in `waf-pipeline.sh`
+
 ## 2026-04-16
 
 ### CDN Stages 1-2 replaced with Python — entire tool is now zero LLM

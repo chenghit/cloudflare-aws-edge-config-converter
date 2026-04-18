@@ -65,9 +65,9 @@ Not all Cloudflare features have CloudFront equivalents. Non-convertible items a
 
 The tool runs as a Kiro CLI skill with an orchestrator that runs deterministic Python scripts for both WAF and CDN pipelines.
 
-**WAF pipeline** (all Python, zero LLM): analyze IP lists → analyze custom rules → analyze rate limits → merge → validate → **auto-split decision** → generate CloudFormation
+**WAF pipeline** (all Python, zero LLM): analyze IP lists → analyze custom rules → analyze rate limits → merge → validate → generate CloudFormation → **auto-fallback to per-domain split if ref limit exceeded**
 
-The WAF pipeline automatically detects when inline IP sets exceed the 50 per-WebACL reference limit and switches to per-domain WebACLs (one per proxied domain). In per-domain mode, host-specific rules are placed only in the relevant domain's WebACL, and host conditions are stripped (redundant when a WebACL serves one domain). Each WebACL includes search engine labeling (Googlebot/Bingbot/YandexBot), Anti-DDoS with search engine exclusion, and an always-on challenge rule (Count mode — user activates after review).
+The WAF pipeline first tries legacy mode (2 WebACLs). If IP set reference statements exceed the per-WebACL hard limit of 50, it automatically falls back to per-domain WebACLs (one per proxied domain). In per-domain mode, host-specific rules are placed only in the relevant domain's WebACL, and host conditions are stripped (redundant when a WebACL serves one domain). Each WebACL includes search engine labeling (Googlebot/Bingbot/YandexBot), Anti-DDoS with search engine exclusion, and an always-on challenge rule (Count mode — user activates after review).
 
 **CDN pipeline** (0 LLM stages + 10 Python scripts): **parse DNS + generate scope (Python)** → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → **generate shared policies (Python)** → **generate per-domain Terraform scaffold (Python)** → **generate per-domain test scripts (Python)** → **generate per-domain JS (Python)** → **validate JS (Python)**
 
@@ -77,8 +77,9 @@ All CDN stages are deterministic Python scripts. No LLM subagents. No user inter
 flowchart TD
     User([User]) -->|"Convert WAF / CDN / All"| Main["Orchestrator"]
 
-    Main -->|WAF| WAF_A1["🐍 IP Analyzer"] --> WAF_A2["🐍 Custom Rules"] --> WAF_A3["🐍 Rate Limits"] --> WAF_M["🐍 Merge + Validate"] --> WAF_S{"🐍 Split?"} -->|"≤50 IP sets"| WAF_G["🐍 Generate CFN (2 WebACLs)"] --> WAF_Done([CloudFormation ✅])
-    WAF_S -->|">50 IP sets"| WAF_SP["🐍 Split by Host"] --> WAF_GP["🐍 Generate CFN (per-domain)"] --> WAF_Done
+    Main -->|WAF| WAF_A1["🐍 IP Analyzer"] --> WAF_A2["🐍 Custom Rules"] --> WAF_A3["🐍 Rate Limits"] --> WAF_M["🐍 Merge + Validate"] --> WAF_G["🐍 Generate CFN (legacy)"] --> WAF_C{Ref limit?}
+    WAF_C -->|"≤50"| WAF_Done([CloudFormation ✅])
+    WAF_C -->|">50"| WAF_SP["🐍 Split by Host"] --> WAF_GP["🐍 Generate CFN (per-domain)"] --> WAF_Done
 
     Main -->|CDN| CDN1["🐍 DNS Parser"] --> CDN3["🐍 Preprocess"]
     CDN3 --> CDN4["🐍 V1 Validate"]
@@ -195,10 +196,10 @@ The tool generates a `data "aws_acm_certificate"` lookup that finds your existin
 <summary>AWS WAF quotas to be aware of</summary>
 
 - **IP sets per account per region**: 100 (soft limit, can request increase via support case)
-- **IP set + regex set references per WebACL**: 50 (hard limit, cannot be increased)
+- **IP set + regex set references per WebACL**: 50 (**hard limit**, cannot be increased via Service Quotas)
 - **WebACLs per account per region**: 100 (soft limit)
 
-The pipeline automatically switches to per-domain WebACLs when total IP sets exceed 50, and enables cross-rule IP set deduplication when inline IP sets exceed 100. See [Why CloudFormation](./docs/why-cloudformation.md) for details.
+The pipeline first tries legacy mode (2 WebACLs). If reference statements exceed the per-WebACL hard limit of 50, it automatically falls back to per-domain WebACLs and enables cross-rule IP set deduplication when inline IP sets exceed 100. The generated deployment README includes a Quota Usage section showing actual consumption vs limits. See [Why CloudFormation](./docs/why-cloudformation.md) for details.
 
 </details>
 

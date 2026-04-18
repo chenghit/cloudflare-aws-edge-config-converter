@@ -24,13 +24,12 @@ Orchestrate conversion of Cloudflare configurations to AWS by running determinis
 | `waf-merge-ir.py` | Python | Merge 3 batch IR files |
 | `waf-count-validate.py` | Python | Verify rule counts match source |
 | `waf-validate-ir.py` | Python | Round-trip validation + consistency checks |
-| `waf-check-split.py` | Python | Auto-decide: legacy (2 WebACLs) vs per-domain split based on IP set count |
 | `waf-split-by-host.py` | Python | Split IR by domain — strip host conditions, re-derive scope-down |
 | `waf-generate-cfn.py` | Python | IR JSON → CloudFormation template (legacy or per-domain WebACLs) |
 
 **No LLM subagents are used in the WAF pipeline.** All analysis, validation, and generation is deterministic Python.
 
-**Auto-split**: If total IP sets > 50, the pipeline automatically switches to per-domain WebACLs.
+**Auto-split**: The pipeline first tries legacy mode (2 WebACLs). If IP set reference statements exceed the per-WebACL hard limit of 50, it automatically falls back to per-domain WebACLs. Use `--force-split` to skip the legacy attempt, or `--force-no-split` to force legacy even if the limit is exceeded.
 
 ### CDN Pipeline
 
@@ -137,9 +136,12 @@ No LLM subagents are used. All stages are Python scripts invoked via `execute_ba
    ```bash
    bash ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-pipeline.sh "{config_path}" "cloudflare-to-aws-waf"
    ```
+   The pipeline tries legacy mode first. If IP set references exceed the per-WebACL hard limit (50), it automatically falls back to per-domain split. No orchestrator intervention needed.
+
    Parse the `---RESULT---` block:
    - `STATUS: OK` → proceed to Step 4.
    - `STATUS: ERROR` → report the `CONTEXT` field to the user and stop.
+   - `POST_ACTION` field → if present, follow the instruction (e.g., translate README for non-English users).
 
 ---
 

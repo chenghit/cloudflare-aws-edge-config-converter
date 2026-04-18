@@ -65,9 +65,9 @@ kiro-cli chat
 
 本工具作为 Kiro CLI skill 运行，由编排器调度确定性 Python 脚本完成 WAF 和 CDN 两条 pipeline。
 
-**WAF 流程**（全 Python，零 LLM）：分析 IP 列表 → 分析自定义规则 → 分析速率限制 → 合并 → 校验 → **自动拆分决策** → 生成 CloudFormation
+**WAF 流程**（全 Python，零 LLM）：分析 IP 列表 → 分析自定义规则 → 分析速率限制 → 合并 → 校验 → 生成 CloudFormation → **引用超限时自动回退为 per-domain 拆分**
 
-WAF pipeline 自动检测 inline IP set 是否超过每个 WebACL 50 个引用限制，超过时自动切换为 per-domain WebACL（每个 proxied 域名一个）。Per-domain 模式下，host-specific 规则只放到对应域名的 WebACL，host 条件被剥离（WebACL 只服务一个域名时冗余）。每个 WebACL 包含搜索引擎标签规则（Googlebot/Bingbot/YandexBot）、Anti-DDoS（排除搜索引擎）和 always-on challenge 规则（Count 模式——用户确认后手动改为 Challenge）。
+WAF pipeline 首先尝试 legacy 模式（2 个 WebACL）。如果 IP set 引用语句超过每个 WebACL 的 hard limit（50），自动回退为 per-domain WebACL（每个 proxied 域名一个）。Per-domain 模式下，host-specific 规则只放到对应域名的 WebACL，host 条件被剥离（WebACL 只服务一个域名时冗余）。每个 WebACL 包含搜索引擎标签规则（Googlebot/Bingbot/YandexBot）、Anti-DDoS（排除搜索引擎）和 always-on challenge 规则（Count 模式——用户确认后手动改为 Challenge）。
 
 **CDN 流程**（0 个 LLM 阶段 + 10 个 Python 脚本）：**🐍 解析 DNS + 生成域名配置** → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → **🐍 生成每域名 JS** → **🐍 校验 JS**
 
@@ -77,8 +77,9 @@ WAF pipeline 自动检测 inline IP set 是否超过每个 WebACL 50 个引用�
 flowchart TD
     User([用户]) -->|"转换 WAF / CDN / 全部"| Main["编排器"]
 
-    Main -->|WAF| WAF_A1["🐍 IP 分析"] --> WAF_A2["🐍 自定义规则"] --> WAF_A3["🐍 速率限制"] --> WAF_M["🐍 合并 + 校验"] --> WAF_S{"🐍 拆分?"} -->|"≤50 IP sets"| WAF_G["🐍 生成 CFN (2 WebACL)"] --> WAF_Done([CloudFormation ✅])
-    WAF_S -->|">50 IP sets"| WAF_SP["🐍 按域名拆分"] --> WAF_GP["🐍 生成 CFN (per-domain)"] --> WAF_Done
+    Main -->|WAF| WAF_A1["🐍 IP 分析"] --> WAF_A2["🐍 自定义规则"] --> WAF_A3["🐍 速率限制"] --> WAF_M["🐍 合并 + 校验"] --> WAF_G["🐍 生成 CFN (legacy)"] --> WAF_C{引用超限?}
+    WAF_C -->|"≤50"| WAF_Done([CloudFormation ✅])
+    WAF_C -->|">50"| WAF_SP["🐍 按域名拆分"] --> WAF_GP["🐍 生成 CFN (per-domain)"] --> WAF_Done
 
     Main -->|CDN| CDN1["🐍 DNS 解析"] --> CDN3["🐍 预处理"]
     CDN3 --> CDN4["🐍 V1 校验"]
@@ -193,10 +194,10 @@ aws acm request-certificate \
 <summary>需要了解的 AWS WAF 配额</summary>
 
 - **每账号每区域 IP set 数量**：100（软限制，可通过 support case 申请提额）
-- **每个 WebACL 的 IP set + regex set 引用数**：50（硬限制，不可提额）
+- **每个 WebACL 的 IP set + regex set 引用数**：50（**硬限制**，不可通过 Service Quotas 提额）
 - **每账号每区域 WebACL 数量**：100（软限制）
 
-当总 IP set 超过 50 时，pipeline 自动切换为 per-domain WebACL；当 inline IP set 超过 100 时，启用跨规则 IP set 去重。详见 [为什么用 CloudFormation](./docs/why-cloudformation_CN.md)。
+Pipeline 首先尝试 legacy 模式（2 个 WebACL）。如果引用语句超过每个 WebACL 的硬限制（50），自动回退为 per-domain WebACL；当 inline IP set 超过 100 时，启用跨规则 IP set 去重。生成的部署手册包含 Quota Usage 表格，显示实际使用量与限制的对比。详见 [为什么用 CloudFormation](./docs/why-cloudformation_CN.md)。
 
 </details>
 
