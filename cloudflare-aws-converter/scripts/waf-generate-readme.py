@@ -193,8 +193,16 @@ def main():
         "",
         "### Managed rules",
         "",
-        "All managed rules (CRS, Known Bad Inputs, SQLi, IP Reputation) use **Count mode** "
-        "for initial monitoring. Switch to Block after validating no false positives.",
+        "All managed rules (CRS, Known Bad Inputs, SQLi, IP Reputation) are deployed with "
+        "**Override Action: Count** (monitoring only). To activate blocking:",
+        "",
+        "1. Monitor WAF logs for 1-2 weeks to identify false positives.",
+        "2. For each managed rule group, change the Override Action from `Count` to `None` "
+        "(this lets the rule group's default actions — Block — take effect).",
+        "3. In the AWS Console: WAF → Web ACL → Rules → select the managed rule group → "
+        "Edit → set \"Override rule group action\" to **No override**.",
+        "4. Or update the CloudFormation template: change `\"OverrideAction\": {\"Count\": {}}` "
+        "to `\"OverrideAction\": {\"None\": {}}` and redeploy.",
         "",
     ]
 
