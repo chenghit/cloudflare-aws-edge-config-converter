@@ -541,7 +541,7 @@ def build_search_engine_label_rule(priority):
         "Name": "search-engine-label", "Priority": priority,
         "Action": {"Count": {}},
         "Statement": {"OrStatement": {"Statements": stmts}},
-        "RuleLabels": [{"Name": "awswaf:search-engine"}],
+        "RuleLabels": [{"Name": "custom:search-engine"}],
         "VisibilityConfig": {"SampledRequestsEnabled": True,
                              "CloudWatchMetricsEnabled": True,
                              "MetricName": "search-engine-label"},
@@ -809,7 +809,7 @@ def generate(ir):
     se_rule = build_search_engine_label_rule(0)
     wcu.add("search-engine-label", 6)
     ddos_website = build_anti_ddos_rule(1, advanced=False,
-                                         scope_down_exclude_labels=["awswaf:search-engine"])
+                                         scope_down_exclude_labels=["custom:search-engine"])
     wcu.add("AntiDDoS-website", 250)
 
     # Find where rate rules end to insert always-on challenge
@@ -1055,7 +1055,7 @@ def generate_split(split_ir):
 
         # Injected: Anti-DDoS with scope-down
         acl_rules.append(build_anti_ddos_rule(p, advanced=False,
-                                               scope_down_exclude_labels=["awswaf:search-engine"]))
+                                               scope_down_exclude_labels=["custom:search-engine"]))
         domain_wcu.add("AntiDDoS", 250)
         p += 1
 
