@@ -13,6 +13,8 @@ echo Cleaning up old installations...
 for %%D in (cf-waf-analyzer cf-waf-analyzer-validator cf-waf-terraform-generator cf-waf-converter cf-functions-converter cf-cdn-dns-parser cf-cdn-input-validator cf-cdn-per-domain-processor cf-cdn-ir-chunk-validator cf-cdn-ir-finalizer cf-cdn-ir-final-validator cf-cdn-tf-shared-policies cf-cdn-tf-domain cf-cdn-js-validator) do (
     if exist "%SKILLS_DIR%\%%D" rmdir /s /q "%SKILLS_DIR%\%%D"
 )
+if exist "%SKILLS_DIR%\SKILL.md" del /q "%SKILLS_DIR%\SKILL.md"
+if exist "%SKILLS_DIR%\scripts" rmdir /s /q "%SKILLS_DIR%\scripts"
 
 :: Remove old agent configs
 set "AGENTS_DIR=%USERPROFILE%\.kiro\agents"
