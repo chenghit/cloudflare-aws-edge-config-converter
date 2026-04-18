@@ -99,6 +99,10 @@ def process_ip_lists(config_path):
             result.append({"name": name, "kind": kind, "conversion": "out_of_scope"})
             continue
 
+        if kind == "hostname":
+            result.append({"name": name, "kind": kind, "conversion": "out_of_scope"})
+            continue
+
         if kind == "ip":
             if num_items == 0:
                 result.append({"name": name, "kind": kind, "conversion": "empty"})
