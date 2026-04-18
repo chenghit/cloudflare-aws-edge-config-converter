@@ -1,1 +1,0 @@
-netflix,disney,openai,gemini,claude
