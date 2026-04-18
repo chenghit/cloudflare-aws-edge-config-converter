@@ -47,7 +47,7 @@
       "origins": [
         {
           "name": "lb",
-          "address": "lb.c.example.com.cdn.cloudflare.com",
+          "address": "lb.example.com.cdn.cloudflare.com",
           "enabled": true,
           "weight": 1,
           "flatten_cname": true

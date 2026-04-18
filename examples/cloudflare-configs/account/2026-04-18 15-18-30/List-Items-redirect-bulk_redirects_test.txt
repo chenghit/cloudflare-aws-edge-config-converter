@@ -3,8 +3,8 @@
     {
       "id": "000000000000000000000000000000b6",
       "redirect": {
-        "source_url": "cdn.c.example.com/custom",
-        "target_url": "https://cdn.c.example.com/redirect",
+        "source_url": "cdn.example.com/custom",
+        "target_url": "https://cdn.example.com/redirect",
         "status_code": 302,
         "preserve_query_string": true
       },
@@ -14,9 +14,9 @@
     {
       "id": "000000000000000000000000000000b7",
       "redirect": {
-        "source_url": "c.example.com/about",
+        "source_url": "example.com/about",
         "include_subdomains": true,
-        "target_url": "https://cdn.c.example.com/news",
+        "target_url": "https://cdn.example.com/news",
         "status_code": 301,
         "preserve_query_string": true
       },
@@ -26,9 +26,9 @@
     {
       "id": "000000000000000000000000000000b8",
       "redirect": {
-        "source_url": "c.example.com/new_feature",
+        "source_url": "example.com/new_feature",
         "include_subdomains": true,
-        "target_url": "https://cdn.c.example.com/soon",
+        "target_url": "https://cdn.example.com/soon",
         "status_code": 302
       },
       "created_on": "2025-12-26T05:39:26Z",

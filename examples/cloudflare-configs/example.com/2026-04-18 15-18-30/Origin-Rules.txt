@@ -10,14 +10,14 @@
       {
         "action": "route",
         "action_parameters": {
-          "host_header": "www.c.example.com",
+          "host_header": "www.example.com",
           "sni": {
-            "value": "www.c.example.com"
+            "value": "www.example.com"
           }
         },
         "description": "Rewrites Host and SNI",
         "enabled": true,
-        "expression": "(http.request.full_uri wildcard \"https://cdn.c.example.com/host/*\")",
+        "expression": "(http.request.full_uri wildcard \"https://cdn.example.com/host/*\")",
         "id": "00000000000000000000000000000009",
         "last_updated": "2025-12-29T02:59:24.048928Z",
         "ref": "00000000000000000000000000000009",
@@ -26,11 +26,11 @@
       {
         "action": "route",
         "action_parameters": {
-          "host_header": "gs-top-query-cache-ru.rus-mosc.example.com"
+          "host_header": "gs-top-query-cache-ru.rus-mosexample.com"
         },
         "description": "gsquery-ru",
         "enabled": true,
-        "expression": "(http.host eq \"gsquery.c.example.com\" and ip.src.country eq \"RU\")",
+        "expression": "(http.host eq \"gsquery.example.com\" and ip.src.country eq \"RU\")",
         "id": "0000000000000000000000000000000a",
         "last_updated": "2026-02-04T08:06:30.745975Z",
         "ref": "0000000000000000000000000000000a",
@@ -43,7 +43,7 @@
         },
         "description": "gsquery-in",
         "enabled": true,
-        "expression": "(http.host eq \"gsquery.c.example.com\" and ip.src.country eq \"IN\")",
+        "expression": "(http.host eq \"gsquery.example.com\" and ip.src.country eq \"IN\")",
         "id": "0000000000000000000000000000000b",
         "last_updated": "2026-02-04T08:11:33.126416Z",
         "ref": "0000000000000000000000000000000b",
@@ -56,7 +56,7 @@
         },
         "description": "gsquery-EU",
         "enabled": true,
-        "expression": "(http.host eq \"gsquery.c.example.com\" and ip.src.continent eq \"EU\")",
+        "expression": "(http.host eq \"gsquery.example.com\" and ip.src.continent eq \"EU\")",
         "id": "0000000000000000000000000000000c",
         "last_updated": "2026-02-04T08:12:49.243564Z",
         "ref": "0000000000000000000000000000000c",
@@ -69,7 +69,7 @@
         },
         "description": "gsquery-default",
         "enabled": true,
-        "expression": "(http.host eq \"gsquery.c.example.com\")",
+        "expression": "(http.host eq \"gsquery.example.com\")",
         "id": "0000000000000000000000000000000d",
         "last_updated": "2026-02-04T08:13:52.7122Z",
         "ref": "0000000000000000000000000000000d",
