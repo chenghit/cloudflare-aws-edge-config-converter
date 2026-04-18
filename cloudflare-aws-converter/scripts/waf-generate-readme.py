@@ -243,8 +243,9 @@ def main():
         ]
 
     lines += [
-        "- **IP sets quota**: Default 100 IP sets per account per region.",
-        "- **WebACL quota**: Default 100 WebACLs per account per region.",
+        "- **IP set + regex set references per WebACL**: 50 (**hard limit**, cannot be increased via Service Quotas).",
+        "- **IP sets per account per region**: 100 (soft limit, can request increase).",
+        "- **WebACLs per account per region**: 100 (soft limit, can request increase).",
         "- **Rate-based rules**: AWS WAF minimum rate limit is 10 requests per evaluation window.",
         "",
         "## Migration from Terraform",
