@@ -365,9 +365,9 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
 
     cff_count = len(all_irs) * 2  # viewer_request + viewer_response per domain
     if cff_count > 100:
-        all_warnings.append(f"CloudFront Functions: ~{cff_count} (default quota: 100). Request quota increase.")
+        all_warnings.append(f"CloudFront Functions: ~{cff_count} (default quota: 100). Request increase via AWS Support case (not available in Service Quotas).")
     elif cff_count > 80:
-        all_warnings.append(f"CloudFront Functions: ~{cff_count} (default quota: 100). Approaching limit.")
+        all_warnings.append(f"CloudFront Functions: ~{cff_count} (default quota: 100). Approaching limit — increase requires AWS Support case.")
 
     # CORS credentials + wildcard check
     for pid, entry in manifest.items():

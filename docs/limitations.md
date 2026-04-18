@@ -77,6 +77,7 @@ CloudFront Functions have a 10 KB size limit after minification. When a domain's
 
 | Resource | Limit | What happens when exceeded |
 |----------|-------|---------------------------|
+| CloudFront Functions per account | 100 | Warning in conversion report. Increase requires AWS Support case (not available in Service Quotas) |
 | Cache behaviors per distribution | 75 | Pipeline error — reduce Cloudflare rules |
 | Cache policy headers (whitelist) | 10 | Marked non_convertible |
 | Cache policy cookies (whitelist) | 10 | Marked non_convertible |
