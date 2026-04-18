@@ -27,7 +27,7 @@ Convert all Cloudflare configuration in ./examples/cloudflare-configs/ to AWS
 
 ## Before You Deploy
 
-These example configs use `example.com` as the zone name, with subdomains like `cdn.c.example.com`, `www.c.example.com`, etc. If you only want to run the conversion pipeline and inspect the generated Terraform/JS output, you can use them as-is — no changes needed.
+These example configs use `example.com` as the zone name, with subdomains like `cdn.example.com`, `www.example.com`, etc. If you only want to run the conversion pipeline and inspect the generated Terraform/JS output, you can use them as-is — no changes needed.
 
 However, if you want to actually deploy the generated CloudFront distributions to AWS, you must replace the domain names with a real public domain you own:
 
