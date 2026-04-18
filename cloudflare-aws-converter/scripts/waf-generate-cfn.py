@@ -505,7 +505,10 @@ def build_anti_ddos_rule(priority, advanced=False, scope_down_exclude_labels=Non
         mrg["ManagedRuleGroupConfigs"] = [{
             "AWSManagedRulesAntiDDoSRuleSet": {
                 "ClientSideActionConfig": {"Challenge": {
-                    "UsageOfAction": "ENABLED", "Sensitivity": "HIGH"}},
+                    "UsageOfAction": "ENABLED", "Sensitivity": "HIGH",
+                    "ExemptUriRegularExpressions": [
+                        {"RegexString": "\\/api\\/|\\.(acc|avi|css|gif|jpe?g|js|mp[34]|ogg|otf|pdf|png|tiff?|ttf|webm|webp|woff2?)$"}
+                    ]}},
                 "SensitivityToBlock": "LOW"}}]
     if scope_down_exclude_labels:
         if len(scope_down_exclude_labels) == 1:
