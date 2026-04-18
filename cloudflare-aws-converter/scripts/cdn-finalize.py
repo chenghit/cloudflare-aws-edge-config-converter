@@ -429,7 +429,7 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         if len(sample) > 5:
             paths += f" (+{len(sample) - 5} more)"
         all_warnings.append(
-            f"CFF global association ({len(cff_no_ops)} domains: {domains_str}): "
+            f"CFF global association ({len(cff_no_ops)} domains): "
             f"cache behaviors with no path-specific rules (e.g. {paths}) "
             f"still have CloudFront Functions associated. "
             f"In Cloudflare, bulk redirects and request header transforms apply zone-wide "
@@ -526,11 +526,13 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "checksum mismatch errors when deploying multiple domains sequentially.",
         "",
         "```bash",
+        "for d in cloudflare-to-aws-cdn/terraform/domains/*/; do",
+        '  echo "Deploying $(basename $d)..."',
+        "  (cd \"$d\" && terraform init -upgrade && terraform apply -auto-approve)",
+        "done",
+        "```",
+        "",
     ]
-    for m in domain_list:
-        san = m["sanitized_name"]
-        lines.append(f"cd cloudflare-to-aws-cdn/terraform/domains/{san} && terraform init -upgrade && terraform apply")
-    lines += ["```", ""]
 
     if domains_with_kvs:
         step_kvs = 4
@@ -544,12 +546,12 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
             "`terraform apply` has not completed.",
             "",
             "```bash",
+            "for d in cloudflare-to-aws-cdn/terraform/domains/*/; do",
+            '  [ -f "$d/seed-kvs.py" ] && (cd "$d" && python3 seed-kvs.py)',
+            "done",
+            "```",
+            "",
         ]
-        for m in domain_list:
-            if any(m.get("kvs_requirements", {}).values()):
-                san = m["sanitized_name"]
-                lines.append(f"cd cloudflare-to-aws-cdn/terraform/domains/{san} && python3 seed-kvs.py")
-        lines += ["```", ""]
 
     step_n = 5 if domains_with_kvs else 4
     lines += [
@@ -559,11 +561,10 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "Run it against the CloudFront distribution domain name:",
         "",
         "```bash",
-    ]
-    for m in domain_list:
-        san = m["sanitized_name"]
-        lines.append(f"cd cloudflare-to-aws-cdn/terraform/domains/{san} && python3 test-cdn-rules.py <distribution-domain>")
-    lines += [
+        "for d in cloudflare-to-aws-cdn/terraform/domains/*/; do",
+        '  DIST=$(cd "$d" && terraform output -raw distribution_domain_name 2>/dev/null)',
+        '  [ -n "$DIST" ] && (cd "$d" && python3 test-cdn-rules.py "$DIST")',
+        "done",
         "```",
         "",
         "The script tests redirects, error pages, bulk redirects, and response headers "
@@ -576,16 +577,14 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     lines += [
         f"### {step_n}. DNS cutover",
         "",
-        "Update DNS records to point to CloudFront distributions:",
-        "",
-    ]
-    for m in domain_list:
-        lines.append(f"- `{m['hostname']}` → CNAME to CloudFront distribution domain name")
-    lines += [
+        f"Update DNS records for all {len(domain_list)} domains to point to their "
+        "CloudFront distribution domain names (CNAME records).",
         "",
         "Get each distribution's domain name:",
         "```bash",
-        "cd cloudflare-to-aws-cdn/terraform/domains/<domain> && terraform output distribution_domain_name",
+        "for d in cloudflare-to-aws-cdn/terraform/domains/*/; do",
+        '  echo "$(basename $d): $(cd "$d" && terraform output -raw distribution_domain_name 2>/dev/null)"',
+        "done",
         "```",
         "",
     ]

@@ -70,6 +70,21 @@ def main():
     ip_lists_count = len([l for l in ir.get("ip_lists", [])
                           if l.get("conversion") == "ip_set"])
 
+    ip_sets_total = meta.get("ip_sets_total", 0)
+    compact_size = meta.get("compact_size", 0)
+
+    # WCU display
+    if mode == "legacy":
+        wcu_val = meta.get("ref_count_per_webacl", 0)  # not WCU, but we need WCU from IR
+    ref_count_display = ""
+    if mode == "legacy":
+        ref_count_display = f"{meta.get('ref_count_per_webacl', 0)}/50 per WebACL"
+    else:
+        domain_refs = meta.get("ref_counts_per_domain", {})
+        if domain_refs:
+            max_ref = max(domain_refs.values())
+            ref_count_display = f"{max_ref}/50 max per WebACL"
+
     lines = [
         "# AWS WAF CloudFormation Deployment Guide",
         "",
@@ -77,13 +92,77 @@ def main():
         "",
         f"- Mode: **{'per-domain WebACLs' if mode == 'split' else 'legacy (2 WebACLs)'}**",
         f"- WebACLs: {len(webacl_names)}",
-        f"- IP lists converted: {ip_lists_count}",
+        f"- IP sets: {ip_sets_total}",
         f"- IP access rules: {ip_count}",
         f"- Custom rules: {custom_count}",
         f"- Rate limiting rules: {rate_count}",
         f"- Non-convertible items: {len(nc_notes)}",
         f"- Partially converted rules: {len(partial_rules)}",
+        f"- Reference statements: {ref_count_display}",
         "",
+    ]
+
+    # Quota usage summary (right after Overview for visibility)
+    lines += [
+        "## Quota Usage",
+        "",
+        "| Resource | Used | Limit | Notes |",
+        "|----------|------|-------|-------|",
+        f"| IP sets | {ip_sets_total} | 100 per region | Soft limit, can request increase |",
+        f"| WebACLs | {len(webacl_names)} | 100 per region | Soft limit, can request increase |",
+    ]
+
+    if mode == "legacy":
+        ref_count = meta.get("ref_count_per_webacl", 0)
+        lines.append(f"| Ref statements (per WebACL) | {ref_count} | 50 | **Hard limit** — both WebACLs share the same rules |")
+    else:
+        domain_refs = meta.get("ref_counts_per_domain", {})
+        if domain_refs:
+            max_ref = max(domain_refs.values())
+            max_domain = [d for d, c in domain_refs.items() if c == max_ref][0]
+            lines.append(f"| Ref statements (max per WebACL) | {max_ref} | 50 | **Hard limit** — highest: {max_domain} |")
+
+    lines += [
+        "",
+    ]
+
+    # Per-WebACL detail (collapsible for large configs)
+    if mode == "legacy":
+        ref_count = meta.get("ref_count_per_webacl", 0)
+        lines += [
+            "<details>",
+            "<summary>Per-WebACL reference statement detail</summary>",
+            "",
+            "| WebACL | Ref Statements | Status |",
+            "|--------|---------------|--------|",
+            f"| waf-website | {ref_count}/50 | {'⚠️ Near limit' if ref_count > 40 else '✅ OK'} |",
+            f"| waf-api-file | {ref_count}/50 | {'⚠️ Near limit' if ref_count > 40 else '✅ OK'} |",
+            "",
+            "</details>",
+            "",
+        ]
+    else:
+        domain_refs = meta.get("ref_counts_per_domain", {})
+        if domain_refs:
+            lines += [
+                "<details>",
+                "<summary>Per-WebACL reference statement detail</summary>",
+                "",
+                "| WebACL (domain) | Ref Statements | Status |",
+                "|-----------------|---------------|--------|",
+            ]
+            for domain in sorted(domain_refs):
+                count = domain_refs[domain]
+                if count > 50:
+                    status = "❌ Exceeded — WebACL not created"
+                elif count > 40:
+                    status = "⚠️ Near limit"
+                else:
+                    status = "✅ OK"
+                lines.append(f"| {domain} | {count}/50 | {status} |")
+            lines += ["", "</details>", ""]
+
+    lines += [
         "## Prerequisites",
         "",
         "- AWS CLI v2",
@@ -359,58 +438,6 @@ def main():
         "- **Rate-based rules**: AWS WAF minimum rate limit is 10 requests per evaluation window.",
         "",
     ]
-
-    # Quota usage summary
-    ip_sets_total = meta.get("ip_sets_total", 0)
-    lines += [
-        "## Quota Usage",
-        "",
-        f"| Resource | Used | Limit | Notes |",
-        f"|----------|------|-------|-------|",
-        f"| IP sets | {ip_sets_total} | 100 per region | Soft limit, can request increase |",
-        f"| WebACLs | {len(webacl_names)} | 100 per region | Soft limit, can request increase |",
-    ]
-
-    if mode == "legacy":
-        ref_count = meta.get("ref_count_per_webacl", 0)
-        lines.append(f"| Ref statements (per WebACL) | {ref_count} | 50 | **Hard limit** — both WebACLs share the same rules |")
-    else:
-        domain_refs = meta.get("ref_counts_per_domain", {})
-        if domain_refs:
-            max_ref = max(domain_refs.values())
-            max_domain = [d for d, c in domain_refs.items() if c == max_ref][0]
-            lines.append(f"| Ref statements (max per WebACL) | {max_ref} | 50 | **Hard limit** — highest: {max_domain} |")
-
-    lines += [
-        "",
-        "Per-WebACL reference statement detail:",
-        "",
-    ]
-
-    if mode == "legacy":
-        ref_count = meta.get("ref_count_per_webacl", 0)
-        lines += [
-            "| WebACL | Ref Statements | Status |",
-            "|--------|---------------|--------|",
-            f"| waf-website | {ref_count}/50 | {'⚠️ Near limit' if ref_count > 40 else '✅ OK'} |",
-            f"| waf-api-file | {ref_count}/50 | {'⚠️ Near limit' if ref_count > 40 else '✅ OK'} |",
-        ]
-    else:
-        domain_refs = meta.get("ref_counts_per_domain", {})
-        if domain_refs:
-            lines += [
-                "| WebACL (domain) | Ref Statements | Status |",
-                "|-----------------|---------------|--------|",
-            ]
-            for domain in sorted(domain_refs):
-                count = domain_refs[domain]
-                if count > 50:
-                    status = "❌ Exceeded — WebACL not created"
-                elif count > 40:
-                    status = "⚠️ Near limit"
-                else:
-                    status = "✅ OK"
-                lines.append(f"| {domain} | {count}/50 | {status} |")
 
     lines += [
         "",
