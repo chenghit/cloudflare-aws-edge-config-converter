@@ -205,7 +205,11 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "",
         "---",
         "",
-        "## Shadowed Rules",
+        "## Overlapping Cache Behaviors",
+        "",
+        "When two cache behaviors have overlapping path patterns (e.g., `/api/*` and `/api/v1/*`), "
+        "the more specific pattern may be unreachable because CloudFront evaluates behaviors "
+        "in order. These are flagged below.",
         "",
     ]
 
@@ -223,11 +227,11 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
                                 f"{nc['reason'][:60]}... | shadowed |"
                             )
     else:
-        lines.append("No shadowed rules detected.")
+        lines.append("No overlapping cache behaviors detected.")
 
     lines += ["", "---", "", "## Domain Summary", ""]
-    lines.append("| Domain | Behaviors | Ops | Non-Convertible | Shadowed | Status |")
-    lines.append("|--------|-----------|-----|-----------------|----------|--------|")
+    lines.append("| Domain | Behaviors | Ops | Non-Convertible | Overlapping | Status |")
+    lines.append("|--------|-----------|-----|-----------------|-------------|--------|")
     for ir in all_irs:
         h = ir["metadata"]["hostname"]
         nb = len(ir["cache_behaviors"])
@@ -286,7 +290,7 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     lines += ["", "---", "", "## Policy Deduplication Summary", ""]
     shared = {pid: v for pid, v in manifest.items() if v["count"] > 1}
     if shared:
-        lines.append("| Policy ID | Type | Used By (count) | Sample Domain |")
+        lines.append("| Policy ID | Type | Cache Behaviors | Sample Domain |")
         lines.append("|-----------|------|-----------------|---------------|")
         for pid in sorted(shared):
             v = shared[pid]
@@ -365,9 +369,15 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
 
     cff_count = len(all_irs) * 2  # viewer_request + viewer_response per domain
     if cff_count > 100:
-        all_warnings.append(f"CloudFront Functions: ~{cff_count} (default quota: 100). Request increase via AWS Support case (not available in Service Quotas).")
+        cff_warning = (f"⚠️ **CloudFront Functions: ~{cff_count} (default quota: 100).** "
+                       f"Deployment will fail unless you request a quota increase via "
+                       f"AWS Support case (not available in Service Quotas). "
+                       f"Alternatively, deploy only a subset of domains — see Step 3.")
     elif cff_count > 80:
-        all_warnings.append(f"CloudFront Functions: ~{cff_count} (default quota: 100). Approaching limit — increase requires AWS Support case.")
+        cff_warning = (f"⚠️ CloudFront Functions: ~{cff_count} (default quota: 100). "
+                       f"Approaching limit — increase requires AWS Support case.")
+    else:
+        cff_warning = None
 
     # CORS credentials + wildcard check
     for pid, entry in manifest.items():
@@ -440,6 +450,10 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
             f"function_association block — but bulk redirects and unconditional header "
             f"mutations will no longer apply to that path."
         )
+
+    if cff_warning:
+        lines.append(cff_warning)
+        lines.append("")
 
     if all_warnings:
         for w in all_warnings:
