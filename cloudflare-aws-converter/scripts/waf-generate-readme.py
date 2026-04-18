@@ -27,10 +27,11 @@ def main():
     with open(ir_path) as f:
         ir = json.load(f)
 
-    # Detect mode and dedup from metadata written by generate-cfn
+    # Detect mode, dedup, and quota data from metadata written by generate-cfn
     meta_path = os.path.join(output_dir, "waf_metadata.json")
     mode = "legacy"
     dedup = False
+    meta = {}
     if os.path.exists(meta_path):
         with open(meta_path) as f:
             meta = json.load(f)
@@ -247,6 +248,62 @@ def main():
         "- **IP sets per account per region**: 100 (soft limit, can request increase).",
         "- **WebACLs per account per region**: 100 (soft limit, can request increase).",
         "- **Rate-based rules**: AWS WAF minimum rate limit is 10 requests per evaluation window.",
+        "",
+    ]
+
+    # Quota usage summary
+    ip_sets_total = meta.get("ip_sets_total", 0)
+    lines += [
+        "## Quota Usage",
+        "",
+        f"| Resource | Used | Limit | Notes |",
+        f"|----------|------|-------|-------|",
+        f"| IP sets | {ip_sets_total} | 100 per region | Soft limit, can request increase |",
+        f"| WebACLs | {len(webacl_names)} | 100 per region | Soft limit, can request increase |",
+    ]
+
+    if mode == "legacy":
+        ref_count = meta.get("ref_count_per_webacl", 0)
+        lines.append(f"| Ref statements (per WebACL) | {ref_count} | 50 | **Hard limit** — both WebACLs share the same rules |")
+    else:
+        domain_refs = meta.get("ref_counts_per_domain", {})
+        if domain_refs:
+            max_ref = max(domain_refs.values())
+            max_domain = [d for d, c in domain_refs.items() if c == max_ref][0]
+            lines.append(f"| Ref statements (max per WebACL) | {max_ref} | 50 | **Hard limit** — highest: {max_domain} |")
+
+    lines += [
+        "",
+        "Per-WebACL reference statement detail:",
+        "",
+    ]
+
+    if mode == "legacy":
+        ref_count = meta.get("ref_count_per_webacl", 0)
+        lines += [
+            "| WebACL | Ref Statements | Status |",
+            "|--------|---------------|--------|",
+            f"| waf-website | {ref_count}/50 | {'⚠️ Near limit' if ref_count > 40 else '✅ OK'} |",
+            f"| waf-api-file | {ref_count}/50 | {'⚠️ Near limit' if ref_count > 40 else '✅ OK'} |",
+        ]
+    else:
+        domain_refs = meta.get("ref_counts_per_domain", {})
+        if domain_refs:
+            lines += [
+                "| WebACL (domain) | Ref Statements | Status |",
+                "|-----------------|---------------|--------|",
+            ]
+            for domain in sorted(domain_refs):
+                count = domain_refs[domain]
+                if count > 50:
+                    status = "❌ Exceeded — WebACL not created"
+                elif count > 40:
+                    status = "⚠️ Near limit"
+                else:
+                    status = "✅ OK"
+                lines.append(f"| {domain} | {count}/50 | {status} |")
+
+    lines += [
         "",
         "## Migration from Terraform",
         "",

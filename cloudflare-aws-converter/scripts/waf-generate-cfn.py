@@ -895,7 +895,7 @@ def generate(ir):
         "Outputs": outputs,
     }
 
-    return template, wcu, warnings, errors
+    return template, wcu, refs, warnings, errors
 
 
 def generate_split(split_ir):
@@ -1012,6 +1012,7 @@ def generate_split(split_ir):
     seen_warnings = set()
     all_referenced_ids = set()
     exceeded_domains = []
+    domain_ref_counts = {}  # domain → ref count for quota reporting
 
     for domain, domain_data in split_ir.get("domains", {}).items():
         domain_wcu = WCUTracker()
@@ -1175,9 +1176,11 @@ def generate_split(split_ir):
         # Check per-WebACL IP set refs (hard limit: 50)
         if refs.count > MAX_REF_STATEMENTS:
             exceeded_domains.append(f"{domain}: {refs.count} refs > {MAX_REF_STATEMENTS}")
+            domain_ref_counts[domain] = refs.count
             # Don't merge referenced_ids — avoid orphan IP sets in template
             continue
 
+        domain_ref_counts[domain] = refs.count
         all_referenced_ids |= refs.referenced_ids
 
         # Deduplicate warnings
@@ -1243,7 +1246,7 @@ def generate_split(split_ir):
         "Outputs": outputs,
     }
 
-    return template, max_wcu, max_wcu_domain, warnings, errors, exceeded_domains, dedup
+    return template, max_wcu, max_wcu_domain, warnings, errors, exceeded_domains, dedup, domain_ref_counts
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -1265,7 +1268,7 @@ def main():
             sys.exit(1)
         with open(split_path) as f:
             split_ir = json.load(f)
-        template, max_wcu_val, max_wcu_domain, warnings, errors, exceeded_domains, dedup = generate_split(split_ir)
+        template, max_wcu_val, max_wcu_domain, warnings, errors, exceeded_domains, dedup, domain_ref_counts = generate_split(split_ir)
         wcu_display = f"WCU={max_wcu_val} (max, {max_wcu_domain})"
     else:
         ir_path = os.path.join(output_dir, "waf_ir.json")
@@ -1274,16 +1277,25 @@ def main():
             sys.exit(1)
         with open(ir_path) as f:
             ir = json.load(f)
-        template, wcu, warnings, errors = generate(ir)
+        template, wcu, refs, warnings, errors = generate(ir)
         max_wcu_val = wcu.total
         wcu_display = f"WCU={wcu.total}"
         exceeded_domains = []
         dedup = False
+        domain_ref_counts = {}
+
+    # Count resources for metadata
+    num_ip_sets = sum(1 for r in template["Resources"].values() if r["Type"] == "AWS::WAFv2::IPSet")
 
     # Write metadata for downstream scripts (readme)
+    meta = {"mode": mode, "dedup": dedup, "ip_sets_total": num_ip_sets}
+    if mode == "legacy":
+        meta["ref_count_per_webacl"] = refs.count
+    else:
+        meta["ref_counts_per_domain"] = domain_ref_counts
     meta_path = os.path.join(output_dir, "waf_metadata.json")
     with open(meta_path, "w") as f:
-        json.dump({"mode": mode, "dedup": dedup}, f)
+        json.dump(meta, f, indent=2)
 
     # Write template
     out_path = os.path.join(output_dir, "waf-cloudformation.json")
