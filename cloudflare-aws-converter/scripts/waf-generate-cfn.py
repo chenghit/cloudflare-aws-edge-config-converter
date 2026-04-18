@@ -85,11 +85,15 @@ class RefCounter:
     def __init__(self):
         self.count = 0
         self.referenced_ids = set()
+        self.referenced_asn_lists = set()
 
     def add(self, logical_id=None):
         self.count += 1
         if logical_id:
             self.referenced_ids.add(logical_id)
+
+    def add_asn(self, list_name):
+        self.referenced_asn_lists.add(list_name)
 
 
 # ── Condition → Statement conversion ─────────────────────────────────────────
@@ -291,6 +295,7 @@ def _build_ip_statement(value, ctx, cond=None):
         # ASN list referenced as $name
         asn_id = ctx["ip_list_map"].get(list_name)
         if asn_id == "__asn__":
+            ctx["refs"].add_asn(list_name)
             asns = ctx["asn_lists"].get(list_name, [])
             return _build_asn_from_list(asns, ctx)
         ctx["warnings"].append(f"IP list '${list_name}' not found in ip_lists")
@@ -321,6 +326,7 @@ def _build_asn_statement(value, ctx):
     value_str = str(value)
     if value_str.startswith("$"):
         list_name = value_str[1:]
+        ctx["refs"].add_asn(list_name)
         asns = ctx["asn_lists"].get(list_name, [])
     elif value_str.startswith("{"):
         asns = [int(x) for x in value_str[1:-1].split() if x.strip()]
@@ -865,6 +871,10 @@ def generate(ir):
         del resources[lid]
         warnings.append(f"IP set '{name}' not referenced by any rule — removed")
 
+    for name in asn_lists:
+        if name not in refs.referenced_asn_lists:
+            warnings.append(f"ASN list '{name}' not referenced by any rule")
+
     # ── Quota validation ─────────────────────────────────────────────────────
 
     errors = []
@@ -1011,6 +1021,7 @@ def generate_split(split_ir):
     max_wcu_domain = ""
     seen_warnings = set()
     all_referenced_ids = set()
+    all_referenced_asn_lists = set()
     exceeded_domains = []
     domain_ref_counts = {}  # domain → ref count for quota reporting
 
@@ -1182,6 +1193,7 @@ def generate_split(split_ir):
 
         domain_ref_counts[domain] = refs.count
         all_referenced_ids |= refs.referenced_ids
+        all_referenced_asn_lists |= refs.referenced_asn_lists
 
         # Deduplicate warnings
         for w in list(warnings):
@@ -1212,6 +1224,10 @@ def generate_split(split_ir):
         name = resources[lid]["Properties"]["Name"]
         del resources[lid]
         warnings.append(f"IP set '{name}' not referenced by any rule — removed")
+
+    for name in asn_lists:
+        if name not in all_referenced_asn_lists:
+            warnings.append(f"ASN list '{name}' not referenced by any rule")
 
     # ── Quota validation ─────────────────────────────────────────────────────
 
