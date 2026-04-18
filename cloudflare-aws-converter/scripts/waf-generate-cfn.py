@@ -1316,19 +1316,20 @@ def _write_templates(template, output_dir):
     - If compact > 1MB, splits into IP set stack + WebACL batch stacks
       using Export/Fn::ImportValue for cross-stack references.
     """
-    # Add throttle chains before writing
-    _add_throttle_chains(template)
-
-    # Always write readable version (full template, indented)
+    # Always write readable version (full template, indented — no throttle chains, for human reading)
     readable_path = os.path.join(output_dir, "waf-cloudformation.readable.json")
     with open(readable_path, "w") as f:
         json.dump(template, f, indent=2, ensure_ascii=False)
 
-    compact = json.dumps(template, separators=(",", ":"), ensure_ascii=False)
-    compact_size = len(compact.encode("utf-8"))
+    # Check if split is needed (before adding throttle chains)
+    compact_check = json.dumps(template, separators=(",", ":"), ensure_ascii=False)
+    compact_size = len(compact_check.encode("utf-8"))
 
     if compact_size <= CFN_S3_LIMIT:
-        # Single file
+        # Single file — add throttle chains to the whole template
+        _add_throttle_chains(template)
+        compact = json.dumps(template, separators=(",", ":"), ensure_ascii=False)
+        compact_size = len(compact.encode("utf-8"))
         out_path = os.path.join(output_dir, "waf-cloudformation.json")
         with open(out_path, "w") as f:
             f.write(compact)
@@ -1353,6 +1354,7 @@ def _write_templates(template, output_dir):
         "Resources": ipset_resources,
         "Outputs": ipset_outputs,
     }
+    _add_throttle_chains(ipset_template)
     ipset_path = os.path.join(output_dir, "waf-cloudformation-ipsets.json")
     with open(ipset_path, "w") as f:
         json.dump(ipset_template, f, separators=(",", ":"), ensure_ascii=False)
@@ -1399,6 +1401,7 @@ def _write_templates(template, output_dir):
             "Resources": batch,
             "Outputs": outputs,
         }
+        _add_throttle_chains(batch_template)
         fname = f"waf-cloudformation-webacls-{i}.json"
         batch_path = os.path.join(output_dir, fname)
         with open(batch_path, "w") as f:
