@@ -161,3 +161,29 @@
      --stack-name cloudflare-waf-migration \
      --region us-east-1
    ```
+
+## WAF CloudFormation Stack Delete Fails with ThrottlingException
+
+**Problem**: `aws cloudformation delete-stack` fails with `DELETE_FAILED` status. One or more WebACL or IP set resources fail to delete with `ThrottlingException`.
+
+**Cause**: WAFv2 API write operations (including `DeleteWebACL`, `DeleteIPSet`) are limited to **1 request per second** per account per region. This is a fixed limit that cannot be increased. CloudFormation deletes resources in parallel, which can exceed this limit when the stack contains many WAFv2 resources (e.g., 50+ WebACLs).
+
+**Solution**: Retry the delete. The second attempt only needs to delete the 1-2 remaining resources, which won't trigger throttling:
+
+```bash
+aws cloudformation delete-stack \
+  --stack-name cloudflare-waf-migration \
+  --region us-east-1
+```
+
+If the stack is stuck in `ROLLBACK_FAILED` (from a failed create), delete with `--retain-resources` for the stuck resources, then manually delete them:
+
+```bash
+# First, delete the stack and retain stuck resources
+aws cloudformation delete-stack \
+  --stack-name cloudflare-waf-migration \
+  --retain-resources StuckResource1 StuckResource2 \
+  --region us-east-1
+
+# Then manually delete the retained IP sets via AWS Console or CLI
+```

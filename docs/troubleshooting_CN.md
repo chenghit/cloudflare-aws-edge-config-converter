@@ -161,3 +161,29 @@
      --stack-name cloudflare-waf-migration \
      --region us-east-1
    ```
+
+## WAF CloudFormation Stack 删除失败（ThrottlingException）
+
+**问题**：`aws cloudformation delete-stack` 失败，stack 状态变为 `DELETE_FAILED`。一个或多个 WebACL 或 IP set 资源删除失败，报 `ThrottlingException`。
+
+**原因**：WAFv2 API 写操作（包括 `DeleteWebACL`、`DeleteIPSet`）限速为每账号每区域 **1 次/秒**，这是固定限制，不可提升。CloudFormation 并行删除资源时会超过此限制。
+
+**解决方案**：重试删除。第二次只需要删除剩余的 1-2 个资源，不会再触发限流：
+
+```bash
+aws cloudformation delete-stack \
+  --stack-name cloudflare-waf-migration \
+  --region us-east-1
+```
+
+如果 stack 卡在 `ROLLBACK_FAILED`（创建失败导致），用 `--retain-resources` 跳过卡住的资源，然后手动删除：
+
+```bash
+# 先删除 stack，保留卡住的资源
+aws cloudformation delete-stack \
+  --stack-name cloudflare-waf-migration \
+  --retain-resources StuckResource1 StuckResource2 \
+  --region us-east-1
+
+# 然后通过 AWS Console 或 CLI 手动删除保留的 IP set
+```
