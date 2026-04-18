@@ -1265,6 +1265,43 @@ def generate_split(split_ir):
     return template, max_wcu, max_wcu_domain, warnings, errors, exceeded_domains, dedup, domain_ref_counts
 
 
+# ── WAFv2 API throttle mitigation ─────────────────────────────────────────────
+
+THROTTLE_BATCH_SIZE = 5  # WAFv2 Create/Update = 1 TPS; batches of 5 with retry
+
+
+def _add_throttle_chains(template):
+    """Add DependsOn chains to WAFv2 resources to avoid API throttling.
+
+    WAFv2 write API limit is 1 TPS (fixed, non-adjustable). CloudFormation
+    creates resources in parallel by default, causing ThrottlingException
+    when many IP sets or WebACLs are created simultaneously.
+
+    Strategy: chain resources of the same type in batches. Each batch of N
+    resources depends on the previous batch's last resource, forcing serial
+    batch execution. Within a batch, resources are created in parallel
+    (CloudFormation retries handle the 1 TPS limit for small batches).
+    """
+    resources = template.get("Resources", {})
+
+    for rtype in ("AWS::WAFv2::IPSet", "AWS::WAFv2::WebACL"):
+        lids = [lid for lid, res in resources.items() if res["Type"] == rtype]
+        if len(lids) <= THROTTLE_BATCH_SIZE:
+            continue
+        # Chain: batch N depends on last resource of batch N-1
+        for i in range(THROTTLE_BATCH_SIZE, len(lids), THROTTLE_BATCH_SIZE):
+            anchor = lids[i - 1]  # last resource of previous batch
+            batch_end = min(i + THROTTLE_BATCH_SIZE, len(lids))
+            for j in range(i, batch_end):
+                res = resources[lids[j]]
+                deps = res.get("DependsOn", [])
+                if isinstance(deps, str):
+                    deps = [deps]
+                if anchor not in deps:
+                    deps.append(anchor)
+                res["DependsOn"] = deps
+
+
 # ── Template writing (compact + split if needed) ─────────────────────────────
 
 CFN_S3_LIMIT = 1_048_576  # 1 MB
@@ -1274,10 +1311,14 @@ SPLIT_TARGET = 900_000    # 900 KB per stack (leave margin)
 def _write_templates(template, output_dir):
     """Write CloudFormation template(s). Returns dict with file info.
 
+    - Adds DependsOn chains to avoid WAFv2 API throttling (1 TPS limit).
     - Always writes compact JSON for deployment + indented for reading.
     - If compact > 1MB, splits into IP set stack + WebACL batch stacks
       using Export/Fn::ImportValue for cross-stack references.
     """
+    # Add throttle chains before writing
+    _add_throttle_chains(template)
+
     # Always write readable version (full template, indented)
     readable_path = os.path.join(output_dir, "waf-cloudformation.readable.json")
     with open(readable_path, "w") as f:
