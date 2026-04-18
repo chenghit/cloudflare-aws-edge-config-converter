@@ -79,14 +79,17 @@ class WCUTracker:
 
 
 class RefCounter:
-    """Count reference statements. NOTE: AWS WAF limit of 50 is per-WebACL.
-    Since both WebACLs share identical rules, the global count equals per-WebACL count.
-    If WebACLs diverge in the future, this needs to be tracked per-WebACL."""
+    """Count reference statements and track which IP set logical IDs are referenced.
+    AWS WAF hard limit: 50 reference statements per WebACL.
+    In legacy mode both WebACLs share identical rules, so global count = per-WebACL count."""
     def __init__(self):
         self.count = 0
+        self.referenced_ids = set()
 
-    def add(self):
+    def add(self, logical_id=None):
         self.count += 1
+        if logical_id:
+            self.referenced_ids.add(logical_id)
 
 
 # ── Condition → Statement conversion ─────────────────────────────────────────
@@ -273,17 +276,17 @@ def _build_ip_statement(value, ctx, cond=None):
         ipv4_id = ctx["ip_list_map"].get(f"{list_name}-ipv4")
         ipv6_id = ctx["ip_list_map"].get(f"{list_name}-ipv6")
         if ipv4_id and ipv6_id:
-            ctx["refs"].add()
-            ctx["refs"].add()
+            ctx["refs"].add(ipv4_id)
+            ctx["refs"].add(ipv6_id)
             return {"OrStatement": {"Statements": [
                 {"IPSetReferenceStatement": {"ARN": {"Fn::GetAtt": [ipv4_id, "Arn"]}}},
                 {"IPSetReferenceStatement": {"ARN": {"Fn::GetAtt": [ipv6_id, "Arn"]}}},
             ]}}
         elif ipv4_id:
-            ctx["refs"].add()
+            ctx["refs"].add(ipv4_id)
             return {"IPSetReferenceStatement": {"ARN": {"Fn::GetAtt": [ipv4_id, "Arn"]}}}
         elif ipv6_id:
-            ctx["refs"].add()
+            ctx["refs"].add(ipv6_id)
             return {"IPSetReferenceStatement": {"ARN": {"Fn::GetAtt": [ipv6_id, "Arn"]}}}
         # ASN list referenced as $name
         asn_id = ctx["ip_list_map"].get(list_name)
@@ -301,7 +304,7 @@ def _build_ip_statement(value, ctx, cond=None):
     for name in ip_set_names:
         lid = ctx["inline_ip_set_ids"].get(name)
         if lid:
-            ctx["refs"].add()
+            ctx["refs"].add(lid)
             stmts.append({"IPSetReferenceStatement": {"ARN": {"Fn::GetAtt": [lid, "Arn"]}}})
 
     if not stmts:
@@ -853,6 +856,15 @@ def generate(ir):
 
     resources["WebACLApiFile"] = build_webacl("waf-api-file", api_rules)
 
+    # ── Clean up unreferenced IP sets ────────────────────────────────────────
+
+    unreferenced = [lid for lid, res in resources.items()
+                    if res["Type"] == "AWS::WAFv2::IPSet" and lid not in refs.referenced_ids]
+    for lid in unreferenced:
+        name = resources[lid]["Properties"]["Name"]
+        del resources[lid]
+        warnings.append(f"IP set '{name}' not referenced by any rule — removed")
+
     # ── Quota validation ─────────────────────────────────────────────────────
 
     errors = []
@@ -886,7 +898,7 @@ def generate(ir):
     return template, wcu, warnings, errors
 
 
-def generate_split(split_ir, dedup):
+def generate_split(split_ir):
     """Generate CloudFormation template with per-domain WebACLs."""
     resources = {}
     warnings = []
@@ -932,8 +944,22 @@ def generate_split(split_ir, dedup):
             asn_lists[name] = lst.get("items", [])
             ip_list_map[name] = "__asn__"
 
-    # ── Build inline IP sets (with optional dedup) ───────────────────────────
+    # ── Build inline IP sets (auto-dedup if >100 unique) ─────────────────────
 
+    # Step 1: scan to decide dedup
+    content_keys = set()
+    for domain_data in split_ir.get("domains", {}).values():
+        for section in ("ip_access_rules", "custom_rules", "rate_limiting_rules"):
+            for rule in domain_data.get(section, []):
+                for ipset in rule.get("ip_sets", []):
+                    addrs = ipset.get("addresses", [])
+                    if not addrs:
+                        continue
+                    is_v6 = any(is_ipv6(a) for a in addrs)
+                    content_keys.add(("IPV6" if is_v6 else "IPV4", tuple(sorted(addrs))))
+    dedup = len(content_keys) > 100
+
+    # Step 2: create resources
     inline_ip_set_ids = {}
     if dedup:
         content_to_id = {}
@@ -984,6 +1010,8 @@ def generate_split(split_ir, dedup):
     max_wcu = 0
     max_wcu_domain = ""
     seen_warnings = set()
+    all_referenced_ids = set()
+    exceeded_domains = []
 
     for domain, domain_data in split_ir.get("domains", {}).items():
         domain_wcu = WCUTracker()
@@ -1144,9 +1172,13 @@ def generate_split(split_ir, dedup):
                 seen_warnings.add(w)
                 warnings.append(f"Domain {domain}: {w}")
 
-        # Check per-WebACL IP set refs
+        # Check per-WebACL IP set refs (hard limit: 50)
         if refs.count > MAX_REF_STATEMENTS:
-            warnings.append(f"Domain {domain}: {refs.count} IP set refs > {MAX_REF_STATEMENTS} limit")
+            exceeded_domains.append(f"{domain}: {refs.count} refs > {MAX_REF_STATEMENTS}")
+            # Don't merge referenced_ids — avoid orphan IP sets in template
+            continue
+
+        all_referenced_ids |= refs.referenced_ids
 
         # Deduplicate warnings
         for w in list(warnings):
@@ -1169,9 +1201,23 @@ def generate_split(split_ir, dedup):
             }
         }
 
+    # ── Clean up unreferenced IP sets ────────────────────────────────────────
+
+    unreferenced = [lid for lid, res in resources.items()
+                    if res["Type"] == "AWS::WAFv2::IPSet" and lid not in all_referenced_ids]
+    for lid in unreferenced:
+        name = resources[lid]["Properties"]["Name"]
+        del resources[lid]
+        warnings.append(f"IP set '{name}' not referenced by any rule — removed")
+
     # ── Quota validation ─────────────────────────────────────────────────────
 
-    errors = []
+    # All domains exceeded — fatal
+    if exceeded_domains and len(exceeded_domains) == len(split_ir.get("domains", {})):
+        errors = [f"All {len(exceeded_domains)} domains exceed {MAX_REF_STATEMENTS} ref statement limit"]
+    else:
+        errors = []
+
     num_webacls = sum(1 for r in resources.values() if r["Type"] == "AWS::WAFv2::WebACL")
     num_ip_sets = sum(1 for r in resources.values() if r["Type"] == "AWS::WAFv2::IPSet")
     if num_webacls > 80:
@@ -1197,27 +1243,20 @@ def generate_split(split_ir, dedup):
         "Outputs": outputs,
     }
 
-    return template, max_wcu, max_wcu_domain, warnings, errors
+    return template, max_wcu, max_wcu_domain, warnings, errors, exceeded_domains
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: waf-generate-cfn.py <output_dir>", file=sys.stderr)
+        print("Usage: waf-generate-cfn.py <output_dir> [--split] [--force-no-split]", file=sys.stderr)
         sys.exit(1)
 
-    output_dir = os.path.expanduser(sys.argv[1])
-
-    # Check split decision
-    decision_path = os.path.join(output_dir, "waf_split_decision.json")
-    mode = "legacy"
-    dedup = False
-    if os.path.exists(decision_path):
-        with open(decision_path) as f:
-            decision = json.load(f)
-        mode = decision.get("mode", "legacy")
-        dedup = decision.get("dedup", False)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    output_dir = os.path.expanduser(args[0])
+    mode = "split" if "--split" in sys.argv else "legacy"
+    force_no_split = "--force-no-split" in sys.argv
 
     if mode == "split":
         split_path = os.path.join(output_dir, "waf_ir_split.json")
@@ -1226,7 +1265,7 @@ def main():
             sys.exit(1)
         with open(split_path) as f:
             split_ir = json.load(f)
-        template, max_wcu_val, max_wcu_domain, warnings, errors = generate_split(split_ir, dedup)
+        template, max_wcu_val, max_wcu_domain, warnings, errors, exceeded_domains = generate_split(split_ir)
         wcu_display = f"WCU={max_wcu_val} (max, {max_wcu_domain})"
     else:
         ir_path = os.path.join(output_dir, "waf_ir.json")
@@ -1238,6 +1277,7 @@ def main():
         template, wcu, warnings, errors = generate(ir)
         max_wcu_val = wcu.total
         wcu_display = f"WCU={wcu.total}"
+        exceeded_domains = []
 
     # Write template
     out_path = os.path.join(output_dir, "waf-cloudformation.json")
@@ -1259,11 +1299,39 @@ def main():
             seen.add(w)
             print(f"  WARN: {w}", file=sys.stderr)
 
+    # Handle ref count exceeded in legacy mode
+    ref_exceeded = any("Reference statements" in e for e in errors)
+    if ref_exceeded and mode == "legacy":
+        if force_no_split:
+            # User forced legacy — downgrade to warning, continue
+            for e in errors:
+                if "Reference statements" in e:
+                    print(f"  WARN: {e} (--force-no-split: deploy will fail unless limit is raised)", file=sys.stderr)
+            errors = [e for e in errors if "Reference statements" not in e]
+        else:
+            # Recoverable — pipeline will auto fallback to split
+            ref_count = next((int(e.split()[2]) for e in errors if "Reference statements" in e), 0)
+            print(f"\n---RESULT---\nSPEC: 1\nSTATUS: PARTIAL\n"
+                  f"REF_COUNT: {ref_count}\nREF_LIMIT: {MAX_REF_STATEMENTS}")
+            sys.exit(3)
+
     if errors:
         for e in errors:
             print(f"  ERROR: {e}", file=sys.stderr)
         print(f"\n---RESULT---\nSPEC: 1\nSTATUS: ERROR\nERRORS: {len(errors)}")
         sys.exit(2)
+
+    # Handle split mode partial (some domains exceeded ref limit)
+    if exceeded_domains:
+        failed_items = "\n".join(f"  {d}" for d in exceeded_domains)
+        print(f"OK (partial): {num_resources} resources, {num_webacls} WebACLs, "
+              f"{num_ip_sets} IP sets, {wcu_display} → {out_path}")
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: PARTIAL\nOUTPUT_FILE: {out_path}\n"
+              f"RESOURCES: {num_resources}\nWEBACLS: {num_webacls}\n"
+              f"IP_SETS: {num_ip_sets}\nWCU: {max_wcu_val}\nMODE: {mode}\n"
+              f"SUCCEEDED: {num_webacls}\nFAILED: {len(exceeded_domains)}\n"
+              f"FAILED_ITEMS:\n{failed_items}")
+        sys.exit(3)
 
     print(f"OK: {num_resources} resources, {num_webacls} WebACLs, "
           f"{num_ip_sets} IP sets, {wcu_display} → {out_path}")

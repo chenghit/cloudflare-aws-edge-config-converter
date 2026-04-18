@@ -1,15 +1,20 @@
 #!/bin/bash
 # waf-pipeline.sh — Run the entire WAF conversion pipeline.
-# Usage: bash waf-pipeline.sh <config_path> [output_dir]
+# Usage: bash waf-pipeline.sh <config_path> [output_dir] [--force-split|--force-no-split]
 #
 # config_path: CloudflareBackup root directory
 # output_dir:  Output directory (default: cloudflare-to-aws-waf under CWD)
+#
+# Modes:
+#   (default)        Try legacy (2 WebACLs). If ref count exceeds 50, auto fallback to split.
+#   --force-split    Skip legacy, go directly to per-domain split.
+#   --force-no-split Force legacy even if ref count exceeds 50 (user must raise limit).
 #
 # Exit codes: 0 = OK, 1 = error in a pipeline step.
 
 set -euo pipefail
 
-CONFIG_PATH="${1:?Usage: waf-pipeline.sh <config_path> [output_dir] [--force-split]}"
+CONFIG_PATH="${1:?Usage: waf-pipeline.sh <config_path> [output_dir] [--force-split|--force-no-split]}"
 OUTPUT_DIR="${2:-cloudflare-to-aws-waf}"
 SPLIT_FLAG=""
 for arg in "$@"; do
@@ -64,27 +69,44 @@ run_step "Count Validate" \
 run_step "IR Validate" \
     python3 "$SCRIPTS_DIR/waf-validate-ir.py" "$CONFIG_PATH" "$OUTPUT_DIR"
 
-# Check split decision
-run_step "Check split" \
-    python3 "$SCRIPTS_DIR/waf-check-split.py" "$OUTPUT_DIR" $SPLIT_FLAG
+# ── Generate CloudFormation ──────────────────────────────────────────────────
 
-# Read split decision
-SPLIT_MODE=$(python3 -c "
-import json, sys
-with open(sys.argv[1]) as f: d = json.load(f)
-print(d['mode'])" "$OUTPUT_DIR/waf_split_decision.json")
-DEDUP=$(python3 -c "
-import json, sys
-with open(sys.argv[1]) as f: d = json.load(f)
-print(d['dedup'])" "$OUTPUT_DIR/waf_split_decision.json")
-
-if [ "$SPLIT_MODE" = "split" ]; then
+if [ "$SPLIT_FLAG" = "--force-split" ]; then
+    # User forced split — skip legacy attempt
     run_step "Split by host" \
         python3 "$SCRIPTS_DIR/waf-split-by-host.py" "$CONFIG_PATH" "$OUTPUT_DIR"
-fi
+    run_step "Generate CloudFormation (split)" \
+        python3 "$SCRIPTS_DIR/waf-generate-cfn.py" "$OUTPUT_DIR" --split
 
-run_step "Generate CloudFormation" \
+elif [ "$SPLIT_FLAG" = "--force-no-split" ]; then
+    # User forced legacy — ref exceeded becomes warning, not error
+    run_step "Generate CloudFormation (legacy, forced)" \
+        python3 "$SCRIPTS_DIR/waf-generate-cfn.py" "$OUTPUT_DIR" --force-no-split
+
+else
+    # Default: try legacy, auto fallback to split on ref count exceeded (exit 3)
+    echo "[WAF] Generate CloudFormation (legacy) ..."
+    set +e
     python3 "$SCRIPTS_DIR/waf-generate-cfn.py" "$OUTPUT_DIR"
+    GEN_EXIT=$?
+    set -e
+
+    if [ $GEN_EXIT -eq 3 ]; then
+        echo "[WAF] Reference limit exceeded, switching to per-domain split..."
+        run_step "Split by host" \
+            python3 "$SCRIPTS_DIR/waf-split-by-host.py" "$CONFIG_PATH" "$OUTPUT_DIR"
+        run_step "Generate CloudFormation (split)" \
+            python3 "$SCRIPTS_DIR/waf-generate-cfn.py" "$OUTPUT_DIR" --split
+    elif [ $GEN_EXIT -ne 0 ]; then
+        echo ""
+        echo "---RESULT---"
+        echo "SPEC: 1"
+        echo "STATUS: ERROR"
+        echo "ACTION: FIX"
+        echo "CONTEXT: CloudFormation generation failed"
+        exit 1
+    fi
+fi
 
 run_step "Generate README" \
     python3 "$SCRIPTS_DIR/waf-generate-readme.py" "$OUTPUT_DIR"

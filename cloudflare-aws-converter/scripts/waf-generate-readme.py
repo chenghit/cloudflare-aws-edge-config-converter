@@ -27,17 +27,7 @@ def main():
     with open(ir_path) as f:
         ir = json.load(f)
 
-    # Check split mode
-    decision_path = os.path.join(output_dir, "waf_split_decision.json")
-    mode = "legacy"
-    dedup = False
-    if os.path.exists(decision_path):
-        with open(decision_path) as f:
-            decision = json.load(f)
-        mode = decision.get("mode", "legacy")
-        dedup = decision.get("dedup", False)
-
-    # Read CloudFormation template for WebACL names
+    # Detect split mode from CloudFormation template (waf_split_decision.json no longer exists)
     cfn_path = os.path.join(output_dir, "waf-cloudformation.json")
     webacl_names = []
     if os.path.exists(cfn_path):
@@ -46,6 +36,15 @@ def main():
         for lid, res in cfn.get("Resources", {}).items():
             if res.get("Type") == "AWS::WAFv2::WebACL":
                 webacl_names.append(res["Properties"]["Name"])
+
+    # legacy = 2 WebACLs (waf-website + waf-api-file), split = per-domain
+    mode = "legacy" if len(webacl_names) <= 2 else "split"
+    # Detect dedup from IP set names (dedup produces content-addressed names)
+    dedup = False
+    if mode == "split" and os.path.exists(cfn_path):
+        ip_set_names = [res["Properties"]["Name"] for res in cfn.get("Resources", {}).values()
+                        if res.get("Type") == "AWS::WAFv2::IPSet"]
+        dedup = len(ip_set_names) != len(set(ip_set_names))
 
     # Collect non-convertible notes and partial rules
     nc_notes = ir.get("non_convertible_notes", [])
