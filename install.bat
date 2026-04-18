@@ -31,8 +31,6 @@ xcopy /s /y /i "cloudflare-aws-converter\scripts" "%SKILLS_DIR%\scripts" >nul
 echo.
 echo Installation complete!
 echo.
-echo No LLM subagents required — entire tool is deterministic Python.
-echo.
 echo To start a conversion:
 echo   kiro-cli chat
 
