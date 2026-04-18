@@ -1243,7 +1243,7 @@ def generate_split(split_ir):
         "Outputs": outputs,
     }
 
-    return template, max_wcu, max_wcu_domain, warnings, errors, exceeded_domains
+    return template, max_wcu, max_wcu_domain, warnings, errors, exceeded_domains, dedup
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -1265,7 +1265,7 @@ def main():
             sys.exit(1)
         with open(split_path) as f:
             split_ir = json.load(f)
-        template, max_wcu_val, max_wcu_domain, warnings, errors, exceeded_domains = generate_split(split_ir)
+        template, max_wcu_val, max_wcu_domain, warnings, errors, exceeded_domains, dedup = generate_split(split_ir)
         wcu_display = f"WCU={max_wcu_val} (max, {max_wcu_domain})"
     else:
         ir_path = os.path.join(output_dir, "waf_ir.json")
@@ -1278,6 +1278,12 @@ def main():
         max_wcu_val = wcu.total
         wcu_display = f"WCU={wcu.total}"
         exceeded_domains = []
+        dedup = False
+
+    # Write metadata for downstream scripts (readme)
+    meta_path = os.path.join(output_dir, "waf_metadata.json")
+    with open(meta_path, "w") as f:
+        json.dump({"mode": mode, "dedup": dedup}, f)
 
     # Write template
     out_path = os.path.join(output_dir, "waf-cloudformation.json")
@@ -1321,7 +1327,9 @@ def main():
         print(f"\n---RESULT---\nSPEC: 1\nSTATUS: ERROR\nERRORS: {len(errors)}")
         sys.exit(2)
 
-    # Handle split mode partial (some domains exceeded ref limit)
+    # Handle split mode partial (some domains exceeded ref limit).
+    # Exit 0 so pipeline.sh run_step doesn't treat it as failure.
+    # PARTIAL status in ---RESULT--- tells orchestrator about skipped domains.
     if exceeded_domains:
         failed_items = "\n".join(f"  {d}" for d in exceeded_domains)
         print(f"OK (partial): {num_resources} resources, {num_webacls} WebACLs, "
@@ -1331,7 +1339,7 @@ def main():
               f"IP_SETS: {num_ip_sets}\nWCU: {max_wcu_val}\nMODE: {mode}\n"
               f"SUCCEEDED: {num_webacls}\nFAILED: {len(exceeded_domains)}\n"
               f"FAILED_ITEMS:\n{failed_items}")
-        sys.exit(3)
+        return  # exit 0
 
     print(f"OK: {num_resources} resources, {num_webacls} WebACLs, "
           f"{num_ip_sets} IP sets, {wcu_display} → {out_path}")
