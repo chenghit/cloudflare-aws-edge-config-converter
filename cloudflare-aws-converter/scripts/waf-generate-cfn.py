@@ -549,16 +549,20 @@ def build_search_engine_label_rule(priority):
 
 
 def build_always_on_challenge_rule(priority):
-    """Build always-on challenge rule (Count action — user changes to Challenge after review)."""
+    """Build always-on challenge rule (Count action — user changes to Challenge after review).
+    Excludes requests labeled custom:search-engine to avoid impacting SEO."""
     uris = ["/", "/login", "/signup"]
-    stmts = [{"ByteMatchStatement": {
+    uri_stmts = [{"ByteMatchStatement": {
         "SearchString": uri, "PositionalConstraint": "EXACTLY",
         "FieldToMatch": {"UriPath": {}},
         "TextTransformations": [{"Priority": 0, "Type": "NONE"}]}} for uri in uris]
+    uri_match = {"OrStatement": {"Statements": uri_stmts}}
+    not_search_engine = {"NotStatement": {"Statement": {
+        "LabelMatchStatement": {"Scope": "LABEL", "Key": "custom:search-engine"}}}}
     return {
         "Name": "always-on-challenge", "Priority": priority,
         "Action": {"Count": {}},
-        "Statement": {"OrStatement": {"Statements": stmts}},
+        "Statement": {"AndStatement": {"Statements": [uri_match, not_search_engine]}},
         "VisibilityConfig": {"SampledRequestsEnabled": True,
                              "CloudWatchMetricsEnabled": True,
                              "MetricName": "always-on-challenge"},

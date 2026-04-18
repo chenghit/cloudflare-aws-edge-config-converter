@@ -264,24 +264,37 @@ def main():
     lines += [
         "## ⚠️ Post-Deployment Checklist",
         "",
+        "### Anti-DDoS managed rule group",
+        "",
+        "The Anti-DDoS AMR is deployed with **Override Action: Count** (monitoring only). "
+        "Review WAF logs before activating.",
+        "",
+        "- **Web-facing domains**: Change Override Action from Count to **None** to activate. "
+        "The default config enables Challenge with HIGH sensitivity and exempts `/api/` paths "
+        "and static file extensions. Adjust `ExemptUriRegularExpressions` if your API paths "
+        "differ from the default pattern.",
+        "- **Pure API / static file domains** (no web frontend): Change Override Action from "
+        "Count to **None**, then edit the Anti-DDoS config: disable Challenge and set Block "
+        "sensitivity to MEDIUM. Also delete the `search-engine-label` and `always-on-challenge` "
+        "rules from the WebACL (they are not useful for API-only domains).",
+        "",
         "### always-on-challenge rule",
         "",
         "The `always-on-challenge` rule is deployed with **Count action** (monitoring only). "
-        "It does NOT protect against DDoS until you change it.",
+        "It automatically excludes requests labeled `custom:search-engine` (from the "
+        "`search-engine-label` rule) to protect SEO.",
         "",
-        "1. **Web-facing domains**: Change the `always-on-challenge` rule's action from "
-        "Count to **Challenge**. Add your landing page paths (e.g., `/pricing`, `/about`, "
-        "`/register`) to the rule's URI list.",
+        "1. **Web-facing domains**: Change the action from Count to **Challenge**. "
+        "Add your landing page paths (e.g., `/pricing`, `/about`, `/register`) to the "
+        "rule's URI list.",
         "2. **Mixed domains** (web frontend + API backend): Same as #1, but also ensure "
-        "all API paths are excluded from challenge rules. API clients cannot solve "
-        "challenges — unexcluded API paths will return 202 challenge responses.",
-        "3. **Pure API / static file domains** (no web frontend): Delete the "
-        "`search-engine-label` rule and the `always-on-challenge` rule from the WebACL. "
-        "In the Anti-DDoS AMR, disable challenge and set block sensitivity to medium.",
+        "all API paths are excluded. API clients cannot solve challenges — unexcluded API "
+        "paths will return 202 challenge responses.",
+        "3. **Pure API / static file domains**: Delete this rule (see Anti-DDoS section above).",
         "",
-        "### Managed rules",
+        "### Managed rules (CRS, Known Bad Inputs, SQLi, IP Reputation)",
         "",
-        "All managed rules (CRS, Known Bad Inputs, SQLi, IP Reputation) are deployed with "
+        "All managed rules are deployed with "
         "**Override Action: Count** (monitoring only). To activate blocking:",
         "",
         "1. Monitor WAF logs for 1-2 weeks to identify false positives.",
