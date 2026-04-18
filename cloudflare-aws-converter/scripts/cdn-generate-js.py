@@ -632,14 +632,9 @@ def _needs_kvs(ir):
 
 
 def _needs_qs_helper(all_ops):
-    """Check if _qs helper is needed (bulk redirect or uri.query condition)."""
-    for op in all_ops:
-        if op.get("type") == "bulk_redirect":
-            return True
-        cond = op.get("condition")
-        if cond and _cond_has_field(cond, ("uri.query",)):
-            return True
-    return False
+    """_qs is always injected in CFF — 180 bytes, negligible vs 10KB limit.
+    Avoids detection gaps (bulk redirect, conditions, dynamic expressions)."""
+    return True
 
 
 def _needs_crypto(ir):
