@@ -29,8 +29,9 @@ FORBIDDEN_PATTERNS = [
 ]
 
 
-def validate_domain(ir, output_dir):
-    """Validate JS files for a single domain. Returns validation report dict."""
+def validate_domain(ir, output_dir, manifest=None):
+    """Validate JS files for a single domain. Returns validation report dict.
+    If validated_cache is provided, shared JS results are reused."""
     hostname = ir["metadata"]["hostname"]
     sanitized = ir["metadata"]["sanitized_name"]
     domain_dir = os.path.join(output_dir, "terraform", "domains", sanitized)
@@ -40,19 +41,15 @@ def validate_domain(ir, output_dir):
     checks = []
 
     # Resolve JS file paths via dedup manifest (shared or independent)
-    manifest_path = os.path.join(output_dir, "cff_dedup_manifest.json")
     vr_path = None
     vresp_path = None
 
-    if os.path.exists(manifest_path):
-        with open(manifest_path) as f:
-            manifest = json.load(f)
+    if manifest:
         cfg = manifest.get("domain_config", {}).get(sanitized, {})
         vr_cfg = cfg.get("viewer_request", {})
         vresp_cfg = cfg.get("viewer_response", {})
 
         if vr_cfg.get("mode") == "shared":
-            # Find shared JS file by name
             for sf in manifest.get("shared_functions", []):
                 if sf["name"] == vr_cfg["name"] and sf["event_type"] == "viewer_request":
                     vr_path = os.path.join(output_dir, "terraform", sf["file"])
@@ -225,11 +222,19 @@ def main():
         print(f"---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\nCONTEXT: No IR files found in {ir_dir}")
         sys.exit(2)
 
+    # Load manifest once (if exists)
+    manifest_path = os.path.join(output_dir, "cff_dedup_manifest.json")
+    manifest = None
+    if os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
     results = []
+    validated_cache = {}  # vr_path → checks (shared JS validated once)
     for ir_file in ir_files:
         with open(ir_file) as f:
             ir = json.load(f)
-        report = validate_domain(ir, output_dir)
+        report = validate_domain(ir, output_dir, manifest)
         hostname = report["hostname"]
         # Write per-domain report
         report_path = os.path.join(val_dir, f"{hostname}-v3.json")

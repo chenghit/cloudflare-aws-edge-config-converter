@@ -1201,6 +1201,21 @@ def main():
 
         _write_domain_functions_tf(san, config, ir, domain_dir)
 
+    # ── Phase 3b: Validate shared module terraform ─────────────────────────────
+
+    shared_dir = os.path.join(output_dir, "terraform", "shared")
+    if shared_tf_lines and os.path.isdir(shared_dir):
+        import subprocess
+        init_result = subprocess.run(
+            ["terraform", "init", "-backend=false"],
+            cwd=shared_dir, capture_output=True, text=True)
+        if init_result.returncode == 0:
+            val_result = subprocess.run(
+                ["terraform", "validate"],
+                cwd=shared_dir, capture_output=True, text=True)
+            if val_result.returncode != 0:
+                print(f"  WARN: shared module terraform validate failed: {val_result.stdout.strip()}", file=sys.stderr)
+
     # ── Phase 4: Write manifest + append report ──────────────────────────────
 
     manifest = {"shared_functions": [
