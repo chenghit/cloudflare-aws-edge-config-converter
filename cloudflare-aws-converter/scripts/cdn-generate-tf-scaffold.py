@@ -268,12 +268,12 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
         w(f'  default_response_headers_policy_id = data.aws_cloudfront_response_headers_policy.{hcl_id(rhp_id)}.id')
     w('')
 
-    # Default function associations
+    # Default function associations (use locals defined in functions.tf for dedup compatibility)
     func_assocs = []
     if has_vr:
-        func_assocs.append(f'    {{ event_type = "viewer-request", function_arn = aws_cloudfront_function.{san}_viewer_request.arn }}')
+        func_assocs.append(f'    {{ event_type = "viewer-request", function_arn = local.viewer_request_arn }}')
     if has_vresp:
-        func_assocs.append(f'    {{ event_type = "viewer-response", function_arn = aws_cloudfront_function.{san}_viewer_response.arn }}')
+        func_assocs.append(f'    {{ event_type = "viewer-response", function_arn = local.viewer_response_arn }}')
     if func_assocs:
         w('  default_function_associations = [')
         for fa in func_assocs:
@@ -316,9 +316,9 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
             # explicit function_associations per behavior (no inheritance)
             b_func = []
             if has_vr:
-                b_func.append(f'{{ event_type = "viewer-request", function_arn = aws_cloudfront_function.{san}_viewer_request.arn }}')
+                b_func.append(f'{{ event_type = "viewer-request", function_arn = local.viewer_request_arn }}')
             if has_vresp:
-                b_func.append(f'{{ event_type = "viewer-response", function_arn = aws_cloudfront_function.{san}_viewer_response.arn }}')
+                b_func.append(f'{{ event_type = "viewer-response", function_arn = local.viewer_response_arn }}')
             if b_func:
                 w('      function_associations = [')
                 for bf in b_func:

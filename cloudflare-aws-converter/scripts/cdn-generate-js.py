@@ -4,14 +4,20 @@
 Reads all domain IRs from ir/final/<hostname>.json and generates CloudFront
 Function JS (viewer_request.js, viewer_response.js) and Lambda@Edge handlers.
 
+Performs content-hash dedup: identical CFF content across domains is shared
+via a single CFF resource in terraform/shared/. Per-domain modules reference
+shared CFF by name using data sources.
+
 Usage:
     python3 cdn-generate-js.py <output_dir>
     # output_dir is e.g. "cloudflare-to-aws-cdn"
 """
 import copy
+import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -22,6 +28,26 @@ from cdn_expr_parser import parse_expression_full, parse_dynamic_expression, CF_
 # ── Constants ────────────────────────────────────────────────────────────────
 
 CFF_SIZE_LIMIT = 10240  # 10 KB
+MAX_CFF_NAME = 64       # CloudFront Function name limit
+MAX_CFF_ASSOCIATIONS = 100  # Max distributions per CFF (fixed, not adjustable)
+CFF_PREFIX = "cf-"
+
+
+def cff_name(san, event_type):
+    """Generate CFF name within 64 char limit. Truncates with hash if needed."""
+    suffix = "-req" if event_type == "viewer_request" else "-resp"
+    base = f"{CFF_PREFIX}{san}{suffix}"
+    if len(base) <= MAX_CFF_NAME:
+        return base
+    name_hash = hashlib.sha256(san.encode()).hexdigest()[:6]
+    available = MAX_CFF_NAME - len(CFF_PREFIX) - len(suffix) - 7  # 7 = "-" + 6 chars
+    return f"{CFF_PREFIX}{san[:available]}-{name_hash}{suffix}"
+
+
+def shared_cff_name(content_hash, event_type):
+    """Generate shared CFF name: cf-shared-req-{hash6} or cf-shared-resp-{hash6}."""
+    suffix = "-req" if event_type == "viewer_request" else "-resp"
+    return f"{CFF_PREFIX}shared{suffix}-{content_hash[:6]}"
 
 # Fields always available (no existence check needed)
 ALWAYS_AVAILABLE = {
@@ -995,29 +1021,363 @@ def main():
         print(f"---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\nCONTEXT: No IR files found in {ir_dir}")
         sys.exit(2)
 
-    results = []
+    # ── Phase 1: Generate all JS in memory ───────────────────────────────────
+
+    all_irs = {}
+    all_vr = {}   # san → viewer_request JS string
+    all_vresp = {}  # san → viewer_response JS string (or None)
     failed = []
+
     for ir_file in ir_files:
         with open(ir_file) as f:
             ir = json.load(f)
-        hostname, status, detail = process_domain(ir, output_dir)
-        results.append((hostname, status, detail))
-        if status != "OK":
-            failed.append((hostname, status, detail))
-        print(f"[JS] {hostname}: {status} ({detail})", file=sys.stderr)
+        hostname = ir["metadata"]["hostname"]
+        sanitized = ir["metadata"]["sanitized_name"]
+        all_irs[sanitized] = ir
 
-    ok_count = sum(1 for _, s, _ in results if s == "OK")
+        # Generate viewer_request
+        vr_js = generate_viewer_request_js(ir)
+        vr_size = len(vr_js.encode("utf-8"))
+
+        # Size check + minification + escalation
+        origin_ops = [
+            op for beh in ir.get("cache_behaviors", [])
+            for op in beh.get("viewer_request_ops", [])
+            if op.get("type") == "origin_override"
+        ]
+
+        if vr_size > CFF_SIZE_LIMIT:
+            vr_js = minify_js(vr_js)
+            vr_size = len(vr_js.encode("utf-8"))
+
+        if vr_size > CFF_SIZE_LIMIT and origin_ops:
+            ir_no_origin = copy.deepcopy(ir)
+            for beh in ir_no_origin.get("cache_behaviors", []):
+                beh["viewer_request_ops"] = [
+                    op for op in beh.get("viewer_request_ops", [])
+                    if op.get("type") != "origin_override"
+                ]
+            vr_js = generate_viewer_request_js(ir_no_origin)
+            vr_size = len(vr_js.encode("utf-8"))
+            if vr_size > CFF_SIZE_LIMIT:
+                vr_js = minify_js(vr_js)
+                vr_size = len(vr_js.encode("utf-8"))
+            if vr_size > CFF_SIZE_LIMIT:
+                failed.append((hostname, "SIZE_EXCEEDED", f"{vr_size} bytes after escalation"))
+                continue
+            ir["_escalated_origin_ops"] = origin_ops
+        elif vr_size > CFF_SIZE_LIMIT:
+            failed.append((hostname, "SIZE_EXCEEDED", f"{vr_size} bytes, no origin_override to escalate"))
+            continue
+
+        all_vr[sanitized] = vr_js
+        all_vresp[sanitized] = generate_viewer_response_js(ir)
+        print(f"[JS] {hostname}: generated ({vr_size} bytes)", file=sys.stderr)
+
+    if not all_vr:
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\nCONTEXT: All domains failed JS generation")
+        sys.exit(2)
+
+    # ── Phase 2: Content-hash dedup ──────────────────────────────────────────
+
+    vr_groups = {}  # hash → {"js": str, "domains": [san, ...]}
+    for san, js in all_vr.items():
+        h = hashlib.sha256(js.encode()).hexdigest()[:12]
+        vr_groups.setdefault(h, {"js": js, "domains": []})["domains"].append(san)
+
+    vresp_groups = {}
+    for san, js in all_vresp.items():
+        if js is None:
+            continue
+        h = hashlib.sha256(js.encode()).hexdigest()[:12]
+        vresp_groups.setdefault(h, {"js": js, "domains": []})["domains"].append(san)
+
+    domain_cff_config = {}
+    shared_cffs = []
+
+    for h, group in vr_groups.items():
+        if len(group["domains"]) >= 2:
+            name = shared_cff_name(h, "viewer_request")
+            for ci in range(0, len(group["domains"]), MAX_CFF_ASSOCIATIONS):
+                chunk = group["domains"][ci:ci + MAX_CFF_ASSOCIATIONS]
+                cn = name if ci == 0 else f"{name}-{ci // MAX_CFF_ASSOCIATIONS + 1}"
+                shared_cffs.append({"hash": h, "event_type": "viewer_request",
+                                    "name": cn, "js": group["js"], "domains": chunk})
+                for san in chunk:
+                    domain_cff_config.setdefault(san, {})["viewer_request"] = {"mode": "shared", "name": cn}
+        else:
+            san = group["domains"][0]
+            domain_cff_config.setdefault(san, {})["viewer_request"] = {
+                "mode": "independent", "name": cff_name(san, "viewer_request")}
+
+    for h, group in vresp_groups.items():
+        if len(group["domains"]) >= 2:
+            name = shared_cff_name(h, "viewer_response")
+            for ci in range(0, len(group["domains"]), MAX_CFF_ASSOCIATIONS):
+                chunk = group["domains"][ci:ci + MAX_CFF_ASSOCIATIONS]
+                cn = name if ci == 0 else f"{name}-{ci // MAX_CFF_ASSOCIATIONS + 1}"
+                shared_cffs.append({"hash": h, "event_type": "viewer_response",
+                                    "name": cn, "js": group["js"], "domains": chunk})
+                for san in chunk:
+                    domain_cff_config.setdefault(san, {})["viewer_response"] = {"mode": "shared", "name": cn}
+        else:
+            san = group["domains"][0]
+            domain_cff_config.setdefault(san, {})["viewer_response"] = {
+                "mode": "independent", "name": cff_name(san, "viewer_response")}
+
+    for san in all_vr:
+        cfg = domain_cff_config.setdefault(san, {})
+        if "viewer_response" not in cfg:
+            cfg["viewer_response"] = {"mode": "none"}
+
+    # ── Phase 3: Write files (atomic) ────────────────────────────────────────
+
+    shared_functions_dir = os.path.join(output_dir, "terraform", "shared", "functions")
+    if os.path.isdir(shared_functions_dir):
+        shutil.rmtree(shared_functions_dir)
+    manifest_path = os.path.join(output_dir, "cff_dedup_manifest.json")
+    if os.path.exists(manifest_path):
+        os.remove(manifest_path)
+    for san in all_vr:
+        fd = os.path.join(output_dir, "terraform", "domains", san, "functions")
+        if os.path.isdir(fd):
+            shutil.rmtree(fd)
+
+    # Shared JS files + functions.tf
+    os.makedirs(shared_functions_dir, exist_ok=True)
+    written_shared = set()
+    shared_tf_lines = []
+    for cff in shared_cffs:
+        if cff["name"] in written_shared:
+            continue
+        written_shared.add(cff["name"])
+        with open(os.path.join(shared_functions_dir, f"{cff['name']}.js"), "w") as f:
+            f.write(cff["js"])
+        tf_id = cff["name"].replace("-", "_")
+        comment_domains = ", ".join(cff["domains"][:2])
+        if len(cff["domains"]) > 2:
+            comment_domains += f", +{len(cff['domains']) - 2} more"
+        shared_tf_lines += [
+            f'resource "aws_cloudfront_function" "{tf_id}" {{',
+            f'  name    = "{cff["name"]}"',
+            f'  runtime = "cloudfront-js-2.0"',
+            f'  publish = true',
+            f'  comment = "Shared by {len(cff["domains"])} domains ({comment_domains})"',
+            f'  code    = file("${{path.module}}/functions/{cff["name"]}.js")',
+            '}', '',
+        ]
+
+    if shared_tf_lines:
+        with open(os.path.join(output_dir, "terraform", "shared", "functions.tf"), "w") as f:
+            f.write("\n".join(shared_tf_lines))
+
+    # Per-domain files
+    for san, config in domain_cff_config.items():
+        ir = all_irs[san]
+        domain_dir = os.path.join(output_dir, "terraform", "domains", san)
+        functions_dir = os.path.join(domain_dir, "functions")
+
+        if config.get("viewer_request", {}).get("mode") == "independent":
+            os.makedirs(functions_dir, exist_ok=True)
+            with open(os.path.join(functions_dir, f"{san}_viewer_request.js"), "w") as f:
+                f.write(all_vr[san])
+        if config.get("viewer_response", {}).get("mode") == "independent":
+            os.makedirs(functions_dir, exist_ok=True)
+            with open(os.path.join(functions_dir, f"{san}_viewer_response.js"), "w") as f:
+                f.write(all_vresp[san])
+
+        if ir.get("_escalated_origin_ops"):
+            lambda_dir = os.path.join(domain_dir, "lambda")
+            os.makedirs(lambda_dir, exist_ok=True)
+            with open(os.path.join(lambda_dir, "origin_request_handler.js"), "w") as f:
+                f.write(generate_lambda_origin_request_js(ir["_escalated_origin_ops"]))
+
+        le_or = ir.get("metadata", {}).get("lambda_edge", {}).get("origin_response")
+        if le_or:
+            lambda_dir = os.path.join(domain_dir, "lambda")
+            os.makedirs(lambda_dir, exist_ok=True)
+            with open(os.path.join(lambda_dir, "default_cache_origin_response.js"), "w") as f:
+                f.write(_generate_origin_response_template(le_or))
+
+        _write_domain_functions_tf(san, config, ir, domain_dir)
+
+    # ── Phase 4: Write manifest + append report ──────────────────────────────
+
+    manifest = {"shared_functions": [
+        {"name": c["name"], "event_type": c["event_type"], "hash": c["hash"],
+         "domains": c["domains"], "file": f"shared/functions/{c['name']}.js"}
+        for c in shared_cffs if c["name"] in written_shared
+    ], "domain_config": domain_cff_config}
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    indep_count = sum(1 for cfg in domain_cff_config.values()
+                      for v in cfg.values() if isinstance(v, dict) and v.get("mode") == "independent")
+    actual_count = len(written_shared) + indep_count
+    original_count = sum(1 for san in all_vr) + sum(1 for san, js in all_vresp.items() if js)
+
+    report_path = os.path.join(output_dir, "conversion_report.md")
+    if os.path.exists(report_path):
+        with open(report_path, "a") as f:
+            f.write(f"\n## CloudFront Functions Deduplication\n\n")
+            f.write(f"- Original (without dedup): {original_count} CFF\n")
+            f.write(f"- After dedup: {actual_count} CFF\n")
+            f.write(f"- Shared: {len(written_shared)} functions\n")
+            f.write(f"- Independent: {indep_count} functions\n")
+            f.write(f"\n### Customizing After Migration\n\n")
+            f.write(f"- **Modify rules for all domains**: Edit shared CFF in `terraform/shared/functions/`, then `cd terraform/shared && terraform apply`.\n")
+            f.write(f"- **Add domain-specific logic**: Add a condition on `event.request.headers.host.value` in the shared CFF.\n")
+            f.write(f"- **Add a new domain**: Create a module under `terraform/domains/`, use `data \"aws_cloudfront_function\"` to reference shared CFF by name.\n")
+            f.write(f"- **Remove a domain**: `cd terraform/domains/<domain> && terraform destroy`.\n")
+
+    # ── Report ───────────────────────────────────────────────────────────────
+
+    ok_count = len(all_vr)
     fail_count = len(failed)
 
     if fail_count == 0:
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nDOMAINS: {ok_count}\nGENERATED: {ok_count}")
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nDOMAINS: {ok_count}\nGENERATED: {ok_count}\n"
+              f"CFF_TOTAL: {actual_count}\nCFF_SHARED: {len(written_shared)}\n"
+              f"CFF_INDEPENDENT: {indep_count}\nCFF_DEDUP_RATIO: {original_count} -> {actual_count}")
     elif ok_count > 0:
         failed_items = "\n".join(f"  {h}: {s} — {d}" for h, s, d in failed)
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: PARTIAL\nSUCCEEDED: {ok_count}\nFAILED: {fail_count}\nFAILED_ITEMS:\n{failed_items}\nACTION: FIX\nCONTEXT: {fail_count} domain(s) exceeded 10KB CFF size limit")
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: PARTIAL\nSUCCEEDED: {ok_count}\nFAILED: {fail_count}\n"
+              f"CFF_TOTAL: {actual_count}\nCFF_SHARED: {len(written_shared)}\n"
+              f"CFF_INDEPENDENT: {indep_count}\nCFF_DEDUP_RATIO: {original_count} -> {actual_count}\n"
+              f"FAILED_ITEMS:\n{failed_items}\nACTION: FIX\n"
+              f"CONTEXT: {fail_count} domain(s) exceeded 10KB CFF size limit")
         sys.exit(3)
     else:
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\nCONTEXT: All {fail_count} domains failed JS generation")
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
+              f"CONTEXT: All {fail_count} domains failed JS generation")
         sys.exit(2)
+
+
+def _write_domain_functions_tf(san, config, ir, domain_dir):
+    """Write functions.tf — shared data source refs or independent CFF resources.
+    Always exports locals: local.viewer_request_arn and local.viewer_response_arn
+    so main.tf can reference them uniformly regardless of shared/independent mode."""
+    vr_cfg = config.get("viewer_request", {})
+    vresp_cfg = config.get("viewer_response", {})
+    has_kvs = any(ir["metadata"].get("kvs_requirements", {}).values())
+    le = ir["metadata"].get("lambda_edge", {})
+    has_le_origin_resp = le.get("origin_response") is not None
+    escalated = "_escalated_origin_ops" in ir
+
+    lines = []
+    w = lines.append
+
+    if vr_cfg.get("mode") == "shared":
+        w(f'data "aws_cloudfront_function" "shared_req" {{')
+        w(f'  name  = "{vr_cfg["name"]}"')
+        w(f'  stage = "LIVE"')
+        w('}')
+        vr_arn_expr = "data.aws_cloudfront_function.shared_req.arn"
+    else:
+        w(f'resource "aws_cloudfront_function" "{san}_viewer_request" {{')
+        w(f'  name    = "{vr_cfg.get("name", cff_name(san, "viewer_request"))}"')
+        w(f'  runtime = "cloudfront-js-2.0"')
+        w(f'  publish = true')
+        w(f'  code    = file("${{path.module}}/functions/{san}_viewer_request.js")')
+        if has_kvs:
+            w(f'  key_value_store_associations = [aws_cloudfront_key_value_store.{san}_kvs.arn]')
+        w('}')
+        vr_arn_expr = f"aws_cloudfront_function.{san}_viewer_request.arn"
+
+    if vresp_cfg.get("mode") == "shared":
+        w('')
+        w(f'data "aws_cloudfront_function" "shared_resp" {{')
+        w(f'  name  = "{vresp_cfg["name"]}"')
+        w(f'  stage = "LIVE"')
+        w('}')
+        vresp_arn_expr = "data.aws_cloudfront_function.shared_resp.arn"
+    elif vresp_cfg.get("mode") == "independent":
+        w('')
+        w(f'resource "aws_cloudfront_function" "{san}_viewer_response" {{')
+        w(f'  name    = "{vresp_cfg.get("name", cff_name(san, "viewer_response"))}"')
+        w(f'  runtime = "cloudfront-js-2.0"')
+        w(f'  publish = true')
+        w(f'  code    = file("${{path.module}}/functions/{san}_viewer_response.js")')
+        w('}')
+        vresp_arn_expr = f"aws_cloudfront_function.{san}_viewer_response.arn"
+    else:
+        vresp_arn_expr = ""
+
+    # Locals block — main.tf references local.viewer_request_arn / local.viewer_response_arn
+    w('')
+    w('locals {')
+    w(f'  viewer_request_arn  = {vr_arn_expr}')
+    if vresp_arn_expr:
+        w(f'  viewer_response_arn = {vresp_arn_expr}')
+    w('}')
+
+    if escalated:
+        w('')
+        le_name = cff_name(san, "viewer_request").replace("-req", "-le-origin")
+        w(f'data "archive_file" "{san}_origin_request_zip" {{')
+        w(f'  type        = "zip"')
+        w(f'  source_file = "${{path.module}}/lambda/origin_request_handler.js"')
+        w(f'  output_path = "${{path.module}}/lambda/origin_request_handler.js.zip"')
+        w('}')
+        w('')
+        w(f'resource "aws_lambda_function" "{san}_origin_request" {{')
+        w(f'  provider         = aws.us_east_1')
+        w(f'  filename         = data.archive_file.{san}_origin_request_zip.output_path')
+        w(f'  source_code_hash = data.archive_file.{san}_origin_request_zip.output_base64sha256')
+        w(f'  function_name    = "{le_name}"')
+        w(f'  role             = aws_iam_role.{san}_lambda_edge.arn')
+        w(f'  handler          = "origin_request_handler.handler"')
+        w(f'  runtime          = "nodejs20.x"')
+        w(f'  publish          = true')
+        w('}')
+
+    if has_le_origin_resp or escalated:
+        w('')
+        role_name = cff_name(san, "viewer_request").replace("-req", "-le-role")
+        w(f'resource "aws_iam_role" "{san}_lambda_edge" {{')
+        w(f'  name = "{role_name}"')
+        w(f'  assume_role_policy = jsonencode({{')
+        w(f'    Version = "2012-10-17"')
+        w(f'    Statement = [{{')
+        w(f'      Action = "sts:AssumeRole"')
+        w(f'      Effect = "Allow"')
+        w(f'      Principal = {{ Service = ["lambda.amazonaws.com", "edgelambda.amazonaws.com"] }}')
+        w(f'    }}]')
+        w(f'  }})')
+        w('}')
+        w('')
+        w(f'resource "aws_iam_role_policy_attachment" "{san}_lambda_edge_basic" {{')
+        w(f'  role       = aws_iam_role.{san}_lambda_edge.name')
+        w(f'  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"')
+        w('}')
+
+    if has_le_origin_resp:
+        w('')
+        le_resp_name = cff_name(san, "viewer_request").replace("-req", "-le-oresp")
+        w(f'data "archive_file" "{san}_origin_response_zip" {{')
+        w(f'  type        = "zip"')
+        w(f'  source_file = "${{path.module}}/lambda/default_cache_origin_response.js"')
+        w(f'  output_path = "${{path.module}}/lambda/default_cache_origin_response.zip"')
+        w('}')
+        w('')
+        w(f'resource "aws_lambda_function" "{san}_origin_response" {{')
+        w(f'  provider         = aws.us_east_1')
+        w(f'  filename         = data.archive_file.{san}_origin_response_zip.output_path')
+        w(f'  source_code_hash = data.archive_file.{san}_origin_response_zip.output_base64sha256')
+        w(f'  function_name    = "{le_resp_name}"')
+        w(f'  role             = aws_iam_role.{san}_lambda_edge.arn')
+        w(f'  handler          = "default_cache_origin_response.handler"')
+        w(f'  runtime          = "nodejs20.x"')
+        w(f'  publish          = true')
+        w('}')
+
+    # Placeholder for origin-request Lambda (filled by escalation logic above)
+    if not escalated:
+        w('')
+        w('# --- LAMBDA_EDGE_PLACEHOLDER ---')
+    ft_path = os.path.join(domain_dir, "functions.tf")
+    with open(ft_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":
