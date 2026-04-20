@@ -117,17 +117,18 @@ cloudflare-to-aws-cdn/
     ├── modules/
     │   └── cloudfront_distribution/ # Shared module (do not edit)
     ├── shared/
-    │   └── policies.tf              # Deduplicated CachePolicy, ORP, RHP
+    │   ├── policies.tf              # Deduplicated CachePolicy, ORP, RHP
+    │   └── functions.tf             # Shared CFF resources (content-hash dedup)
     └── domains/
         └── <domain>/
             ├── main.tf              # Module call (~50-80 lines)
             ├── outputs.tf
-            ├── functions.tf
+            ├── functions.tf         # Refs shared CFF or defines independent CFF
             ├── kvs.tf               # Only if bulk redirects exist
             ├── seed-kvs.py          # Only if KVS exists
             ├── test-cdn-rules.py    # Post-deployment validation script
-            ├── functions/
-            │   └── viewer_request.js
+            ├── functions/           # Only if domain has independent CFF
+            │   └── <domain>_viewer_request.js
             └── lambda/              # Only if CF Function exceeds 10KB
 ```
 
@@ -152,7 +153,7 @@ Shared policies → Lambda@Edge (if any) → each domain independently → KVS d
 <details>
 <summary>Expected conversion time</summary>
 
-Conversion time depends on the number of rules/domains. Benchmark with the included `examples/cloudflare-configs/` (1 zone, 7 proxied domains, 34 CDN rules + 8 WAF rules across 12 rule types — including regex expressions, OR conditions, geo-based routing, CORS, bulk redirects, and inline error pages):
+Conversion time depends on the number of rules/domains. Benchmark with the included `examples/cloudflare-configs/` (1 zone, 54 proxied domains, 80+ CDN rules + 20 WAF rules across 12+ rule types — including regex expressions, OR conditions, geo-based routing, CORS, bulk redirects, inline error pages, and KV store data):
 
 | Pipeline | Time |
 |----------|------|

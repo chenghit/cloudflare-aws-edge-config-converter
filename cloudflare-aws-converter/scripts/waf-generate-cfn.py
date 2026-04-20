@@ -7,7 +7,7 @@ IP sets, regex pattern sets, and two WebACL resources.
 Usage:
     python3 waf-generate-cfn.py <output_dir>
 
-Exit codes: 0 = OK, 1 = error, 2 = quota exceeded.
+Exit codes: 0 = OK, 2 = fatal error, 3 = ref count exceeded (auto fallback to split).
 """
 import copy, json, sys, os, re, math
 

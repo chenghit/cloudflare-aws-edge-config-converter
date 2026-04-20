@@ -1,7 +1,8 @@
 """Cloudflare expression parser — Phase 1 (regex + string ops, no AST).
 
 Parses simple Cloudflare rule expressions into structured conditions.
-Complex expressions are left as raw_expression for LLM (Stage 8 tf-domain).
+Complex expressions are left as raw_expression for cdn-generate-js.py
+(which generates JS condition code or a // TODO comment).
 
 Returns (condition, raw_expression) — exactly one is non-None.
 """

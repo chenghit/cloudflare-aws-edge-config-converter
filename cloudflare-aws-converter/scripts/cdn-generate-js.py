@@ -515,7 +515,8 @@ def _resolve_dynamic_value(params, key, target="cff"):
         try:
             tree = parse_dynamic_expression(val)
             return dyn_expr_to_js(tree, target)
-        except Exception:
+        except Exception as e:
+            print(f"  WARN: dynamic expression parse failed, using literal: {val[:60]}... ({e})", file=sys.stderr)
             return js_string(val)
     return js_string(val)
 
@@ -541,7 +542,8 @@ def _generate_op_js(op, target="cff", indent="  "):
     if raw_expr and not cond:
         try:
             cond = parse_expression_full(raw_expr)
-        except Exception:
+        except Exception as e:
+            print(f"  WARN: condition parse failed: {raw_expr[:60]}... ({e})", file=sys.stderr)
             lines.append(f"{indent}// TODO: could not parse condition: {raw_expr[:80]}")
             return lines
 

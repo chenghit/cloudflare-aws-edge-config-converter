@@ -150,7 +150,7 @@ cloudflare-to-aws-cdn/
 <details>
 <summary>预计转换时间</summary>
 
-转换时间取决于规则/域名数量。以下基准使用项目自带的 `examples/cloudflare-configs/`（1 个 zone、7 个代理域名、34 条 CDN 规则 + 8 条 WAF 规则，覆盖 12 种规则类型——包括正则表达式、OR 条件、地理路由、CORS、批量重定向和内联错误页面）：
+转换时间取决于规则/域名数量。以下基准使用项目自带的 `examples/cloudflare-configs/`（1 个 zone、54 个代理域名、80+ 条 CDN 规则 + 20 条 WAF 规则，覆盖 12+ 种规则类型——包括正则表达式、OR 条件、地理路由、CORS、批量重定向、内联错误页面和 KV 存储数据）：
 
 | 流程 | 时间 |
 |------|------|

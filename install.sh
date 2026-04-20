@@ -54,6 +54,7 @@ echo "Copying skills to $SKILLS_DIR..."
 cp cloudflare-aws-converter/SKILL.md "$SKILLS_DIR/"
 cp -r cloudflare-aws-converter/references "$SKILLS_DIR/"
 cp -r cloudflare-aws-converter/scripts "$SKILLS_DIR/"
+rm -rf "$SKILLS_DIR/scripts/__pycache__"
 
 echo ""
 echo "✅ Installation complete!"
