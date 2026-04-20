@@ -1136,28 +1136,26 @@ def main():
     # ── Phase 3: Write files (atomic) ────────────────────────────────────────
 
     # KVS dedup: hash ALL kvs-data.json BEFORE cleanup (files get deleted below)
-    shared_kvs_name = None
-    shared_kvs_domains = []
+    shared_kvs_groups = []  # list of {"name": str, "domains": [...], "content": str}
+    shared_kvs_domains = []  # flat list of all domains using shared KVS
     kvs_hashes = {}
     for san in all_vr:
         kvs_path = os.path.join(output_dir, "terraform", "domains", san, "kvs-data.json")
         if os.path.exists(kvs_path):
             with open(kvs_path, "rb") as f:
-                kvs_hashes[san] = hashlib.sha256(f.read()).hexdigest()[:12]
+                content = f.read()
+                kvs_hashes[san] = (hashlib.sha256(content).hexdigest()[:12], content.decode())
 
     if kvs_hashes:
         kvs_groups = {}
-        for san, h in kvs_hashes.items():
+        for san, (h, _) in kvs_hashes.items():
             kvs_groups.setdefault(h, []).append(san)
-        largest_group = max(kvs_groups.values(), key=len)
-        if len(largest_group) >= 2:
-            largest_hash = kvs_hashes[largest_group[0]]
-            shared_kvs_name = f"cf-shared-kvs-{largest_hash[:6]}"
-            shared_kvs_domains = largest_group
-            # Read KVS data before cleanup
-            src_kvs = os.path.join(output_dir, "terraform", "domains", largest_group[0], "kvs-data.json")
-            with open(src_kvs) as f:
-                shared_kvs_content = f.read()
+        for h, domains in kvs_groups.items():
+            if len(domains) >= 2:
+                name = f"cf-shared-kvs-{h[:6]}"
+                content = kvs_hashes[domains[0]][1]
+                shared_kvs_groups.append({"name": name, "domains": domains, "content": content})
+                shared_kvs_domains.extend(domains)
 
     # Clean up previous run
     shared_functions_dir = os.path.join(output_dir, "terraform", "shared", "functions")
@@ -1185,6 +1183,12 @@ def main():
     written_shared = set()
     shared_tf_lines = []
 
+    # Build domain → shared KVS name mapping
+    domain_to_shared_kvs = {}
+    for grp in shared_kvs_groups:
+        for san in grp["domains"]:
+            domain_to_shared_kvs[san] = grp["name"]
+
     for cff in shared_cffs:
         if cff["name"] in written_shared:
             continue
@@ -1203,25 +1207,30 @@ def main():
             f'  comment = "Shared by {len(cff["domains"])} domains ({comment_domains})"',
             f'  code    = file("${{path.module}}/functions/{cff["name"]}.js")',
         ]
-        # Add KVS association for shared viewer_request CFF
-        if cff["event_type"] == "viewer_request" and shared_kvs_name:
-            kvs_tf_id = shared_kvs_name.replace("-", "_")
-            shared_tf_lines.append(f'  key_value_store_associations = [aws_cloudfront_key_value_store.{kvs_tf_id}.arn]')
+        # Add KVS association if this shared CFF uses KVS (check JS content for cf.kvs)
+        if "cf.kvs(" in cff["js"] and shared_kvs_groups:
+            # Find which KVS group covers this CFF's domains
+            sample_san = cff["domains"][0]
+            kvs_name = domain_to_shared_kvs.get(sample_san)
+            if kvs_name:
+                kvs_tf_id = kvs_name.replace("-", "_")
+                shared_tf_lines.append(f'  key_value_store_associations = [aws_cloudfront_key_value_store.{kvs_tf_id}.arn]')
         shared_tf_lines += ['}', '']
 
-    # Add shared KVS resource to shared/functions.tf
-    if shared_kvs_name:
-        kvs_tf_id = shared_kvs_name.replace("-", "_")
+    # Add shared KVS resources to shared/functions.tf
+    for grp in shared_kvs_groups:
+        kvs_tf_id = grp["name"].replace("-", "_")
         shared_tf_lines += [
             f'resource "aws_cloudfront_key_value_store" "{kvs_tf_id}" {{',
-            f'  name    = "{shared_kvs_name}"',
-            f'  comment = "Shared KVS for {len(shared_kvs_domains)} domains"',
+            f'  name    = "{grp["name"]}"',
+            f'  comment = "Shared KVS for {len(grp["domains"])} domains"',
             '}', '',
             f'output "{kvs_tf_id}_arn" {{',
             f'  value = aws_cloudfront_key_value_store.{kvs_tf_id}.arn',
             '}', '',
         ]
-        # Generate shared seed-kvs.py
+        # Generate shared seed-kvs.py (handles all shared KVS groups)
+        kvs_tf_id_for_seed = grp["name"].replace("-", "_")
         shared_seed = f'''#!/usr/bin/env python3
 """Seed shared KVS data. Run after 'cd terraform/shared && terraform apply'."""
 import json, subprocess, sys, time
@@ -1234,7 +1243,7 @@ def main():
         print("ERROR: boto3 required. Install with: pip install boto3", file=sys.stderr)
         sys.exit(1)
 
-    result = subprocess.run(["terraform", "output", "-raw", "{kvs_tf_id}_arn"], capture_output=True, text=True)
+    result = subprocess.run(["terraform", "output", "-raw", "{kvs_tf_id_for_seed}_arn"], capture_output=True, text=True)
     if result.returncode != 0:
         print("ERROR: terraform output failed. Run 'terraform apply' first.", file=sys.stderr)
         sys.exit(1)
@@ -1280,7 +1289,7 @@ if __name__ == "__main__":
 
         # Write shared kvs-data.json
         with open(os.path.join(output_dir, "terraform", "shared", "kvs-data.json"), "w") as f:
-            f.write(shared_kvs_content)
+            f.write(grp["content"])
 
     if shared_tf_lines:
         with open(os.path.join(output_dir, "terraform", "shared", "functions.tf"), "w") as f:
@@ -1316,7 +1325,7 @@ if __name__ == "__main__":
 
         _write_domain_functions_tf(san, config, ir, domain_dir,
                                    kvs_is_shared=(san in shared_kvs_domains),
-                                   shared_kvs_name=shared_kvs_name)
+                                   shared_kvs_name=domain_to_shared_kvs.get(san))
 
     # ── Phase 3b: Validate shared module terraform ─────────────────────────────
 
