@@ -370,12 +370,14 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     cff_count = len(all_irs) * 2  # viewer_request + viewer_response per domain
     if cff_count > 100:
         cff_warning = (f"⚠️ **CloudFront Functions: ~{cff_count} (default quota: 100).** "
-                       f"Deployment will fail unless you request a quota increase via "
-                       f"AWS Support case (not available in Service Quotas). "
+                       f"Deployment will fail unless the quota is raised. This quota is not "
+                       f"listed as adjustable in Service Quotas — contact AWS Support to "
+                       f"inquire, but approval is not guaranteed. "
                        f"Alternatively, deploy only a subset of domains — see Step 3.")
     elif cff_count > 80:
         cff_warning = (f"⚠️ CloudFront Functions: ~{cff_count} (default quota: 100). "
-                       f"Approaching limit — increase requires AWS Support case.")
+                       f"Approaching limit — not listed as adjustable in Service Quotas, "
+                       f"contact AWS Support to inquire.")
     else:
         cff_warning = None
 
