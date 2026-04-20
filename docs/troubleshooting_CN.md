@@ -187,3 +187,27 @@ aws cloudformation delete-stack \
 
 # 然后通过 AWS Console 或 CLI 手动删除保留的 IP set
 ```
+
+## 单域名在 Per-Domain 拆分后仍超过 50 引用语句限制
+
+**问题**：Pipeline 自动拆分为 per-domain WebACL 后，某个域名仍然超过每个 WebACL 50 个 IP set + regex set 引用的限制。Pipeline 会在 `FAILED_ITEMS` 中报告该域名。
+
+**为什么这种情况极少发生**：单域名超过 50 个引用意味着该域名有 50+ 条规则各自引用不同的 IP set。Cloudflare Enterprise 计划每个 zone 最多 100 条自定义规则，其中引用 IP set 的通常不超过 20-30 条。
+
+**解决方案**（按优先级排序）：
+
+1. **合并 IP set**：将用途相同的多个 IP set 合并为一个（例如，将多个 block list 合并）。IP set 越少，引用越少。
+
+2. **申请 entity-level 限制提升**：联系 AWS Support 将特定 WebACL 的引用限制从 50 提升到 100。步骤：
+   - 用 CloudFormation 部署一个最小 WebACL（仅默认动作）
+   - 将 WebACL ARN 提供给 AWS Support，申请引用限制提升
+   - 批准后，重新部署完整的 CloudFormation 模板更新该 WebACL
+   - 注意：这是 per-WebACL 的，不是账号级别。新建的 WebACL 仍然默认 50。
+
+3. **Rule Group 方案**：将 IP set 引用放入 Rule Group。WebACL 引用 Rule Group（算 1 个引用），Rule Group 内部的 IP set 引用不计入 WebACL 的限制。注意事项：
+   - Rule Group 内部也有 50 引用限制，可能需要多个 Rule Group
+   - Rule Group 创建时需要声明固定的 WCU 容量
+   - WebACL 层规则产生的 label 在 Rule Group 内部不可见，会破坏 skip/scope-down 逻辑
+   - 优先级管理更加复杂
+
+Per-domain 拆分方案能处理绝大多数真实场景。以上方案是极端配置的应急手段。

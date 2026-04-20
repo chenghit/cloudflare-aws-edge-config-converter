@@ -187,3 +187,27 @@ aws cloudformation delete-stack \
 
 # Then manually delete the retained IP sets via AWS Console or CLI
 ```
+
+## Single Domain Exceeds 50 Reference Statements After Per-Domain Split
+
+**Problem**: After the pipeline auto-splits into per-domain WebACLs, a single domain still exceeds the 50 IP set + regex set reference limit per WebACL. The pipeline reports this domain in `FAILED_ITEMS`.
+
+**Why this is rare**: A single domain exceeding 50 references means that domain has 50+ rules each referencing a different IP set. Cloudflare Enterprise plan allows max 100 custom rules per zone, and typically fewer than 20-30 reference IP sets. This scenario is extremely unlikely in practice.
+
+**Solutions** (in order of preference):
+
+1. **Consolidate IP sets**: Merge multiple IP sets that serve the same purpose (e.g., combine several block lists into one). Fewer IP sets = fewer references.
+
+2. **Request entity-level limit increase**: Contact AWS Support to raise the reference limit for a specific WebACL from 50 to 100. Steps:
+   - Deploy a minimal WebACL (default action only) using CloudFormation
+   - Provide the WebACL ARN to AWS Support and request a reference limit increase
+   - Once approved, re-deploy the full CloudFormation template to update the WebACL with all rules
+   - Note: this is per-WebACL, not account-wide. New WebACLs still default to 50.
+
+3. **Rule Group workaround**: Move IP set references into Rule Groups. The WebACL references the Rule Group (counts as 1 reference), and IP set references inside the Rule Group don't count toward the WebACL's limit. Caveats:
+   - Rule Groups also have a 50 reference limit internally — may need multiple Rule Groups
+   - Rule Groups require a fixed WCU capacity declaration at creation time
+   - Labels produced by WebACL-level rules are not visible inside Rule Groups — this breaks skip/scope-down logic if rules are split across layers
+   - Priority management becomes more complex
+
+The per-domain split approach handles the vast majority of real-world cases. These workarounds are escape hatches for extreme configurations.
