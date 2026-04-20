@@ -30,8 +30,7 @@ FORBIDDEN_PATTERNS = [
 
 
 def validate_domain(ir, output_dir, manifest=None):
-    """Validate JS files for a single domain. Returns validation report dict.
-    If validated_cache is provided, shared JS results are reused."""
+    """Validate JS files for a single domain. Returns validation report dict."""
     hostname = ir["metadata"]["hostname"]
     sanitized = ir["metadata"]["sanitized_name"]
     domain_dir = os.path.join(output_dir, "terraform", "domains", sanitized)
@@ -230,7 +229,6 @@ def main():
             manifest = json.load(f)
 
     results = []
-    validated_cache = {}  # vr_path → checks (shared JS validated once)
     for ir_file in ir_files:
         with open(ir_file) as f:
             ir = json.load(f)

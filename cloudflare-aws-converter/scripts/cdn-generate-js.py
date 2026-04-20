@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1205,7 +1206,6 @@ def main():
 
     shared_dir = os.path.join(output_dir, "terraform", "shared")
     if shared_tf_lines and os.path.isdir(shared_dir):
-        import subprocess
         init_result = subprocess.run(
             ["terraform", "init", "-backend=false"],
             cwd=shared_dir, capture_output=True, text=True)
