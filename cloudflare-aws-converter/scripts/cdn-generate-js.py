@@ -1209,7 +1209,9 @@ def main():
         ]
         # Add KVS association if this shared CFF uses KVS (check JS content for cf.kvs)
         if "cf.kvs(" in cff["js"] and shared_kvs_groups:
-            # Find which KVS group covers this CFF's domains
+            # Safe to use domains[0]: if CFF content is identical, KVS data must also be
+            # identical (KVS keys are derived from the same rules). Different KVS content
+            # would produce different JS, which wouldn't be in the same CFF dedup group.
             sample_san = cff["domains"][0]
             kvs_name = domain_to_shared_kvs.get(sample_san)
             if kvs_name:
@@ -1229,10 +1231,12 @@ def main():
             f'  value = aws_cloudfront_key_value_store.{kvs_tf_id}.arn',
             '}', '',
         ]
-        # Generate shared seed-kvs.py (handles all shared KVS groups)
+        # Generate per-group seed script and data file
         kvs_tf_id_for_seed = grp["name"].replace("-", "_")
+        kvs_data_file = f"kvs-data-{grp['name']}.json" if len(shared_kvs_groups) > 1 else "kvs-data.json"
+        seed_file = f"seed-kvs-{grp['name']}.py" if len(shared_kvs_groups) > 1 else "seed-kvs.py"
         shared_seed = f'''#!/usr/bin/env python3
-"""Seed shared KVS data. Run after 'cd terraform/shared && terraform apply'."""
+"""Seed shared KVS data for {grp["name"]}. Run after 'cd terraform/shared && terraform apply'."""
 import json, subprocess, sys, time
 
 def main():
@@ -1249,7 +1253,7 @@ def main():
         sys.exit(1)
     kvs_arn = result.stdout.strip()
 
-    with open("kvs-data.json") as f:
+    with open("{kvs_data_file}") as f:
         entries = json.load(f)["data"]
     if not entries:
         print("No KVS data to seed.")
@@ -1279,16 +1283,15 @@ def main():
         else:
             print(f"ERROR: batch {{i // batch_size + 1}} failed after 5 retries", file=sys.stderr)
             sys.exit(1)
-    print(f"Done: {{total}} keys seeded into shared KVS")
+    print(f"Done: {{total}} keys seeded into {grp['name']}")
 
 if __name__ == "__main__":
     main()
 '''
-        with open(os.path.join(output_dir, "terraform", "shared", "seed-kvs.py"), "w") as f:
+        with open(os.path.join(output_dir, "terraform", "shared", seed_file), "w") as f:
             f.write(shared_seed)
 
-        # Write shared kvs-data.json
-        with open(os.path.join(output_dir, "terraform", "shared", "kvs-data.json"), "w") as f:
+        with open(os.path.join(output_dir, "terraform", "shared", kvs_data_file), "w") as f:
             f.write(grp["content"])
 
     if shared_tf_lines:
