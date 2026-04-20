@@ -1247,6 +1247,13 @@ def main():
             f.write(f"- **Add a new domain**: Create a module under `terraform/domains/`, use `data \"aws_cloudfront_function\"` to reference shared CFF by name.\n")
             f.write(f"- **Remove a domain**: `cd terraform/domains/<domain> && terraform destroy`.\n")
 
+    # CFF quota check (post-dedup)
+    if actual_count > 100:
+        print(f"  WARN: CFF count {actual_count} exceeds default quota 100. "
+              f"Contact AWS Support to inquire about increase, or deploy a subset of domains.", file=sys.stderr)
+    elif actual_count > 80:
+        print(f"  WARN: CFF count {actual_count} approaching default quota 100.", file=sys.stderr)
+
     # ── Report ───────────────────────────────────────────────────────────────
 
     ok_count = len(all_vr)
