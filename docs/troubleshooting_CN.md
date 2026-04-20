@@ -198,7 +198,7 @@ aws cloudformation delete-stack \
 
 1. **合并 IP set**：将用途相同的多个 IP set 合并为一个（例如，将多个 block list 合并）。IP set 越少，引用越少。
 
-2. **申请 entity-level 限制提升**：联系 AWS Support 将特定 WebACL 的引用限制从 50 提升到 100。步骤：
+2. **尝试申请 entity-level 限制提升（不保证批准）**：尝试联系 AWS Support 申请提升特定 WebACL 的引用限制。官方文档未标注此限制可调整，能否批准取决于你的 support plan 和账号关系。如果批准，步骤如下：
    - 用 CloudFormation 部署一个最小 WebACL（仅默认动作）
    - 将 WebACL ARN 提供给 AWS Support，申请引用限制提升
    - 批准后，重新部署完整的 CloudFormation 模板更新该 WebACL

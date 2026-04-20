@@ -198,7 +198,7 @@ aws cloudformation delete-stack \
 
 1. **Consolidate IP sets**: Merge multiple IP sets that serve the same purpose (e.g., combine several block lists into one). Fewer IP sets = fewer references.
 
-2. **Request entity-level limit increase**: Contact AWS Support to raise the reference limit for a specific WebACL from 50 to 100. Steps:
+2. **Request entity-level limit increase (not guaranteed)**: Try contacting AWS Support to request a higher reference limit for a specific WebACL. This is not documented as adjustable and approval is not guaranteed — it depends on your support plan and account relationship. Steps if approved:
    - Deploy a minimal WebACL (default action only) using CloudFormation
    - Provide the WebACL ARN to AWS Support and request a reference limit increase
    - Once approved, re-deploy the full CloudFormation template to update the WebACL with all rules
