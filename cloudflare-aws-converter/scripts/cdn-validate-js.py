@@ -39,12 +39,41 @@ def validate_domain(ir, output_dir):
 
     checks = []
 
-    # Find JS files
-    vr_path = os.path.join(functions_dir, f"{sanitized}_viewer_request.js")
-    vresp_path = os.path.join(functions_dir, f"{sanitized}_viewer_response.js")
+    # Resolve JS file paths via dedup manifest (shared or independent)
+    manifest_path = os.path.join(output_dir, "cff_dedup_manifest.json")
+    vr_path = None
+    vresp_path = None
 
-    if not os.path.exists(vr_path):
-        checks.append({"name": "file_exists", "status": "FAIL", "detail": f"Missing {vr_path}"})
+    if os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        cfg = manifest.get("domain_config", {}).get(sanitized, {})
+        vr_cfg = cfg.get("viewer_request", {})
+        vresp_cfg = cfg.get("viewer_response", {})
+
+        if vr_cfg.get("mode") == "shared":
+            # Find shared JS file by name
+            for sf in manifest.get("shared_functions", []):
+                if sf["name"] == vr_cfg["name"] and sf["event_type"] == "viewer_request":
+                    vr_path = os.path.join(output_dir, "terraform", sf["file"])
+                    break
+        elif vr_cfg.get("mode") == "independent":
+            vr_path = os.path.join(functions_dir, f"{sanitized}_viewer_request.js")
+
+        if vresp_cfg.get("mode") == "shared":
+            for sf in manifest.get("shared_functions", []):
+                if sf["name"] == vresp_cfg["name"] and sf["event_type"] == "viewer_response":
+                    vresp_path = os.path.join(output_dir, "terraform", sf["file"])
+                    break
+        elif vresp_cfg.get("mode") == "independent":
+            vresp_path = os.path.join(functions_dir, f"{sanitized}_viewer_response.js")
+    else:
+        # No manifest — legacy mode (pre-dedup)
+        vr_path = os.path.join(functions_dir, f"{sanitized}_viewer_request.js")
+        vresp_path = os.path.join(functions_dir, f"{sanitized}_viewer_response.js")
+
+    if not vr_path or not os.path.exists(vr_path):
+        checks.append({"name": "file_exists", "status": "FAIL", "detail": f"Missing viewer_request JS: {vr_path}"})
         return _report(hostname, "FAIL", checks)
 
     with open(vr_path) as f:
@@ -131,7 +160,7 @@ def validate_domain(ir, output_dir):
     })
 
     # Validate viewer_response.js if exists
-    if os.path.exists(vresp_path):
+    if vresp_path and os.path.exists(vresp_path):
         with open(vresp_path) as f:
             vresp_js = f.read()
         resp_issues = []
