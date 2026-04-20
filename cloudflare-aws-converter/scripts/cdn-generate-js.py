@@ -1135,6 +1135,31 @@ def main():
 
     # ── Phase 3: Write files (atomic) ────────────────────────────────────────
 
+    # KVS dedup: hash ALL kvs-data.json BEFORE cleanup (files get deleted below)
+    shared_kvs_name = None
+    shared_kvs_domains = []
+    kvs_hashes = {}
+    for san in all_vr:
+        kvs_path = os.path.join(output_dir, "terraform", "domains", san, "kvs-data.json")
+        if os.path.exists(kvs_path):
+            with open(kvs_path, "rb") as f:
+                kvs_hashes[san] = hashlib.sha256(f.read()).hexdigest()[:12]
+
+    if kvs_hashes:
+        kvs_groups = {}
+        for san, h in kvs_hashes.items():
+            kvs_groups.setdefault(h, []).append(san)
+        largest_group = max(kvs_groups.values(), key=len)
+        if len(largest_group) >= 2:
+            largest_hash = kvs_hashes[largest_group[0]]
+            shared_kvs_name = f"cf-shared-kvs-{largest_hash[:6]}"
+            shared_kvs_domains = largest_group
+            # Read KVS data before cleanup
+            src_kvs = os.path.join(output_dir, "terraform", "domains", largest_group[0], "kvs-data.json")
+            with open(src_kvs) as f:
+                shared_kvs_content = f.read()
+
+    # Clean up previous run
     shared_functions_dir = os.path.join(output_dir, "terraform", "shared", "functions")
     if os.path.isdir(shared_functions_dir):
         shutil.rmtree(shared_functions_dir)
@@ -1146,10 +1171,20 @@ def main():
         if os.path.isdir(fd):
             shutil.rmtree(fd)
 
-    # Shared JS files + functions.tf
+    # Remove per-domain KVS files for shared KVS domains
+    if shared_kvs_domains:
+        for san in shared_kvs_domains:
+            domain_dir = os.path.join(output_dir, "terraform", "domains", san)
+            for fname in ("kvs.tf", "kvs-data.json", "seed-kvs.py"):
+                fpath = os.path.join(domain_dir, fname)
+                if os.path.exists(fpath):
+                    os.remove(fpath)
+
+    # Shared JS files + functions.tf + KVS
     os.makedirs(shared_functions_dir, exist_ok=True)
     written_shared = set()
     shared_tf_lines = []
+
     for cff in shared_cffs:
         if cff["name"] in written_shared:
             continue
@@ -1167,8 +1202,85 @@ def main():
             f'  publish = true',
             f'  comment = "Shared by {len(cff["domains"])} domains ({comment_domains})"',
             f'  code    = file("${{path.module}}/functions/{cff["name"]}.js")',
+        ]
+        # Add KVS association for shared viewer_request CFF
+        if cff["event_type"] == "viewer_request" and shared_kvs_name:
+            kvs_tf_id = shared_kvs_name.replace("-", "_")
+            shared_tf_lines.append(f'  key_value_store_associations = [aws_cloudfront_key_value_store.{kvs_tf_id}.arn]')
+        shared_tf_lines += ['}', '']
+
+    # Add shared KVS resource to shared/functions.tf
+    if shared_kvs_name:
+        kvs_tf_id = shared_kvs_name.replace("-", "_")
+        shared_tf_lines += [
+            f'resource "aws_cloudfront_key_value_store" "{kvs_tf_id}" {{',
+            f'  name    = "{shared_kvs_name}"',
+            f'  comment = "Shared KVS for {len(shared_kvs_domains)} domains"',
+            '}', '',
+            f'output "{kvs_tf_id}_arn" {{',
+            f'  value = aws_cloudfront_key_value_store.{kvs_tf_id}.arn',
             '}', '',
         ]
+        # Generate shared seed-kvs.py
+        shared_seed = f'''#!/usr/bin/env python3
+"""Seed shared KVS data. Run after 'cd terraform/shared && terraform apply'."""
+import json, subprocess, sys, time
+
+def main():
+    try:
+        import boto3
+        from botocore.exceptions import ClientError
+    except ImportError:
+        print("ERROR: boto3 required. Install with: pip install boto3", file=sys.stderr)
+        sys.exit(1)
+
+    result = subprocess.run(["terraform", "output", "-raw", "{kvs_tf_id}_arn"], capture_output=True, text=True)
+    if result.returncode != 0:
+        print("ERROR: terraform output failed. Run 'terraform apply' first.", file=sys.stderr)
+        sys.exit(1)
+    kvs_arn = result.stdout.strip()
+
+    with open("kvs-data.json") as f:
+        entries = json.load(f)["data"]
+    if not entries:
+        print("No KVS data to seed.")
+        return
+
+    client = boto3.client("cloudfront-keyvaluestore")
+    etag = client.describe_key_value_store(KvsARN=kvs_arn)["ETag"]
+    batch_size = 50
+    total = len(entries)
+    for i in range(0, total, batch_size):
+        batch = entries[i:i + batch_size]
+        puts = [{{"Key": e["key"], "Value": e["value"]}} for e in batch]
+        for attempt in range(5):
+            try:
+                resp = client.update_keys(KvsARN=kvs_arn, IfMatch=etag, Puts=puts)
+                etag = resp["ETag"]
+                print(f"  Batch {{i // batch_size + 1}}/{{(total + batch_size - 1) // batch_size}}: {{len(batch)}} keys")
+                break
+            except ClientError as e:
+                code = e.response["Error"]["Code"]
+                if code == "ConflictException":
+                    etag = client.describe_key_value_store(KvsARN=kvs_arn)["ETag"]
+                elif code in ("ThrottlingException", "InternalServerException"):
+                    time.sleep(2 ** attempt)
+                else:
+                    raise
+        else:
+            print(f"ERROR: batch {{i // batch_size + 1}} failed after 5 retries", file=sys.stderr)
+            sys.exit(1)
+    print(f"Done: {{total}} keys seeded into shared KVS")
+
+if __name__ == "__main__":
+    main()
+'''
+        with open(os.path.join(output_dir, "terraform", "shared", "seed-kvs.py"), "w") as f:
+            f.write(shared_seed)
+
+        # Write shared kvs-data.json
+        with open(os.path.join(output_dir, "terraform", "shared", "kvs-data.json"), "w") as f:
+            f.write(shared_kvs_content)
 
     if shared_tf_lines:
         with open(os.path.join(output_dir, "terraform", "shared", "functions.tf"), "w") as f:
@@ -1202,7 +1314,9 @@ def main():
             with open(os.path.join(lambda_dir, "default_cache_origin_response.js"), "w") as f:
                 f.write(_generate_origin_response_template(le_or))
 
-        _write_domain_functions_tf(san, config, ir, domain_dir)
+        _write_domain_functions_tf(san, config, ir, domain_dir,
+                                   kvs_is_shared=(san in shared_kvs_domains),
+                                   shared_kvs_name=shared_kvs_name)
 
     # ── Phase 3b: Validate shared module terraform ─────────────────────────────
 
@@ -1277,13 +1391,14 @@ def main():
         sys.exit(2)
 
 
-def _write_domain_functions_tf(san, config, ir, domain_dir):
+def _write_domain_functions_tf(san, config, ir, domain_dir, kvs_is_shared=False, shared_kvs_name=None):
     """Write functions.tf — shared data source refs or independent CFF resources.
     Always exports locals: local.viewer_request_arn and local.viewer_response_arn
     so main.tf can reference them uniformly regardless of shared/independent mode."""
     vr_cfg = config.get("viewer_request", {})
     vresp_cfg = config.get("viewer_response", {})
     has_kvs = any(ir["metadata"].get("kvs_requirements", {}).values())
+    needs_local_kvs = has_kvs and not kvs_is_shared
     le = ir["metadata"].get("lambda_edge", {})
     has_le_origin_resp = le.get("origin_response") is not None
     escalated = "_escalated_origin_ops" in ir
@@ -1303,8 +1418,11 @@ def _write_domain_functions_tf(san, config, ir, domain_dir):
         w(f'  runtime = "cloudfront-js-2.0"')
         w(f'  publish = true')
         w(f'  code    = file("${{path.module}}/functions/{san}_viewer_request.js")')
-        if has_kvs:
+        if needs_local_kvs:
             w(f'  key_value_store_associations = [aws_cloudfront_key_value_store.{san}_kvs.arn]')
+        elif kvs_is_shared and has_kvs:
+            kvs_tf_id = shared_kvs_name.replace("-", "_") if shared_kvs_name else ""
+            w(f'  key_value_store_associations = [data.terraform_remote_state.shared.outputs.{kvs_tf_id}_arn]')
         w('}')
         vr_arn_expr = f"aws_cloudfront_function.{san}_viewer_request.arn"
 
@@ -1326,6 +1444,14 @@ def _write_domain_functions_tf(san, config, ir, domain_dir):
         vresp_arn_expr = f"aws_cloudfront_function.{san}_viewer_response.arn"
     else:
         vresp_arn_expr = ""
+
+    # Shared KVS reference (for independent CFF that uses shared KVS)
+    if kvs_is_shared and has_kvs and vr_cfg.get("mode") != "shared":
+        w('')
+        w(f'data "terraform_remote_state" "shared" {{')
+        w(f'  backend = "local"')
+        w(f'  config = {{ path = "${{path.module}}/../../shared/terraform.tfstate" }}')
+        w('}')
 
     # Locals block — main.tf references local.viewer_request_arn / local.viewer_response_arn
     w('')
