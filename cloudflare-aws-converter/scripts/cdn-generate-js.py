@@ -1362,6 +1362,62 @@ if __name__ == "__main__":
     report_path = os.path.join(output_dir, "conversion_report.md")
     if os.path.exists(report_path):
         with open(report_path, "a") as f:
+            # Resource architecture explanation
+            f.write(f"\n## Resource Architecture\n\n")
+            f.write("Each domain gets one CloudFront distribution. Within a distribution, "
+                    "**all cache behaviors share the same CloudFront Functions** (viewer-request and viewer-response). "
+                    "This is because Cloudflare rules (redirects, rewrites, header transforms, bulk redirects) apply zone-wide — "
+                    "they are not scoped to specific URL paths. To replicate this behavior in CloudFront, "
+                    "the CFF must be associated with every cache behavior.\n\n")
+            f.write("The CFF internally uses path matching (`request.uri`) to apply path-specific logic "
+                    "(e.g., cache rules scoped to certain extensions). Rules without path conditions execute unconditionally.\n\n")
+            f.write("Lambda@Edge (origin-response), when present, is associated only with the default cache behavior.\n\n")
+
+            # Per-domain resource mapping table
+            f.write("### Per-Domain Resource Mapping\n\n")
+            f.write("| Domain | CFF viewer-request | CFF viewer-response | KVS | Lambda@Edge |\n")
+            f.write("|--------|-------------------|--------------------|----|-------------|\n")
+            for san in sorted(all_vr.keys()):
+                ir = all_irs[san]
+                hostname = ir["metadata"]["hostname"]
+                cfg = domain_cff_config.get(san, {})
+                vr_cfg = cfg.get("viewer_request", {})
+                vresp_cfg = cfg.get("viewer_response", {})
+
+                vr_label = vr_cfg.get("name", "—") if vr_cfg.get("mode") == "shared" else f"{san} (independent)"
+                if vr_cfg.get("mode") == "shared":
+                    vr_label = f"shared: {vr_cfg['name']}"
+
+                vresp_label = "—"
+                if vresp_cfg.get("mode") == "shared":
+                    vresp_label = f"shared: {vresp_cfg['name']}"
+                elif vresp_cfg.get("mode") == "independent":
+                    vresp_label = f"{san} (independent)"
+
+                kvs_label = "—"
+                if san in shared_kvs_domains:
+                    kvs_label = f"shared: {domain_to_shared_kvs.get(san, '?')}"
+                elif os.path.exists(os.path.join(output_dir, "terraform", "domains", san, "kvs.tf")):
+                    kvs_label = "independent"
+
+                le_label = "—"
+                if ir.get("_escalated_origin_ops"):
+                    le_label = "origin-request"
+                if ir.get("metadata", {}).get("lambda_edge", {}).get("origin_response"):
+                    le_label = "origin-response" if le_label == "—" else f"{le_label}, origin-response"
+
+                f.write(f"| {hostname} | {vr_label} | {vresp_label} | {kvs_label} | {le_label} |\n")
+
+            f.write(f"\n### Adjusting After Deployment\n\n")
+            f.write("- **Remove CFF from a specific cache behavior**: Edit `main.tf`, delete the `function_associations` "
+                    "block from that behavior. Note: bulk redirects and unconditional header transforms will no longer "
+                    "apply to that path.\n")
+            f.write("- **Add path-specific logic to one domain only**: In the shared CFF, wrap the logic in "
+                    "`if (event.request.headers.host.value === 'your-domain') { ... }`.\n")
+            f.write("- **Move a domain from shared to independent CFF**: Create a new CFF resource in the domain's "
+                    "`functions.tf`, update `locals.viewer_request_arn` to point to it, and copy+modify the JS.\n")
+
+            # Dedup stats
             f.write(f"\n## CloudFront Functions Deduplication\n\n")
             f.write(f"- Original (without dedup): {original_count} CFF\n")
             f.write(f"- After dedup: {actual_count} CFF\n")
