@@ -1372,11 +1372,18 @@ if __name__ == "__main__":
             f.write("The CFF internally uses path matching (`request.uri`) to apply path-specific logic "
                     "(e.g., cache rules scoped to certain extensions). Rules without path conditions execute unconditionally.\n\n")
             f.write("Lambda@Edge (origin-response), when present, is associated only with the default cache behavior.\n\n")
+            f.write("**Cost note**: Because your Cloudflare zone has zone-wide rules (bulk redirects, request header transforms), "
+                    "the CFF executes on every request to every cache behavior — including static assets that don't need rule processing. "
+                    "This is not a limitation of the conversion tool; it faithfully replicates Cloudflare's zone-wide rule scope. "
+                    "If you want to reduce CFF invocation cost ($0.10/million requests) on specific behaviors after deployment, "
+                    "remove the `function_associations` block from those behaviors in `main.tf`. "
+                    "Be aware that bulk redirects and unconditional header transforms will no longer apply to those paths.\n\n")
 
-            # Per-domain resource mapping table
+            # Per-domain resource mapping — grouped to avoid repetition
             f.write("### Per-Domain Resource Mapping\n\n")
-            f.write("| Domain | CFF viewer-request | CFF viewer-response | KVS | Lambda@Edge |\n")
-            f.write("|--------|-------------------|--------------------|----|-------------|\n")
+
+            # Group domains by their resource profile
+            profiles = {}  # (vr_mode, vresp_mode, kvs_label, le_type) → [(hostname, le_name)]
             for san in sorted(all_vr.keys()):
                 ir = all_irs[san]
                 hostname = ir["metadata"]["hostname"]
@@ -1384,15 +1391,12 @@ if __name__ == "__main__":
                 vr_cfg = cfg.get("viewer_request", {})
                 vresp_cfg = cfg.get("viewer_response", {})
 
-                vr_label = vr_cfg.get("name", "—") if vr_cfg.get("mode") == "shared" else f"{san} (independent)"
-                if vr_cfg.get("mode") == "shared":
-                    vr_label = f"shared: {vr_cfg['name']}"
-
+                vr_label = f"shared: {vr_cfg['name']}" if vr_cfg.get("mode") == "shared" else f"`{cff_name(san, 'viewer_request')}` (independent)"
                 vresp_label = "—"
                 if vresp_cfg.get("mode") == "shared":
                     vresp_label = f"shared: {vresp_cfg['name']}"
                 elif vresp_cfg.get("mode") == "independent":
-                    vresp_label = f"{san} (independent)"
+                    vresp_label = f"`{cff_name(san, 'viewer_response')}` (independent)"
 
                 kvs_label = "—"
                 if san in shared_kvs_domains:
@@ -1400,13 +1404,33 @@ if __name__ == "__main__":
                 elif os.path.exists(os.path.join(output_dir, "terraform", "domains", san, "kvs.tf")):
                     kvs_label = "independent"
 
-                le_label = "—"
+                # For grouping, use event type only (actual names are per-domain)
+                le_type = "—"
                 if ir.get("_escalated_origin_ops"):
-                    le_label = "origin-request"
-                if ir.get("metadata", {}).get("lambda_edge", {}).get("origin_response"):
-                    le_label = "origin-response" if le_label == "—" else f"{le_label}, origin-response"
+                    le_type = "origin-request"
+                le_or = ir.get("metadata", {}).get("lambda_edge", {}).get("origin_response")
+                if le_or:
+                    le_type = "origin-response" if le_type == "—" else f"{le_type}, origin-response"
 
-                f.write(f"| {hostname} | {vr_label} | {vresp_label} | {kvs_label} | {le_label} |\n")
+                key = (vr_label, vresp_label, kvs_label, le_type)
+                profiles.setdefault(key, []).append(hostname)
+
+            # Write grouped output
+            for (vr_label, vresp_label, kvs_label, le_type), hostnames in sorted(profiles.items(), key=lambda x: -len(x[1])):
+                if len(hostnames) > 5:
+                    shown = ", ".join(hostnames[:3]) + f", ... (+{len(hostnames) - 3} more)"
+                else:
+                    shown = ", ".join(hostnames)
+                f.write(f"**{len(hostnames)} domain(s)**: {shown}\n\n")
+                f.write(f"| Resource | Value |\n")
+                f.write(f"|----------|-------|\n")
+                f.write(f"| CFF viewer-request | {vr_label} |\n")
+                f.write(f"| CFF viewer-response | {vresp_label} |\n")
+                f.write(f"| KVS | {kvs_label} |\n")
+                if le_type != "—":
+                    f.write(f"| Lambda@Edge | {le_type} (per-domain, named `cf-<domain>-le-oresp`) |\n\n")
+                else:
+                    f.write(f"| Lambda@Edge | {le_type} |\n\n")
 
             f.write(f"\n### Adjusting After Deployment\n\n")
             f.write("- **Remove CFF from a specific cache behavior**: Edit `main.tf`, delete the `function_associations` "
