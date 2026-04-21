@@ -118,7 +118,9 @@ cloudflare-to-aws-cdn/
     │   └── cloudfront_distribution/ # Shared module (do not edit)
     ├── shared/
     │   ├── policies.tf              # Deduplicated CachePolicy, ORP, RHP
-    │   └── functions.tf             # Shared CFF resources (content-hash dedup)
+    │   ├── functions.tf             # Shared CFF resources (content-hash dedup)
+    │   ├── kvs-data.json            # Shared KVS data (if KVS dedup applies)
+    │   └── seed-kvs.py             # Seed shared KVS after terraform apply
     └── domains/
         └── <domain>/
             ├── main.tf              # Module call (~50-80 lines)
@@ -144,9 +146,10 @@ Shared policies → Lambda@Edge (if any) → each domain independently → KVS d
 <details>
 <summary>Scaling and rate limits</summary>
 
-- **Design target:** Tested with up to 50 proxied domains per zone. Larger zones should work — Python scripts process all domains in a single invocation.
+- **Design target:** Tested with up to 54 proxied domains per zone. Larger zones should work — Python scripts process all domains in a single invocation.
 - **Single zone per run.** Multiple zones detected → orchestrator asks you to pick one.
-- **KVS quota:** Default 50 per account (soft limit). [Request increase](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html) if > 50 domains use bulk redirects.
+- **CFF quota:** Default 100 per account. Content-hash dedup automatically shares identical CFF across domains (e.g., 54 domains → 5 CFF). Only a concern if many domains have unique CFF logic.
+- **KVS quota:** Default 50 per account (soft limit). Content-hash dedup shares identical KVS across domains (e.g., 54 domains → 2 KVS). [Request increase](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html) if still exceeded after dedup.
 
 </details>
 

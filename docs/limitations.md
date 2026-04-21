@@ -77,7 +77,7 @@ CloudFront Functions have a 10 KB size limit after minification. When a domain's
 
 | Resource | Limit | What happens when exceeded |
 |----------|-------|---------------------------|
-| CloudFront Functions per account | 100 | Warning in conversion report. Not listed as adjustable in Service Quotas — contact AWS Support to inquire, but approval is not guaranteed |
+| CloudFront Functions per account | 100 | Content-hash dedup shares identical CFF across domains (e.g., 54 domains → 5 CFF). Warning in conversion report if still exceeded. Not listed as adjustable in Service Quotas — contact AWS Support to inquire, but approval is not guaranteed |
 | Cache behaviors per distribution | 75 | Pipeline error — reduce Cloudflare rules |
 | Cache policy headers (whitelist) | 10 | Marked non_convertible |
 | Cache policy cookies (whitelist) | 10 | Marked non_convertible |

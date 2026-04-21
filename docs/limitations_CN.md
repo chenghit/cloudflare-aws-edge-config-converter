@@ -77,7 +77,7 @@ CloudFront Functions 压缩后有 10 KB 大小限制。当域名的 `viewer_requ
 
 | 资源 | 限制 | 超出时的处理 |
 |----------|-------|---------------------------|
-| 每账号 CloudFront Functions 数量 | 100 | 转换报告中警告。此配额未在 Service Quotas 中列为可调整——可联系 AWS Support 咨询，但不保证批准 |
+| 每账号 CloudFront Functions 数量 | 100 | Content-hash 去重自动共享相同 CFF（如 54 域名 → 5 CFF）。去重后仍超限则在转换报告中警告。此配额未在 Service Quotas 中列为可调整——可联系 AWS Support 咨询，但不保证批准 |
 | 每个 distribution 的 cache behaviors | 75 | Pipeline 报错——需减少 Cloudflare 规则 |
 | Cache policy headers (whitelist) | 10 | 标记为 non_convertible |
 | Cache policy cookies (whitelist) | 10 | 标记为 non_convertible |

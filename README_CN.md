@@ -141,9 +141,10 @@ cloudflare-to-aws-cdn/
 <details>
 <summary>扩展性与限速</summary>
 
-- **设计目标：** 已测试最多 50 个代理域名。更大的 zone 也应该可以工作——Python 脚本在单次调用中处理所有域名。
+- **设计目标：** 已测试最多 54 个代理域名。更大的 zone 也应该可以工作——Python 脚本在单次调用中处理所有域名。
 - **单 zone 运行。** 检测到多个 zone → 编排器要求你选择一个。
-- **KVS 配额：** 默认 50 个/账号（软限制）。如 > 50 个域名使用批量重定向，请[申请提额](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html)。
+- **CFF 配额：** 默认 100 个/账号。Content-hash 去重自动共享相同 CFF（如 54 域名 → 5 CFF）。仅当大量域名有独立 CFF 逻辑时才需关注。
+- **KVS 配额：** 默认 50 个/账号（软限制）。Content-hash 去重自动共享相同 KVS（如 54 域名 → 2 KVS）。去重后仍超限请[申请提额](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html)。
 
 </details>
 

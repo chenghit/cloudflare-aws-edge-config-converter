@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-04-21
+
+### CFF and KVS content-hash dedup
+
+**CloudFront Functions dedup**: Identical CFF content across domains is now shared via a single CFF resource in `terraform/shared/`. For 54 domains with mostly identical rules, this reduces CFF count from 108 to 5 (2 shared + 3 independent), eliminating the 100 per-account quota concern.
+
+**KVS dedup**: Same approach for Key Value Stores. Domains with identical KVS data share a single KVS resource. 54 domains → 2 KVS (1 shared + 1 independent).
+
+**Resource Architecture section**: Conversion report now includes an explanation of why all cache behaviors share the same CFF (Cloudflare zone-wide rules), a per-domain resource mapping table, cost optimization guidance, and post-migration customization instructions.
+
+**What changed**:
+- Modified: `cdn-generate-js.py` — CFF content-hash dedup, KVS content-hash dedup, shared resource generation, resource architecture report section, CFF name truncation fix (64-char limit)
+- Modified: `cdn-generate-tf-scaffold.py` — function_arn references use `local.viewer_request_arn`/`local.viewer_response_arn` for dedup compatibility
+- Modified: `cdn-validate-js.py` — reads dedup manifest for shared CFF paths
+- Modified: `cdn-finalize.py` — CFF quota check moved to Stage 8 (post-dedup)
+
 ## 2026-04-18
 
 ### Bug fixes and improvements
