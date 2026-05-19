@@ -1492,13 +1492,16 @@ def main():
     ref_exceeded = any("Reference statements" in e for e in errors)
     if ref_exceeded and mode == "legacy":
         if force_no_split:
-            # User forced legacy — downgrade to warning, continue
+            # Default behavior — downgrade to warning, add POST_ACTION for LLM
+            ref_count = next((int(e.split()[2]) for e in errors if "Reference statements" in e), 0)
             for e in errors:
                 if "Reference statements" in e:
-                    print(f"  WARN: {e} (--force-no-split: deploy will fail unless limit is raised)", file=sys.stderr)
+                    print(f"  WARN: {e}", file=sys.stderr)
             errors = [e for e in errors if "Reference statements" not in e]
+            # Store for POST_ACTION output
+            meta["ref_exceeded"] = ref_count
         else:
-            # Recoverable — pipeline will auto fallback to split
+            # --split mode would have been used; this path shouldn't be reached
             ref_count = next((int(e.split()[2]) for e in errors if "Reference statements" in e), 0)
             print(f"\n---RESULT---\nSPEC: 1\nSTATUS: PARTIAL\n"
                   f"REF_COUNT: {ref_count}\nREF_LIMIT: {MAX_REF_STATEMENTS}")
@@ -1528,11 +1531,20 @@ def main():
 
     print(f"OK: {num_resources} resources, {num_webacls} WebACLs, "
           f"{num_ip_sets} IP sets, {wcu_display}")
-    print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\n"
+    result_block = (f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\n"
           f"TEMPLATE_COUNT: {template_files['count']}\nTEMPLATES: {','.join(template_files['files'])}\n"
           f"TEMPLATE_SIZE: {compact_size}\n"
           f"RESOURCES: {num_resources}\nWEBACLS: {num_webacls}\n"
           f"IP_SETS: {num_ip_sets}\nWCU: {max_wcu_val}\nMODE: {mode}")
+    if meta.get("ref_exceeded"):
+        n = meta["ref_exceeded"]
+        result_block += (f"\nPOST_ACTION: PRINT the following WARNING to the user exactly as-is:\n"
+                         f"  ⚠️ This WebACL references {n} IP sets (AWS limit: 50). "
+                         f"Deployment will fail with this configuration.\n"
+                         f"  Options:\n"
+                         f"  1. Contact AWS Sales\n"
+                         f"  2. Re-run conversion with --force-split to split into per-domain WebACLs")
+    print(result_block)
 
 
 if __name__ == "__main__":
