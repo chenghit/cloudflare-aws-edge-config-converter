@@ -67,8 +67,12 @@ def main():
         print(f"OK: 0 rate-limiting rules → {out_path}")
         return
 
-    with open(rate_path) as f:
-        data = json.load(f)
+    try:
+        with open(rate_path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        print(f"  WARN: {rate_path} is empty or invalid JSON, treating as no rate rules", file=sys.stderr)
+        data = {"result": {"rules": []}}
 
     raw_rules = data.get("result", {}).get("rules", [])
     if isinstance(data.get("result"), list):

@@ -74,8 +74,12 @@ def find_list_items(config_path, kind, name):
 
 def read_json_result(path):
     """Read a JSON file and return the 'result' array."""
-    with open(path) as f:
-        data = json.load(f)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        print(f"  WARN: {path} is empty or invalid JSON, treating as empty", file=sys.stderr)
+        return []
     return data.get("result", [])
 
 

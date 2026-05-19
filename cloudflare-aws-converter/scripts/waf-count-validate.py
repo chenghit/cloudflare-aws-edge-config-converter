@@ -22,11 +22,19 @@ def find_file(base_path, filename):
             return os.path.join(root, filename)
     return None
 
+def safe_load_json(path):
+    """Load JSON file, return empty dict on empty/invalid files."""
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        print(f"  WARN: {path} is empty or invalid JSON, treating as empty", file=sys.stderr)
+        return {}
+
 # WAF Custom Rules
 custom_path = find_file(config_path, "WAF-Custom-Rules.txt")
 if custom_path:
-    with open(custom_path) as f:
-        data = json.load(f)
+    data = safe_load_json(custom_path)
     if isinstance(data.get("result"), dict) and "rules" in data["result"]:
         source["custom"] = len(data["result"]["rules"])
     elif isinstance(data.get("result"), list):
@@ -39,8 +47,7 @@ else:
 # Rate Limiting Rules
 rate_path = find_file(config_path, "Rate-limits.txt")
 if rate_path:
-    with open(rate_path) as f:
-        data = json.load(f)
+    data = safe_load_json(rate_path)
     if isinstance(data.get("result"), dict) and "rules" in data["result"]:
         source["rate"] = len(data["result"]["rules"])
     elif isinstance(data.get("result"), list):
@@ -53,8 +60,7 @@ else:
 # IP Access Rules
 ip_path = find_file(config_path, "IP-Access-Rules.txt")
 if ip_path:
-    with open(ip_path) as f:
-        data = json.load(f)
+    data = safe_load_json(ip_path)
     if isinstance(data.get("result"), list):
         source["ip"] = len(data["result"])
     else:

@@ -65,8 +65,12 @@ def load_json_file(path):
     """Load a Cloudflare backup JSON file, handling both ruleset and array formats."""
     if not os.path.exists(path):
         return None
-    with open(path) as f:
-        data = json.load(f)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        print(f"  WARN: {path} is empty or invalid JSON, skipping", file=sys.stderr)
+        return None
     if not data.get("success", True):
         return None
     result = data.get("result")
@@ -130,8 +134,12 @@ def load_managed_transforms(zone_dir):
     path = os.path.join(zone_dir, "Managed-Transforms.txt")
     if not os.path.exists(path):
         return {}
-    with open(path) as f:
-        data = json.load(f)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        print(f"  WARN: {path} is empty or invalid JSON, skipping", file=sys.stderr)
+        return {}
     return data.get("result", {})
 
 

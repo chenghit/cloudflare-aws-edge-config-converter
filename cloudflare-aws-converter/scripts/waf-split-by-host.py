@@ -24,8 +24,12 @@ def extract_proxied_domains(config_path):
     if not dns_path:
         print("ERROR: DNS.txt not found", file=sys.stderr)
         sys.exit(2)
-    with open(dns_path) as f:
-        data = json.load(f)
+    try:
+        with open(dns_path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        print(f"ERROR: DNS.txt is empty or invalid JSON: {dns_path}", file=sys.stderr)
+        sys.exit(2)
     records = data.get("result", [])
     if isinstance(data.get("result"), dict):
         records = data["result"].get("records", [])
