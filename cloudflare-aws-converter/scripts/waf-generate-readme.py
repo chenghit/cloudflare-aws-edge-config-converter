@@ -88,6 +88,23 @@ def main():
     lines = [
         "# AWS WAF CloudFormation Deployment Guide",
         "",
+    ]
+
+    # Add prominent warning if IP set references exceed 50
+    ref_exceeded = meta.get("ref_exceeded")
+    if ref_exceeded:
+        lines += [
+            "> ⚠️ **WARNING: This WebACL references "
+            f"{ref_exceeded} IP sets (AWS limit: 50). "
+            "Deployment will fail with this configuration.**",
+            ">",
+            "> Options:",
+            "> 1. Contact AWS Sales",
+            "> 2. Re-run conversion with `--force-split` to split into per-domain WebACLs",
+            "",
+        ]
+
+    lines += [
         "## Overview",
         "",
         f"- Mode: **{'per-domain WebACLs' if mode == 'split' else 'legacy (2 WebACLs)'}**",
