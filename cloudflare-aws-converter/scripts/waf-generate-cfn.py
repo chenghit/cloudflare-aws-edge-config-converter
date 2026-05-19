@@ -1536,14 +1536,6 @@ def main():
           f"TEMPLATE_SIZE: {compact_size}\n"
           f"RESOURCES: {num_resources}\nWEBACLS: {num_webacls}\n"
           f"IP_SETS: {num_ip_sets}\nWCU: {max_wcu_val}\nMODE: {mode}")
-    if meta.get("ref_exceeded"):
-        n = meta["ref_exceeded"]
-        result_block += (f"\nPOST_ACTION: PRINT the following WARNING to the user exactly as-is:\n"
-                         f"  ⚠️ This WebACL references {n} IP sets (AWS limit: 50). "
-                         f"Deployment will fail with this configuration.\n"
-                         f"  Options:\n"
-                         f"  1. Contact AWS Sales\n"
-                         f"  2. Re-run conversion with --force-split to split into per-domain WebACLs")
     print(result_block)
 
 

@@ -102,6 +102,5 @@ if [ -n "$REF_EXCEEDED" ]; then
     echo "  Options:"
     echo "  1. Contact AWS Sales"
     echo "  2. Re-run conversion with --force-split to split into per-domain WebACLs"
-else
-    echo "POST_ACTION: If user language is not English, translate README_aws-waf-deployment.md to user language and save as README_aws-waf-deployment_{lang}.md"
 fi
+echo "POST_ACTION_TRANSLATE: If user language is not English, translate README_aws-waf-deployment.md to user language and save as README_aws-waf-deployment_{lang}.md"
