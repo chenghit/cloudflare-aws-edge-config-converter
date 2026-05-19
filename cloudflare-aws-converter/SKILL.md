@@ -29,7 +29,7 @@ Orchestrate conversion of Cloudflare configurations to AWS by running determinis
 
 **No LLM subagents are used in the WAF pipeline.** All analysis, validation, and generation is deterministic Python.
 
-**Auto-split**: The pipeline first tries legacy mode (2 WebACLs). If IP set reference statements exceed the per-WebACL hard limit of 50, it automatically falls back to per-domain WebACLs. Use `--force-split` to skip the legacy attempt, or `--force-no-split` to force legacy even if the limit is exceeded.
+**Default mode**: Legacy (1-2 WebACLs, no split). If IP set references exceed 50, the pipeline continues and outputs a `POST_ACTION` warning for the user. Use `--force-split` to generate per-domain WebACLs instead.
 
 ### CDN Pipeline
 
@@ -136,12 +136,13 @@ No LLM subagents are used. All stages are Python scripts invoked via `execute_ba
    ```bash
    bash ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-pipeline.sh "{config_path}" "cloudflare-to-aws-waf"
    ```
-   The pipeline tries legacy mode first. If IP set references exceed the per-WebACL hard limit (50), it automatically falls back to per-domain split. No orchestrator intervention needed.
+   If the user explicitly requests per-domain split, add `--force-split` to the command.
 
    Parse the `---RESULT---` block:
    - `STATUS: OK` → proceed to Step 4.
    - `STATUS: ERROR` → report the `CONTEXT` field to the user and stop.
-   - `POST_ACTION` field → if present, follow the instruction (e.g., translate README for non-English users).
+   - `POST_ACTION` field → if present, follow the instruction. Multi-line values use 2-space indented continuation lines. If the instruction says "exactly as-is", print the content verbatim without translation or modification.
+   - `POST_ACTION_TRANSLATE` field → if present, follow the instruction (e.g., translate README for non-English users).
 
 ---
 
