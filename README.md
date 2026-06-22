@@ -16,7 +16,7 @@ curl -fsSL https://cli.kiro.dev/install | bash
 # 3. Install skills
 git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
 cd cloudflare-aws-edge-config-converter
-./install.sh
+./install.sh kiro
 
 # 4. Start conversion
 kiro-cli chat
@@ -209,38 +209,30 @@ The pipeline first tries legacy mode (2 WebACLs). If reference statements exceed
 
 ## Installation
 
-**Kiro CLI:**
+`install.sh` requires a target: `kiro` or `claude` (run it with no argument and it prompts).
 
 ```bash
 git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
 cd cloudflare-aws-edge-config-converter
-./install.sh    # Copies skill + scripts to ~/.kiro/skills/
+
+./install.sh kiro      # Kiro CLI    → ~/.kiro/skills/
+./install.sh claude    # Claude Code → ~/.claude/skills/
 ```
 
-Update: `git pull && ./install.sh` · Uninstall: `./uninstall.sh`
+Update: `git pull && ./install.sh <kiro|claude>` · Uninstall: `./uninstall.sh <kiro|claude>`
 
-**Claude Code:**
+For the `claude` target, the installer copies the skill into `~/.claude/skills/cloudflare-aws-converter/` and automatically rewrites the `~/.kiro/skills/` paths inside the installed copies (SKILL.md, reference docs, `cdn-init.sh`) to `~/.claude/skills/` — no manual editing needed. Restart Claude Code afterward so it discovers the new skill, then type `/` to confirm `cloudflare-aws-converter` is listed.
 
-```bash
-git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
-cd cloudflare-aws-edge-config-converter
-./install-claude.sh    # Copies skill + scripts to ~/.claude/skills/
-```
-
-Update: `git pull && ./install-claude.sh` · Uninstall: `./uninstall-claude.sh`
-
-The Claude Code installer copies the skill into `~/.claude/skills/cloudflare-aws-converter/` and automatically rewrites the `~/.kiro/skills/` paths inside the installed copies (SKILL.md, reference docs, `cdn-init.sh`) to `~/.claude/skills/` — no manual editing needed. Restart Claude Code afterward so it discovers the new skill, then type `/` to confirm `cloudflare-aws-converter` is listed.
-
-> **Using a different agent tool?** The install script and SKILL.md use `~/.kiro/skills/` as the default skill directory (Kiro CLI convention). To use with another agent tool:
+> **Using a different agent tool?** It depends on whether the tool uses the same skill model as Kiro CLI / Claude Code (a `SKILL.md` + `scripts/` bundle dropped into a `skills/` directory).
 >
-> ```bash
-> cd cloudflare-aws-edge-config-converter
+> - **Skill-based tools** (same layout, different directory): edit the `BASE`/`SKILLS_DIR` derivation at the top of `install.sh` (and `uninstall.sh`) to point at your tool's skills directory, then replace the skill path in SKILL.md so the in-skill commands resolve correctly:
 >
-> # Replace skill path in SKILL.md
-> sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g' cloudflare-aws-converter/SKILL.md
+>   ```bash
+>   cd cloudflare-aws-edge-config-converter
+>   sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g' cloudflare-aws-converter/SKILL.md
+>   ```
 >
-> # Edit install.sh — change SKILLS_DIR at the top of the file
-> ```
+> - **Non-skill tools** (e.g. Codex CLI, which is driven by `AGENTS.md`, not a skills directory): there is nothing to "install" as a skill. Instead, point the tool at this repo and let it call the pipeline scripts directly — all stages are plain Python/Bash under `cloudflare-aws-converter/scripts/` (see the advanced-users note below). The orchestration logic in `SKILL.md` is just instructions you can hand to the tool as context.
 
 For advanced users: all pipeline stages are Python scripts — run them directly via `python3`. The WAF pipeline runs via `waf-pipeline.sh`. CDN stages are individual scripts in `cloudflare-aws-converter/scripts/`.
 

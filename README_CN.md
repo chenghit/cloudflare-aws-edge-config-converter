@@ -16,7 +16,7 @@ curl -fsSL https://cli.kiro.dev/install | bash
 # 3. 安装 skills
 git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
 cd cloudflare-aws-edge-config-converter
-./install.sh
+./install.sh kiro
 
 # 4. 开始转换
 kiro-cli chat
@@ -204,38 +204,30 @@ Pipeline 首先尝试 legacy 模式（2 个 WebACL）。如果引用语句超过
 
 ## 安装
 
-**Kiro CLI：**
+`install.sh` 必须指定一个目标参数：`kiro` 或 `claude`（不带参数运行会提示你选择）。
 
 ```bash
 git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
 cd cloudflare-aws-edge-config-converter
-./install.sh    # 将 skill + 脚本复制到 ~/.kiro/skills/
+
+./install.sh kiro      # Kiro CLI    → ~/.kiro/skills/
+./install.sh claude    # Claude Code → ~/.claude/skills/
 ```
 
-更新：`git pull && ./install.sh` · 卸载：`./uninstall.sh`
+更新：`git pull && ./install.sh <kiro|claude>` · 卸载：`./uninstall.sh <kiro|claude>`
 
-**Claude Code：**
+使用 `claude` 目标时，安装脚本会把 skill 复制到 `~/.claude/skills/cloudflare-aws-converter/`，并自动把安装后副本（SKILL.md、参考文档、`cdn-init.sh`）里的 `~/.kiro/skills/` 路径改写成 `~/.claude/skills/`——无需手动编辑。装完后重启 Claude Code 让它发现新 skill，然后输入 `/` 确认列表里有 `cloudflare-aws-converter`。
 
-```bash
-git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
-cd cloudflare-aws-edge-config-converter
-./install-claude.sh    # 将 skill + 脚本复制到 ~/.claude/skills/
-```
-
-更新：`git pull && ./install-claude.sh` · 卸载：`./uninstall-claude.sh`
-
-Claude Code 安装脚本会把 skill 复制到 `~/.claude/skills/cloudflare-aws-converter/`，并自动把安装后副本（SKILL.md、参考文档、`cdn-init.sh`）里的 `~/.kiro/skills/` 路径改写成 `~/.claude/skills/`——无需手动编辑。装完后重启 Claude Code 让它发现新 skill，然后输入 `/` 确认列表里有 `cloudflare-aws-converter`。
-
-> **使用其他 Agent 工具？** 安装脚本和 SKILL.md 默认使用 `~/.kiro/skills/` 作为 skill 安装目录（Kiro CLI 约定）。如需配合其他 agent 工具使用：
+> **使用其他 Agent 工具？** 要看这个工具是否和 Kiro CLI / Claude Code 用同一套 skill 模型（把 `SKILL.md` + `scripts/` 放进一个 `skills/` 目录）。
 >
-> ```bash
-> cd cloudflare-aws-edge-config-converter
+> - **基于 skill 的工具**（结构相同、只是目录不同）：修改 `install.sh`（和 `uninstall.sh`）开头 `BASE`/`SKILLS_DIR` 的推导逻辑，指向你的工具的 skills 目录，再替换 SKILL.md 里的 skill 路径，让 skill 内部的命令能正确解析：
 >
-> # 替换 SKILL.md 中的 skill 路径
-> sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g' cloudflare-aws-converter/SKILL.md
+>   ```bash
+>   cd cloudflare-aws-edge-config-converter
+>   sed -i '' 's|~/.kiro/skills/cloudflare-aws-converter|/your/skill/path|g' cloudflare-aws-converter/SKILL.md
+>   ```
 >
-> # 编辑 install.sh——修改文件开头的 SKILLS_DIR 变量
-> ```
+> - **不基于 skill 的工具**（比如 Codex CLI，它靠 `AGENTS.md` 驱动，没有 skills 目录）：没有"skill"可装。直接把这个仓库指给工具，让它自己调用流程脚本即可——所有阶段都是 `cloudflare-aws-converter/scripts/` 下的纯 Python/Bash 脚本（见下面的"高级用户"说明）。`SKILL.md` 里的编排逻辑只是一份说明，你可以作为上下文交给工具。
 
 高级用户可直接通过 `python3` 运行各流程阶段。WAF pipeline 通过 `waf-pipeline.sh` 运行。CDN 各阶段是 `cloudflare-aws-converter/scripts/` 中的独立脚本。
 
