@@ -141,8 +141,7 @@ No LLM subagents are used. All stages are Python scripts invoked via `execute_ba
    Parse the `---RESULT---` block:
    - `STATUS: OK` → proceed to Step 4.
    - `STATUS: ERROR` → report the `CONTEXT` field to the user and stop.
-   - `POST_ACTION` field → if present, follow the instruction. Multi-line values use 2-space indented continuation lines. If the instruction says "exactly as-is", print the content verbatim without translation or modification.
-   - `POST_ACTION_TRANSLATE` field → if present, follow the instruction (e.g., translate README for non-English users).
+   - `POST_ACTION` field → if present, follow the instruction. Multi-line values use 2-space indented continuation lines. If the instruction says "exactly as-is", print the content verbatim without translation or modification. A single `POST_ACTION` may instruct multiple steps (e.g. print a warning AND translate the README for non-English users) — perform all of them.
 
 ---
 
