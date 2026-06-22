@@ -2,6 +2,14 @@
 
 ## 2026-06-22
 
+### Claude Code install support
+
+Added `install-claude.sh` / `uninstall-claude.sh` to install the skill into Claude Code's `~/.claude/skills/` layout, alongside the existing Kiro CLI scripts. The installer rewrites `~/.kiro/skills/` paths to `~/.claude/skills/` in the installed copies (SKILL.md, reference docs, `cdn-init.sh`), automating the manual `sed` step previously documented in the README. Source repo files are left untouched, so the Kiro install path still works.
+
+**What changed**:
+- Added: `install-claude.sh`, `uninstall-claude.sh`
+- Modified: `README.md`, `README_CN.md` — Installation section now documents both Kiro CLI and Claude Code paths
+
 ### WAF: warn AND translate on IP-set ref limit; clearer warning
 
 When IP set references exceed the AWS WAF per-WebACL limit (50), the pipeline now emits a single `POST_ACTION` that does both: prints the warning to the user AND translates the deployment README for non-English users. Previously these were mutually exclusive — the translate reminder only fired when the limit was *not* exceeded. The warning text is also sharper: it states the deployment will fail as-is, shows the actual vs. allowed reference counts, and lists two concrete fixes (quota increase or `--force-split`).

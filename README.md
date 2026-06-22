@@ -209,13 +209,27 @@ The pipeline first tries legacy mode (2 WebACLs). If reference statements exceed
 
 ## Installation
 
+**Kiro CLI:**
+
 ```bash
 git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
 cd cloudflare-aws-edge-config-converter
 ./install.sh    # Copies skill + scripts to ~/.kiro/skills/
 ```
 
-Update: `git pull && ./install.sh`
+Update: `git pull && ./install.sh` · Uninstall: `./uninstall.sh`
+
+**Claude Code:**
+
+```bash
+git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
+cd cloudflare-aws-edge-config-converter
+./install-claude.sh    # Copies skill + scripts to ~/.claude/skills/
+```
+
+Update: `git pull && ./install-claude.sh` · Uninstall: `./uninstall-claude.sh`
+
+The Claude Code installer copies the skill into `~/.claude/skills/cloudflare-aws-converter/` and automatically rewrites the `~/.kiro/skills/` paths inside the installed copies (SKILL.md, reference docs, `cdn-init.sh`) to `~/.claude/skills/` — no manual editing needed. Restart Claude Code afterward so it discovers the new skill, then type `/` to confirm `cloudflare-aws-converter` is listed.
 
 > **Using a different agent tool?** The install script and SKILL.md use `~/.kiro/skills/` as the default skill directory (Kiro CLI convention). To use with another agent tool:
 >

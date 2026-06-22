@@ -204,13 +204,27 @@ Pipeline 首先尝试 legacy 模式（2 个 WebACL）。如果引用语句超过
 
 ## 安装
 
+**Kiro CLI：**
+
 ```bash
 git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
 cd cloudflare-aws-edge-config-converter
 ./install.sh    # 将 skill + 脚本复制到 ~/.kiro/skills/
 ```
 
-更新：`git pull && ./install.sh`
+更新：`git pull && ./install.sh` · 卸载：`./uninstall.sh`
+
+**Claude Code：**
+
+```bash
+git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
+cd cloudflare-aws-edge-config-converter
+./install-claude.sh    # 将 skill + 脚本复制到 ~/.claude/skills/
+```
+
+更新：`git pull && ./install-claude.sh` · 卸载：`./uninstall-claude.sh`
+
+Claude Code 安装脚本会把 skill 复制到 `~/.claude/skills/cloudflare-aws-converter/`，并自动把安装后副本（SKILL.md、参考文档、`cdn-init.sh`）里的 `~/.kiro/skills/` 路径改写成 `~/.claude/skills/`——无需手动编辑。装完后重启 Claude Code 让它发现新 skill，然后输入 `/` 确认列表里有 `cloudflare-aws-converter`。
 
 > **使用其他 Agent 工具？** 安装脚本和 SKILL.md 默认使用 `~/.kiro/skills/` 作为 skill 安装目录（Kiro CLI 约定）。如需配合其他 agent 工具使用：
 >
