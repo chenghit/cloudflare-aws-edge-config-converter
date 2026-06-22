@@ -2,16 +2,19 @@
 set -e
 
 # Uninstall the cloudflare-aws-converter skill.
-# Usage: uninstall.sh <kiro|claude>
+# Usage: uninstall.sh <kiro|claude|BASE_DIR> [AGENT_EXT]
+#   kiro/claude → ~/.kiro or ~/.claude
+#   BASE_DIR    → custom config base dir for another skill-based tool
+#                 (optionally agent config extension as $2, default: md)
 # No default: if no target is given, prompt for one.
 
 TARGET="$1"
 if [ -z "$TARGET" ]; then
   if [ -t 0 ]; then
-    printf "Uninstall for which tool? [kiro/claude]: " >&2
+    printf "Uninstall for which tool? [kiro/claude/<base-dir>]: " >&2
     read -r TARGET
   else
-    echo "ERROR: no target given. Run: uninstall.sh <kiro|claude>" >&2
+    echo "ERROR: no target given. Run: uninstall.sh <kiro|claude|BASE_DIR>" >&2
     exit 1
   fi
 fi
@@ -19,7 +22,7 @@ fi
 case "$TARGET" in
   kiro)   TOOL="Kiro CLI";    BASE="$HOME/.kiro";   AGENT_EXT="json" ;;
   claude) TOOL="Claude Code"; BASE="$HOME/.claude"; AGENT_EXT="md"   ;;
-  *) echo "ERROR: unknown target '$TARGET' (use 'kiro' or 'claude')" >&2; exit 1 ;;
+  *)      TOOL="custom ($TARGET)"; BASE="$TARGET";  AGENT_EXT="${2:-md}" ;;
 esac
 
 SKILLS_DIR="$BASE/skills/cloudflare-aws-converter"
