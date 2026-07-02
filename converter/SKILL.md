@@ -93,17 +93,18 @@ Determine what the user wants from their message. There are two dimensions:
 - **Both / Everything**: user says "convert everything", "full migration", "all configs", or scope is unclear → run **WAF first, then CDN**. WAF pipeline is <1 second (zero LLM), so running both in one session is fine.
 
 **Dimension 2 — Depth (how far to go):**
-- **Analyze**: user says "analyze", "分析" → run analyzer + validator only, stop before generator/converter
-- **Convert**: user says "convert", "migrate", "转换", "迁移" → run full pipeline including generator/converter
-- **Default**: if user doesn't specify, assume **convert** (the most common intent)
 
-**Intent matrix:**
+Both pipelines always run end-to-end — there is no analyze-only mode. Each is <1 second and zero-LLM, and generating the output files is as cheap as stopping early, so "analyze" and "convert" run the **same** commands. The only difference is what you emphasize in Step 4:
+- **Analyze**: user says "analyze", "分析" → run the full pipeline, but frame the report around findings — rules converted, non-convertible items, WCU/quota concerns — and do NOT push deployment steps.
+- **Convert / Default**: user says "convert", "migrate", "转换", "迁移", or doesn't specify → run the full pipeline and include deployment guidance.
 
-| Scope | Depth: Analyze | Depth: Convert |
-|-------|---------------|----------------|
-| WAF only | waf-pipeline.sh | waf-pipeline.sh |
-| CDN only | CDN full pipeline | CDN full pipeline |
-| Both | WAF pipeline → CDN pipeline | WAF pipeline → CDN pipeline |
+**Intent matrix (same command in both depth columns — depth only changes the reporting):**
+
+| Scope | Command to run |
+|-------|----------------|
+| WAF only | waf-pipeline.sh |
+| CDN only | CDN full pipeline |
+| Both | WAF pipeline → CDN pipeline |
 
 **Both pipelines in one session is supported.** Both WAF and CDN pipelines are zero LLM, <1 second each. Run WAF first, then CDN — fully automated, no user interaction.
 

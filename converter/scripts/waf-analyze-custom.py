@@ -37,6 +37,9 @@ def derive_skip_labels(action_parameters):
 
 def find_file(config_path, pattern):
     matches = glob.glob(os.path.join(config_path, "**", pattern), recursive=True)
+    if len(matches) > 1:
+        print(f"ERROR: multiple {pattern} files found: {matches}", file=sys.stderr)
+        sys.exit(1)
     return matches[0] if matches else None
 
 
