@@ -6,23 +6,20 @@
 
 ## 快速开始
 
+无需安装。克隆仓库，然后让你的 AI agent（Claude Code、Kiro CLI、Codex、Cursor 等）来驱动它。
+
 ```bash
-# 1. 安装 Kiro CLI（https://kiro.dev）
-curl -fsSL https://cli.kiro.dev/install | bash
-
-# 2. 备份 Cloudflare 配置
-# 使用：https://github.com/chenghit/CloudflareBackup
-
-# 3. 安装 skills
 git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
-cd cloudflare-aws-edge-config-converter
-./install.sh kiro
-
-# 4. 开始转换
-kiro-cli chat
 ```
 
-然后描述你的需求：
+然后告诉你的 agent：
+
+```
+阅读 /path/to/cloudflare-aws-edge-config-converter 里的 AGENTS.md，
+然后把我在 /path/to/cloudflare-backup 的 Cloudflare 配置转换到 AWS。
+```
+
+agent 会读取 `AGENTS.md` → `converter/SKILL.md` 并为你运行流程。你可以指定范围：
 
 ```
 将 /path/to/cloudflare-backup 中的 Cloudflare 安全规则转换为 AWS WAF
@@ -30,16 +27,19 @@ kiro-cli chat
 将 /path/to/cloudflare-backup 中的全部 Cloudflare 配置转换到 AWS
 ```
 
+还没有备份？`backup/` 目录里就是 CloudflareBackup 工具——agent 会指导你运行它（它不会看到你的 API 凭据，凭据由你自己配置）。详见下面的 [获取备份](#获取备份)。
+
 请始终提供 **CloudflareBackup 的根目录**（包含 `account/` 和 zone 子目录如 `example.com/` 的那个目录）。**不要**提供子目录——WAF 和 CDN pipeline 都需要 `account/` 目录中的文件（WAF 需要 IP 列表，CDN 需要 bulk redirect 列表），这些文件位于 zone 目录之外。
 
 如需在没有自己配置的情况下测试，可使用 `examples/cloudflare-configs/`。
 
 ## 前提条件
 
-- **Kiro CLI** >= 1.24 — [安装文档](https://kiro.dev/docs/getting-started/installation/)。
+- **一个 AI 编码 agent** — Claude Code、Kiro CLI、Codex、Cursor，或任何能读取 markdown 文件并运行 shell 命令的 agent。agent 只需要理解用户意图、运行脚本，以及为非英文用户翻译部署文档。支持 Agent Skills 格式的工具（Kiro CLI、Claude Code）会自动发现 `converter/SKILL.md`；其他工具读取 `AGENTS.md`（很多工具会自动读取），或由你指给它。
 - **Terraform** >= 1.8.0，AWS Provider >= 6.x — [安装 Terraform](https://developer.hashicorp.com/terraform/install)。仅 CDN pipeline 需要。WAF pipeline 使用 CloudFormation（不需要 Terraform）。
 - **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF pipeline 完全基于 Python（表达式解析、分析、验证、CloudFormation 生成）。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）。macOS 和大多数 Linux 发行版已预装。转换流程无需第三方包（仅用标准库）。**部署阶段**：有 KVS 的 CDN 域名（批量重定向、IP 列表、错误页面）会生成 `seed-kvs.py` 脚本，需要 `boto3`——部署前运行 `pip install boto3` 安装。
-- **模型**：转换 pipeline 本身无模型要求——所有脚本都是确定性 Python，零 LLM 调用。Kiro CLI 支持的任何模型都可以，编排器只需要理解用户意图、运行 shell 命令，以及为非英文用户翻译部署文档。
+- **模型**：转换 pipeline 本身无模型要求——所有脚本都是确定性 Python，零 LLM 调用。
+- **备份步骤需要**：`bash`、`curl` 和 `jq`。详见 `backup/README.md`。
 - **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。运行前申请通配符证书（如 `*.example.com`），Terraform 会自动查找已签发的证书。
 - **输入格式**：仅支持 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 导出。不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)——详见 [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)
 
@@ -63,7 +63,7 @@ kiro-cli chat
 
 ## 工作原理
 
-本工具作为 Kiro CLI skill 运行，由编排器调度确定性 Python 脚本完成 WAF 和 CDN 两条 pipeline。
+你的 AI agent 读取 `converter/SKILL.md`，作为编排器调度确定性 Python 脚本完成 WAF 和 CDN 两条 pipeline。
 
 **WAF 流程**（全 Python，零 LLM）：分析 IP 列表 → 分析自定义规则 → 分析速率限制 → 合并 → 校验 → 生成 CloudFormation → **引用超限时自动回退为 per-domain 拆分**
 
@@ -202,35 +202,31 @@ Pipeline 首先尝试 legacy 模式（2 个 WebACL）。如果引用语句超过
 
 </details>
 
-## 安装
+## 获取备份
 
-`install.sh` 必须指定一个目标参数：`kiro`、`claude`，或一个自定义的 base 目录（不带参数运行会提示你选择）。
+如果你还没有 CloudflareBackup 导出，使用 `backup/` 里自带的工具：
 
 ```bash
-git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
-cd cloudflare-aws-edge-config-converter
-
-./install.sh kiro      # Kiro CLI    → ~/.kiro/skills/
-./install.sh claude    # Claude Code → ~/.claude/skills/
+cd backup
+cp config.example config
+# 编辑 config：填入你的 API Token（或 Global API Key）和域名——详见 backup/README.md
+./cloudflare_backup.sh          # macOS/Linux；Windows 用户通过 WSL 运行
 ```
 
-更新：`git pull && ./install.sh <目标>` · 卸载：`./uninstall.sh <目标>`
+这会生成 `<zone>/<timestamp>/` 和 `account/<timestamp>/` 目录——那个父目录就是你要交给转换器的路径。你的凭据只存在本地 `config` 文件里，AI agent 绝不会读取或索取。
 
-只要目标的 skills 目录与 Kiro 默认值不同（即 `claude` 或自定义 base 目录），安装脚本会先把 skill 复制进去，再自动把安装后副本（SKILL.md、参考文档、`cdn-init.sh`）里写死的 `~/.kiro/skills/cloudflare-aws-converter` 路径改写成实际的安装目录——无需手动编辑。用 `claude` 时，装完后重启 Claude Code 让它发现新 skill，然后输入 `/` 确认列表里有 `cloudflare-aws-converter`。
+备份工具即 [chenghit/CloudflareBackup](https://github.com/chenghit/CloudflareBackup)，为方便使用随本仓库分发。
 
-> **使用其他 Agent 工具？** 要看这个工具是否和 Kiro CLI / Claude Code 用同一套 skill 模型（把 `SKILL.md` + `scripts/` 放进一个 `skills/` 目录）。
->
-> - **基于 skill 的工具**（结构相同、只是目录不同）：把你的工具的配置 base 目录（即 `skills/` 和 `agents/` 的父目录）作为目标参数传进去。脚本会创建 `<base>/skills/cloudflare-aws-converter/` 并自动改写所有 skill 内部路径。还可以把 agent 配置文件扩展名作为第二个参数（默认 `md`）：
->
->   ```bash
->   cd cloudflare-aws-edge-config-converter
->   ./install.sh ~/.your-tool          # → ~/.your-tool/skills/cloudflare-aws-converter/
->   ./uninstall.sh ~/.your-tool        # 卸载
->   ```
->
-> - **不基于 skill 的工具**（比如 Codex CLI，它靠 `AGENTS.md` 驱动，没有 skills 目录）：没有"skill"可装。直接把这个仓库指给工具，让它自己调用流程脚本即可——所有阶段都是 `cloudflare-aws-converter/scripts/` 下的纯 Python/Bash 脚本（见下面的"高级用户"说明）。`SKILL.md` 里的编排逻辑只是一份说明，你可以作为上下文交给工具。
+## 如何运行
 
-高级用户可直接通过 `python3` 运行各流程阶段。WAF pipeline 通过 `waf-pipeline.sh` 运行。CDN 各阶段是 `cloudflare-aws-converter/scripts/` 中的独立脚本。
+**无需安装。** 脚本会自定位，从你克隆仓库的任何位置都能运行。
+
+- **基于 skill 的 agent**（Kiro CLI、Claude Code）：会自动发现 `converter/SKILL.md`——直接开始对话、描述需求即可。
+- **其他任何 agent**（Codex、Cursor 等）：让它读取 `AGENTS.md`（很多工具会自动读取）并按其操作。
+
+agent 会建立三个路径——`$REPO`（克隆目录）、`$OUT`（你选定的输出工作目录）、`$CONFIG_PATH`（你的备份）——然后运行流程。输出写入 `$OUT`，绝不写进仓库内部。
+
+高级用户可直接运行各流程阶段：都是 `converter/scripts/` 下的纯 Python/Bash 脚本。WAF pipeline 通过 `waf-pipeline.sh` 运行；CDN 各阶段是独立脚本。确切的调用顺序见 `converter/SKILL.md`。
 
 ## 更多信息
 

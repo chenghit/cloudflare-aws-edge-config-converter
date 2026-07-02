@@ -7,7 +7,7 @@ All Python scripts output `---RESULT---` blocks per SCRIPT_STANDARDS.md. Parse S
 ## Single entry point
 
 ```bash
-bash ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-pipeline.sh "{config_path}" "cloudflare-to-aws-waf"
+bash "$REPO/converter/scripts/waf-pipeline.sh" "$CONFIG_PATH" "$OUT/cloudflare-to-aws-waf"
 ```
 
 Optional: `--force-split` flag to force per-domain WebACL mode for testing.

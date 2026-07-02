@@ -7,7 +7,7 @@ CDN conversion: Cloudflare cache/redirect/origin rules → CloudFront Terraform.
 ## Stage 1: DNS Parsing + Domain Scope (Python)
 
 ```bash
-python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-parse-dns.py "{config_path}" "cloudflare-to-aws-cdn"
+python3 "$REPO/converter/scripts/cdn-parse-dns.py" "$CONFIG_PATH" "$OUT/cloudflare-to-aws-cdn"
 ```
 
 Outputs: `dns_manifest.yaml` + `domain_scope.json`. No user input needed.

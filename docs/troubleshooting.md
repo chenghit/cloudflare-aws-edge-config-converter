@@ -10,11 +10,11 @@
 1. Check the `---RESULT---` block in the output — it contains `STATUS`, `ACTION`, and `CONTEXT` fields
 2. `STATUS: FATAL` means unrecoverable — check `CONTEXT` for the root cause
 3. `STATUS: ERROR` with `ACTION: FIX` means user action needed (e.g., missing input file)
-4. Restart Kiro CLI: Exit and start a new `kiro-cli chat` session if the orchestrator gets confused
+4. Restart your agent: start a new session if the orchestrator gets confused
 
-## Skill Not Activating via Keywords
+## Agent Not Recognizing the Request
 
-**Problem**: Orchestrator doesn't recognize the conversion request
+**Problem**: The agent doesn't recognize the conversion request (or a skill-based agent doesn't auto-activate)
 
 **Solution**: Use specific keywords in your request:
 - For WAF: say "convert **security rules**" or "convert to **AWS WAF**"

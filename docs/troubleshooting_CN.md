@@ -10,11 +10,11 @@
 1. 检查输出中的 `---RESULT---` 块——包含 `STATUS`、`ACTION` 和 `CONTEXT` 字段
 2. `STATUS: FATAL` 表示不可恢复——查看 `CONTEXT` 了解根本原因
 3. `STATUS: ERROR` + `ACTION: FIX` 表示需要用户操作（如缺少输入文件）
-4. 重启 Kiro CLI：退出并启动新的 `kiro-cli chat` 会话
+4. 重启你的 agent：如果编排器混乱，启动一个新会话
 
-## 关键词未触发正确的 Skill
+## Agent 未识别请求
 
-**问题**：编排器未识别转换请求
+**问题**：agent 未识别转换请求（或基于 skill 的 agent 未自动触发）
 
 **解决方案**：在请求中使用明确的关键词：
 - WAF：说"转换**安全规则**"或"转换到 **AWS WAF**"

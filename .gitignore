@@ -3,3 +3,10 @@
 .kiro/settings/
 __pycache__/
 *.pyc
+
+# Backup tool credentials — never commit
+backup/config
+
+# Conversion output (written to the user's working dir; ignore if run inside the repo)
+cloudflare-to-aws-waf/
+cloudflare-to-aws-cdn/

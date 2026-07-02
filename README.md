@@ -6,23 +6,20 @@ This tool reads [CloudflareBackup](https://github.com/chenghit/CloudflareBackup)
 
 ## Quick Start
 
+No install step. Clone the repo, then let your AI agent (Claude Code, Kiro CLI, Codex, Cursor, etc.) drive it.
+
 ```bash
-# 1. Install Kiro CLI (https://kiro.dev)
-curl -fsSL https://cli.kiro.dev/install | bash
-
-# 2. Backup your Cloudflare config
-# Use: https://github.com/chenghit/CloudflareBackup
-
-# 3. Install skills
 git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
-cd cloudflare-aws-edge-config-converter
-./install.sh kiro
-
-# 4. Start conversion
-kiro-cli chat
 ```
 
-Then describe what you want:
+Then tell your agent:
+
+```
+Read AGENTS.md in /path/to/cloudflare-aws-edge-config-converter, then convert my
+Cloudflare config at /path/to/cloudflare-backup to AWS.
+```
+
+The agent reads `AGENTS.md` → `converter/SKILL.md` and runs the pipeline for you. You can scope it:
 
 ```
 Convert Cloudflare security rules in /path/to/cloudflare-backup to AWS WAF
@@ -30,16 +27,19 @@ Convert CDN configuration in /path/to/cloudflare-backup to CloudFront Terraform
 Convert all Cloudflare configuration in /path/to/cloudflare-backup to AWS
 ```
 
+Don't have a backup yet? The `backup/` directory contains the CloudflareBackup tool — the agent will guide you through running it (it never sees your API credentials; you configure those yourself). See [Getting a backup](#getting-a-backup) below.
+
 Always provide the **CloudflareBackup root directory** (the one containing `account/` and zone subdirectories like `example.com/`). Do **not** provide a subdirectory — both WAF and CDN pipelines need files from the `account/` directory (IP lists for WAF, bulk redirect lists for CDN) that live outside the zone directory.
 
 For testing without your own config, use `examples/cloudflare-configs/`.
 
 ## Prerequisites
 
-- **Kiro CLI** >= 1.24 — [Installation guide](https://kiro.dev/docs/getting-started/installation/).
+- **An AI coding agent** — Claude Code, Kiro CLI, Codex, Cursor, or any agent that can read a markdown file and run shell commands. The agent only needs to understand user intent, run scripts, and translate deployment guides for non-English users. Tools that support the Agent Skills format (Kiro CLI, Claude Code) auto-discover `converter/SKILL.md`; other tools read `AGENTS.md` (many read it automatically) or you point them at it.
 - **Terraform** >= 1.8.0 with AWS Provider >= 6.x — [Install Terraform](https://developer.hashicorp.com/terraform/install). Required for CDN pipeline only. WAF pipeline uses CloudFormation (no Terraform needed).
 - **Python 3** — Required by both WAF and CDN pipeline scripts. WAF pipeline is entirely Python-based (expression parsing, analysis, validation, CloudFormation generation). CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–7.6). Pre-installed on macOS and most Linux distributions. No third-party packages needed for the conversion pipeline (stdlib only). **Post-conversion**: CDN domains with KVS (bulk redirects, IP lists, error pages) generate a `seed-kvs.py` script that requires `boto3` — install with `pip install boto3` before deploying.
-- **Model**: No model requirement for the conversion pipeline itself — all scripts are deterministic Python with zero LLM invocations. Any model supported by Kiro CLI works, since the orchestrator only needs to understand user intent, run shell commands, and translate deployment guides for non-English users.
+- **Model**: No model requirement for the conversion pipeline itself — all scripts are deterministic Python with zero LLM invocations.
+- **For the backup step**: `bash`, `curl`, and `jq`. See `backup/README.md`.
 - **ACM certificates** (CDN only): CloudFront requires certs in us-east-1. Provision wildcard certificates (e.g., `*.example.com`) before running. Terraform auto-discovers existing ISSUED certs via data source lookup.
 - **Input format**: Only works with [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) exports. NOT compatible with [cf-terraforming](https://github.com/cloudflare/cf-terraforming) — see [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md).
 
@@ -63,7 +63,7 @@ Not all Cloudflare features have CloudFront equivalents. Non-convertible items a
 
 ## How It Works
 
-The tool runs as a Kiro CLI skill with an orchestrator that runs deterministic Python scripts for both WAF and CDN pipelines.
+Your AI agent reads `converter/SKILL.md` and acts as an orchestrator that runs deterministic Python scripts for both WAF and CDN pipelines.
 
 **WAF pipeline** (all Python, zero LLM): analyze IP lists → analyze custom rules → analyze rate limits → merge → validate → generate CloudFormation → **auto-fallback to per-domain split if ref limit exceeded**
 
@@ -207,35 +207,31 @@ The pipeline first tries legacy mode (2 WebACLs). If reference statements exceed
 
 </details>
 
-## Installation
+## Getting a backup
 
-`install.sh` requires a target: `kiro`, `claude`, or a custom base directory (run it with no argument and it prompts).
+If you don't already have a CloudflareBackup export, use the tool bundled in `backup/`:
 
 ```bash
-git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
-cd cloudflare-aws-edge-config-converter
-
-./install.sh kiro      # Kiro CLI    → ~/.kiro/skills/
-./install.sh claude    # Claude Code → ~/.claude/skills/
+cd backup
+cp config.example config
+# Edit config: add your API Token (or Global API Key) and domains — see backup/README.md
+./cloudflare_backup.sh          # macOS/Linux; Windows users run it via WSL
 ```
 
-Update: `git pull && ./install.sh <target>` · Uninstall: `./uninstall.sh <target>`
+This writes `<zone>/<timestamp>/` and `account/<timestamp>/` directories — that parent directory is the path you give the converter. Your credentials live only in your local `config` file; the AI agent never reads or asks for them.
 
-For any target whose skills directory differs from the Kiro default (i.e. `claude` or a custom base dir), the installer copies the skill in, then automatically rewrites the hardcoded `~/.kiro/skills/cloudflare-aws-converter` paths inside the installed copies (SKILL.md, reference docs, `cdn-init.sh`) to the actual install directory — no manual editing needed. For `claude`, restart Claude Code afterward so it discovers the new skill, then type `/` to confirm `cloudflare-aws-converter` is listed.
+The backup tool is [chenghit/CloudflareBackup](https://github.com/chenghit/CloudflareBackup), vendored here for convenience.
 
-> **Using a different agent tool?** It depends on whether the tool uses the same skill model as Kiro CLI / Claude Code (a `SKILL.md` + `scripts/` bundle dropped into a `skills/` directory).
->
-> - **Skill-based tools** (same layout, different directory): pass your tool's config base directory — the parent of `skills/` and `agents/` — as the target. The installer creates `<base>/skills/cloudflare-aws-converter/` and rewrites all in-skill paths to it automatically. Optionally pass the agent-config file extension as a second argument (default `md`):
->
->   ```bash
->   cd cloudflare-aws-edge-config-converter
->   ./install.sh ~/.your-tool          # → ~/.your-tool/skills/cloudflare-aws-converter/
->   ./uninstall.sh ~/.your-tool        # remove it
->   ```
->
-> - **Non-skill tools** (e.g. Codex CLI, which is driven by `AGENTS.md`, not a skills directory): there is nothing to "install" as a skill. Instead, point the tool at this repo and let it call the pipeline scripts directly — all stages are plain Python/Bash under `cloudflare-aws-converter/scripts/` (see the advanced-users note below). The orchestration logic in `SKILL.md` is just instructions you can hand to the tool as context.
+## How to run
 
-For advanced users: all pipeline stages are Python scripts — run them directly via `python3`. The WAF pipeline runs via `waf-pipeline.sh`. CDN stages are individual scripts in `cloudflare-aws-converter/scripts/`.
+There is **no install step**. The scripts self-locate, so they run from wherever you clone the repo.
+
+- **Skill-based agents** (Kiro CLI, Claude Code): they auto-discover `converter/SKILL.md` — just start a chat and describe what you want.
+- **Any other agent** (Codex, Cursor, etc.): tell it to read `AGENTS.md` (many read it automatically) and follow it.
+
+The agent establishes three paths — `$REPO` (the clone), `$OUT` (your chosen working dir for output), and `$CONFIG_PATH` (your backup) — and runs the pipeline. Output is written to `$OUT`, never inside the repo.
+
+For advanced users: all pipeline stages are plain Python/Bash under `converter/scripts/` — run them directly. The WAF pipeline runs via `waf-pipeline.sh`; CDN stages are individual scripts. See `converter/SKILL.md` for the exact invocation order.
 
 ## More Information
 

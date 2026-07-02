@@ -1,0 +1,26 @@
+# Cloudflare Backup Configuration
+# Copy this file to 'config' and fill in your details
+# NEVER commit the 'config' file to version control
+
+# Cloudflare supports two credential types — use EITHER one.
+#
+# Option 1 (recommended): API Token with read permissions for all zones.
+# Create at: https://dash.cloudflare.com/profile/api-tokens
+API_TOKEN=your_cloudflare_api_token_here
+#
+# Option 2 (legacy): Global API Key. Requires BOTH your account email and
+# the Global API Key. Find it on the same API Tokens page
+# (https://dash.cloudflare.com/profile/api-tokens) under the "API Keys"
+# section → Global API Key → View.
+# WARNING: the Global API Key grants full account access and cannot be
+# scoped or limited like an API Token. Prefer Option 1 when you can.
+# Leave API_TOKEN blank/commented if you use this.
+# API_EMAIL=you@example.com
+# API_KEY=your_global_api_key_here
+
+# Your domains (one per line, add as many as needed)
+# Zone IDs will be auto-discovered from domain names
+DOMAIN1=example.com
+DOMAIN2=example2.com
+# DOMAIN3=example3.com
+# Add more domains as needed

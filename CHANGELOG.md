@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-07-03
+
+### Drop the Agent Skill install; make it clone-and-run, and fold in the backup tool
+
+Removed the whole install machinery. Conversion is a rare, often one-shot task and the real work is deterministic Python — the Agent Skill wrapper and its installer added friction for no benefit, and it excluded agents that don't support the skill format (e.g. Codex). The tool is now clone-and-run: any agent that can read a markdown file and run shell commands can drive it.
+
+**What changed**:
+- Removed: `install.sh`, `uninstall.sh`, `install.bat`, `uninstall.bat` — no install step anymore
+- Renamed: `cloudflare-aws-converter/` → `converter/` (via `git mv`, history preserved)
+- Added: `backup/` — the [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) tool (script, `config.example`, README, LICENSE) vendored in, so backup + convert live in one repo. The user still runs the backup locally and configures their own credentials; the agent never sees them.
+- Added: `AGENTS.md` at the repo root — a ~15-line navigation stub pointing agents to `converter/SKILL.md`. This is what Codex/Cursor-style tools auto-read. It contains zero pipeline detail, so `SKILL.md` stays the single source of truth.
+- Modified: `converter/SKILL.md` — replaced the 13 hardcoded `~/.kiro/skills/...` script paths with a `$REPO`/`$OUT`/`$CONFIG_PATH` convention (all absolute, cwd-independent). Added a Setup section, a backup-guidance section, and hard credential-safety rules (never ask for / read tokens). Wrapped the `terraform` step in a subshell so it can't leave the working directory.
+- Modified: `converter/references/*.md`, `converter/scripts/cdn-init.sh` — same path convention; `cdn-init.sh` now self-locates its converter root by default instead of defaulting to `~/.kiro/...`.
+- Modified: `README.md`, `README_CN.md` — Quick Start / Prerequisites / Installation rewritten around clone-and-run; new "Getting a backup" and "How to run" sections. Agent docs (`AGENTS.md`, `SKILL.md`) are English-only; human docs stay bilingual.
+- Modified: `.gitignore` — ignore `backup/config` and the `cloudflare-to-aws-*/` output dirs.
+
+**Known issue**: the generated deployment README and `conversion_report.md` still contain example commands with relative paths (e.g. `cd cloudflare-to-aws-cdn/terraform/shared`). They assume the user runs from `$OUT`. `SKILL.md` now tells the agent to note this when showing deploy steps; making the generators emit absolute paths is deferred (would require touching `cdn-finalize.py` codegen + tests).
+
 ## 2026-06-22
 
 ### Installer accepts a custom base dir for any skill-based tool

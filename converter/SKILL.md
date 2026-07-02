@@ -11,6 +11,43 @@ Orchestrate conversion of Cloudflare configurations to AWS by running determinis
 
 **Language Adaptation**: Respond to the user in the same language as their message.
 
+## Setup: repo layout and path conventions
+
+This repository has two parts:
+
+- `backup/` — the CloudflareBackup tool (a bash script). The user runs it to export their Cloudflare config to disk. It is the **input producer** for the converter.
+- `converter/` — this skill: `SKILL.md` (this file) plus `scripts/`, `references/`, and the Terraform module under `references/modules/`. All conversion logic lives here.
+
+**There is no install step.** The scripts self-locate (bash via `dirname`, Python via `__file__`), so they run correctly from wherever the repo is cloned. Before running anything, establish three shell variables and use them in every command. This keeps script location, output location, and input location all absolute and independent of the current directory.
+
+```bash
+mkdir -p ~/cf-migration && cd ~/cf-migration   # pick a working dir for the output; cd once
+REPO=/path/to/cloudflare-aws-edge-config-converter   # where this repo is cloned
+OUT="$(pwd)"                                    # output lands here (NOT inside the repo)
+```
+
+- **`$REPO`** — absolute path to the cloned repo. Every script is invoked as `python3 "$REPO/converter/scripts/X.py"` or `bash "$REPO/converter/scripts/X.sh"`. Never a relative path.
+- **`$OUT`** — absolute path to the working directory chosen above. All output (`cloudflare-to-aws-waf/`, `cloudflare-to-aws-cdn/`) is written under `$OUT`. Do NOT write output inside `$REPO`.
+- **`$CONFIG_PATH`** — absolute path to the user's CloudflareBackup output directory (see Step 2).
+- **Do not `cd` again after the initial `cd`** for the rest of the session. Output paths are passed as absolute `$OUT/...` so this is a safety net, not the primary guard — but staying put avoids surprises. When a command genuinely needs a different directory (e.g. `terraform`), wrap it in a subshell `( cd "$OUT/..." && ... )` so the working directory is restored automatically.
+
+## Credential safety (HARD RULES — never violate)
+
+The backup step requires a Cloudflare API Token or Global API Key. These are the user's secrets. You:
+
+- **MUST NOT** ask the user to paste, type, or send their API token / key / email in the conversation.
+- **MUST NOT** read, open, or cat the `backup/config` file (or any file containing credentials).
+- **MUST** only tell the user *how* to create `backup/config` themselves (copy `config.example`, edit it in their own editor) and how to run the backup script. The credentials stay entirely on the user's machine, never in the conversation.
+
+## Backup step (only if the user has no backup yet)
+
+If the user already has a CloudflareBackup output directory, skip straight to conversion. If they don't, guide them to produce one (without ever touching their credentials — see Credential safety above):
+
+1. `cd "$REPO/backup"`
+2. `cp config.example config`, then edit `config` to add their API Token (or Global API Key) and domains. Point them at `backup/README.md` for details. **You do not read or edit this file for them.**
+3. Run `./cloudflare_backup.sh` (macOS/Linux; Windows users run it via WSL — see `backup/README.md`).
+4. The output directory (`<zone>/<timestamp>/` plus `account/<timestamp>/`) becomes `$CONFIG_PATH`.
+
 ## Available Components
 
 ### WAF Pipeline
@@ -72,7 +109,7 @@ Determine what the user wants from their message. There are two dimensions:
 
 ### Step 2: Extract config path and validate single-zone
 
-Extract the Cloudflare config directory path from the user's message. This is the path to pass to scripts. Do not read or analyze the files yourself.
+Extract the Cloudflare config directory path from the user's message and store it as `$CONFIG_PATH` (absolute). This is the path to pass to scripts. Do not read or analyze the files yourself.
 
 **Multi-zone detection (CRITICAL — must check before running any script):**
 
@@ -80,19 +117,19 @@ This tool only supports converting ONE zone at a time. The CloudflareBackup tool
 
 Before proceeding, check the structure of the provided path:
 1. Use `glob` or `fs_read` (directory mode) to list the contents of the provided path.
-2. Look for `DNS.txt` files. The expected layout is `<config_path>/DNS.txt` (single zone) or `<config_path>/<zone_name>/<timestamp>/DNS.txt` (CloudflareBackup structure).
+2. Look for `DNS.txt` files. The expected layout is `$CONFIG_PATH/DNS.txt` (single zone) or `$CONFIG_PATH/<zone_name>/<timestamp>/DNS.txt` (CloudflareBackup structure).
 3. If the path directly contains `DNS.txt`, it is a single zone — proceed normally.
 4. If the path contains multiple subdirectories that each contain timestamped subdirectories with `DNS.txt`, this is a multi-zone backup. **Abort immediately** with:
-   > "This backup directory contains multiple zones: [list zone names]. This tool can only convert one zone at a time. Please specify which zone to convert by providing the path to a specific zone's backup directory (e.g., `{config_path}/<zone_name>/<timestamp>/`)."
+   > "This backup directory contains multiple zones: [list zone names]. This tool can only convert one zone at a time. Please specify which zone to convert by providing the path to a specific zone's backup directory (e.g., `$CONFIG_PATH/<zone_name>/<timestamp>/`)."
 5. If the path contains exactly one zone subdirectory, auto-resolve to that zone's latest timestamped backup and inform the user:
    > "Detected single zone: {zone_name}. Using backup at {resolved_path}."
 
-**When passing the path to scripts**, always pass the original `{config_path}` (backup root). Both WAF and CDN scripts use recursive glob to find files — WAF needs `account/IP-Lists.txt`, CDN needs `account/List-Items-redirect-*.txt` for bulk redirects. Do NOT resolve to the zone subdirectory before passing to scripts.
+**When passing the path to scripts**, always pass the original `$CONFIG_PATH` (backup root). Both WAF and CDN scripts use recursive glob to find files — WAF needs `account/IP-Lists.txt`, CDN needs `account/List-Items-redirect-*.txt` for bulk redirects. Do NOT resolve to the zone subdirectory before passing to scripts.
 
-**Account directory check**: Verify that `{config_path}` contains an `account/` subdirectory. If not found, warn the user: "No `account/` directory found under the provided path. IP lists and bulk redirect lists may not be found. CloudflareBackup always creates an `account/` directory — make sure you provided the backup root directory, not a zone subdirectory."
+**Account directory check**: Verify that `$CONFIG_PATH` contains an `account/` subdirectory. If not found, warn the user: "No `account/` directory found under the provided path. IP lists and bulk redirect lists may not be found. CloudflareBackup always creates an `account/` directory — make sure you provided the backup root directory, not a zone subdirectory."
 
 If the user requests CDN full pipeline (Terraform generation), also check for:
-- `cloudflare-to-aws-cdn/domain_scope.json` — if it exists, pipeline can start from Stage 3
+- `$OUT/cloudflare-to-aws-cdn/domain_scope.json` — if it exists, pipeline can start from Stage 3
 
 ### Step 2b: Initialize CDN output directory (CDN pipeline only)
 
@@ -100,19 +137,19 @@ Before running any CDN script, run the initialization script to create the
 output directory structure and copy static Terraform modules:
 
 ```bash
-bash ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-init.sh "$(pwd)"
+bash "$REPO/converter/scripts/cdn-init.sh" "$OUT"
 ```
 
-This creates `cloudflare-to-aws-cdn/` under the **current working directory** (where all
-skills expect it) and copies the CloudFront distribution Terraform module. Scripts
-can then write directly to their output paths without needing to create directories.
+This creates `$OUT/cloudflare-to-aws-cdn/` and copies the CloudFront distribution
+Terraform module. Scripts can then write directly to their output paths without
+needing to create directories.
 
-**IMPORTANT**: The output directory is always `$(pwd)/cloudflare-to-aws-cdn/`, NOT inside
+**IMPORTANT**: The output directory is always `$OUT/cloudflare-to-aws-cdn/`, NOT inside
 the Cloudflare config backup directory. Do NOT look for or use `cloudflare-to-aws-cdn/`
 under the config path — that would be a leftover from a previous run in a different
 working directory.
 
-Skip this step if `cloudflare-to-aws-cdn/` already exists **in the current working directory** (resuming a previous run).
+Skip this step if `$OUT/cloudflare-to-aws-cdn/` already exists (resuming a previous run).
 
 ### Step 3: Run pipeline scripts
 
@@ -124,17 +161,17 @@ No LLM subagents are used. All stages are Python scripts invoked via `execute_ba
 
 **The entire WAF pipeline is a single deterministic script. No LLM subagents are invoked.**
 
-1. Check if `cloudflare-to-aws-waf/waf-cloudformation.json` already exists.
+1. Check if `$OUT/cloudflare-to-aws-waf/waf-cloudformation.json` already exists.
    - If it exists → ask the user: "Found existing WAF output. Do you want to overwrite and re-run, or keep the existing files?"
-     - User says overwrite → `rm -rf cloudflare-to-aws-waf`, then proceed.
+     - User says overwrite → `rm -rf "$OUT/cloudflare-to-aws-waf"`, then proceed.
      - User says keep → skip to Step 4 (report results).
    - If it does not exist → proceed.
 
-2. Check IR version compatibility: if `cloudflare-to-aws-waf/waf_ir.json` exists, check for `conditions` field in the first custom rule. If absent (old format), delete the directory and re-run.
+2. Check IR version compatibility: if `$OUT/cloudflare-to-aws-waf/waf_ir.json` exists, check for `conditions` field in the first custom rule. If absent (old format), delete the directory and re-run.
 
 3. Run the pipeline:
    ```bash
-   bash ~/.kiro/skills/cloudflare-aws-converter/scripts/waf-pipeline.sh "{config_path}" "cloudflare-to-aws-waf"
+   bash "$REPO/converter/scripts/waf-pipeline.sh" "$CONFIG_PATH" "$OUT/cloudflare-to-aws-waf"
    ```
    If the user explicitly requests per-domain split, add `--force-split` to the command.
 
@@ -151,7 +188,7 @@ All stages are deterministic Python scripts. No LLM subagents. No user interacti
 
 **Stage 1: DNS Parsing + Domain Scope** (Python script, no LLM)
 ```bash
-python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-parse-dns.py "{config_path}" "cloudflare-to-aws-cdn"
+python3 "$REPO/converter/scripts/cdn-parse-dns.py" "$CONFIG_PATH" "$OUT/cloudflare-to-aws-cdn"
 ```
 Parse the `---RESULT---` block:
 - `STATUS: OK` → proceed directly to Stage 3.
@@ -164,31 +201,31 @@ These four stages are fully deterministic Python scripts. Run them in sequence:
 
 **Stage 3: Preprocess**
 ```bash
-python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-preprocess.py "{config_path}" "cloudflare-to-aws-cdn"
+python3 "$REPO/converter/scripts/cdn-preprocess.py" "$CONFIG_PATH" "$OUT/cloudflare-to-aws-cdn"
 ```
 Check exit code:
 - 0 → all domains processed, proceed to Stage 4
 - 1 → partial failure. Read stderr for failed domain names. Retry failed domains:
   ```bash
-  python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-preprocess.py "{config_path}" "cloudflare-to-aws-cdn" --domain {failed_domain}
+  python3 "$REPO/converter/scripts/cdn-preprocess.py" "$CONFIG_PATH" "$OUT/cloudflare-to-aws-cdn" --domain {failed_domain}
   ```
   If retry also fails → mark domain as SKIPPED, continue with remaining domains.
 - 2 → total failure, stop pipeline
 
 **Stage 4: V1 Chunk Validation**
 ```bash
-python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-validate-chunk.py "cloudflare-to-aws-cdn"
+python3 "$REPO/converter/scripts/cdn-validate-chunk.py" "$OUT/cloudflare-to-aws-cdn"
 ```
 Check exit code:
 - 0 → all PASS, proceed to Stage 5
-- 1 → some FAIL. Read the validation reports at `cloudflare-to-aws-cdn/ir/validation/chunk/{hostname}-v1.json`.
+- 1 → some FAIL. Read the validation reports at `$OUT/cloudflare-to-aws-cdn/ir/validation/chunk/{hostname}-v1.json`.
   - If >50% of domains fail with the same error type → preprocess bug, stop pipeline
   - Otherwise → delete failed domain's accumulator and validation files, re-run Stage 3 for that domain with `--domain`, then re-run Stage 4
   - If second attempt also FAILs → mark domain as SKIPPED
 
 **Stage 5: Finalize**
 ```bash
-python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-finalize.py "cloudflare-to-aws-cdn" [skipped_domains.json]
+python3 "$REPO/converter/scripts/cdn-finalize.py" "$OUT/cloudflare-to-aws-cdn" [skipped_domains.json]
 ```
 If there are SKIPPED domains, write a JSON file with `[{"hostname": "...", "reason": "..."}]` and pass it as the second argument.
 
@@ -198,17 +235,17 @@ Check exit code:
 
 **Stage 6: V2 Final Validation**
 ```bash
-python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-validate-final.py "cloudflare-to-aws-cdn"
+python3 "$REPO/converter/scripts/cdn-validate-final.py" "$OUT/cloudflare-to-aws-cdn"
 ```
 Check exit code:
 - 0 → all PASS, proceed to Stage 7
-- 1 → some FAIL. Read `cloudflare-to-aws-cdn/ir/validation/final/{hostname}-v2.json`:
+- 1 → some FAIL. Read `$OUT/cloudflare-to-aws-cdn/ir/validation/final/{hostname}-v2.json`:
   - If ALL errors are about missing `dedup_manifest.json` or `conversion_report.md` → re-run Stage 5
   - Otherwise → pipeline bug, stop and tell user to file a GitHub issue
 
 **Stage 7: Shared Terraform Policies** (Python script, no LLM)
 ```bash
-python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-shared-policies.py "cloudflare-to-aws-cdn"
+python3 "$REPO/converter/scripts/cdn-generate-shared-policies.py" "$OUT/cloudflare-to-aws-cdn"
 ```
 Check exit code:
 - 0 → proceed to Stage 7.5
@@ -216,27 +253,27 @@ Check exit code:
 
 **Stage 7.5: Generate Terraform Scaffold** (Python script, no LLM)
 ```bash
-python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-tf-scaffold.py "cloudflare-to-aws-cdn"
+python3 "$REPO/converter/scripts/cdn-generate-tf-scaffold.py" "$OUT/cloudflare-to-aws-cdn"
 ```
 Generates main.tf, functions.tf, outputs.tf, kvs.tf, kvs-data.json for each domain. These are deterministic template files — no LLM needed.
 
 **Stage 7.5b: Terraform Validate** (shared policies only)
-1. Validate shared policies:
+1. Validate shared policies (subshell keeps the working directory unchanged):
    ```bash
-   cd cloudflare-to-aws-cdn/terraform/shared && terraform init -backend=false && terraform validate
+   ( cd "$OUT/cloudflare-to-aws-cdn/terraform/shared" && terraform init -backend=false && terraform validate )
    ```
 2. If validation fails → stop pipeline and report errors. These are Python script bugs — the user should file a GitHub issue.
 3. If validation passes → proceed to Stage 7.6.
 
 **Stage 7.6: Generate Test Scripts** (Python script, no LLM)
 ```bash
-python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-tests.py "cloudflare-to-aws-cdn"
+python3 "$REPO/converter/scripts/cdn-generate-tests.py" "$OUT/cloudflare-to-aws-cdn"
 ```
 Generates `test-cdn-rules.py` per domain for post-deployment validation. Proceed to Stage 8.
 
 **Stage 8: JS Generation** (Python script, no LLM)
 ```bash
-python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-generate-js.py "cloudflare-to-aws-cdn"
+python3 "$REPO/converter/scripts/cdn-generate-js.py" "$OUT/cloudflare-to-aws-cdn"
 ```
 Parse the `---RESULT---` block:
 - `STATUS: OK` → proceed to Stage 9
@@ -245,7 +282,7 @@ Parse the `---RESULT---` block:
 
 **Stage 9: JS Validation** (Python script, no LLM)
 ```bash
-python3 ~/.kiro/skills/cloudflare-aws-converter/scripts/cdn-validate-js.py "cloudflare-to-aws-cdn"
+python3 "$REPO/converter/scripts/cdn-validate-js.py" "$OUT/cloudflare-to-aws-cdn"
 ```
 Parse the `---RESULT---` block:
 - `STATUS: OK` → all domains passed, proceed to Step 4 (final reporting)
@@ -268,7 +305,7 @@ After the pipeline completes, summarize what was done and where output files wer
 
 After the summary, refer the user to the generated deployment README for deployment instructions:
 
-> See `cloudflare-to-aws-waf/README_aws-waf-deployment.md` for deployment steps, quota usage, and post-deployment checklist.
+> See `$OUT/cloudflare-to-aws-waf/README_aws-waf-deployment.md` for deployment steps, quota usage, and post-deployment checklist.
 
 The README contains deployment commands adapted to the template size (direct upload vs S3 bucket vs multi-stack split). Do NOT hardcode deployment commands — always refer to the README.
 
@@ -276,7 +313,7 @@ The README contains deployment commands adapted to the template size (direct upl
 
 **CRITICAL — do NOT skip this step if the user's message is not in English.**
 
-If the user's message is not in English, read `cloudflare-to-aws-waf/README_aws-waf-deployment.md`, translate it to the user's language, and save as `cloudflare-to-aws-waf/README_aws-waf-deployment_{lang}.md` (e.g., `_CN.md`, `_JA.md`). Keep the original English version as-is.
+If the user's message is not in English, read `$OUT/cloudflare-to-aws-waf/README_aws-waf-deployment.md`, translate it to the user's language, and save as `$OUT/cloudflare-to-aws-waf/README_aws-waf-deployment_{lang}.md` (e.g., `_CN.md`, `_JA.md`). Keep the original English version as-is.
 
 **For the CDN full pipeline**, include a summary table showing:
 - Number of domains processed successfully
@@ -304,15 +341,19 @@ After the summary table, include deployment instructions:
 See docs/deployment-guide.md for the full deployment order and DNS cutover steps.
 ```
 
+> **Note on deploy paths**: the generated deployment README and `conversion_report.md` contain example commands with relative paths (e.g. `cd cloudflare-to-aws-cdn/terraform/shared`). These assume the user runs them from `$OUT`. When you show deploy steps, tell the user to run them from `$OUT` (the working directory chosen at Setup), or prefix with the absolute `$OUT` path.
+
 **Step 4c: Translate CDN deployment guide (non-English users)**
 
 **CRITICAL — do NOT skip this step if the user's message is not in English.**
 
-If the user's message is not in English, read `cloudflare-to-aws-cdn/conversion_report.md`, translate it to the user's language, and save as `cloudflare-to-aws-cdn/conversion_report_{lang}.md` (e.g., `_CN.md`, `_JA.md`). Keep the original English version as-is.
+If the user's message is not in English, read `$OUT/cloudflare-to-aws-cdn/conversion_report.md`, translate it to the user's language, and save as `$OUT/cloudflare-to-aws-cdn/conversion_report_{lang}.md` (e.g., `_CN.md`, `_JA.md`). Keep the original English version as-is.
 
 ## Important Rules
 
 - **Never read config files yourself** — always delegate to scripts (both WAF and CDN pipelines)
+- **Never read or ask for credentials** — see Credential safety above
 - **Pass the exact path** the user provided; do not modify or resolve it
+- **Always use `$REPO`, `$OUT`, `$CONFIG_PATH`** — never hardcode script or output paths, never `cd` mid-session
 - **WAF pipeline**: single `waf-pipeline.sh` call, no LLM subagents, no retry logic needed
 - **CDN pipeline**: serial execution for pipeline stages. All 10 stages are Python script invocations (no LLM subagents, no parallelization needed, no user interaction).

@@ -2,17 +2,17 @@
 # cdn-init.sh — Create output directory structure and copy static Terraform modules
 # Called by the orchestrator before running CDN pipeline scripts.
 #
-# Usage: cdn-init.sh <output_parent_dir> [skills_root]
+# Usage: cdn-init.sh <output_parent_dir> [converter_root]
 #   output_parent_dir: cloudflare-to-aws-cdn/ will be created under this directory
-#   skills_root:       path to skill installation (default: ~/.kiro/skills/cloudflare-aws-converter)
+#   converter_root:    path to the converter/ dir (default: self-locate from this script)
 
 set -euo pipefail
 
-OUTPUT_PARENT="${1:?Usage: cdn-init.sh <output_parent_dir> [skills_root]}"
-SKILLS_ROOT="${2:-$HOME/.kiro/skills/cloudflare-aws-converter}"
+OUTPUT_PARENT="${1:?Usage: cdn-init.sh <output_parent_dir> [converter_root]}"
+CONVERTER_ROOT="${2:-$(cd "$(dirname "$0")/.." && pwd)}"
 
 OUTPUT_DIR="${OUTPUT_PARENT}/cloudflare-to-aws-cdn"
-MODULE_SRC="${SKILLS_ROOT}/references/modules/cloudfront_distribution"
+MODULE_SRC="${CONVERTER_ROOT}/references/modules/cloudfront_distribution"
 MODULE_DST="${OUTPUT_DIR}/terraform/modules/cloudfront_distribution"
 
 # Create directory structure
