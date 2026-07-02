@@ -107,26 +107,30 @@ Determine what the user wants from their message. There are two dimensions:
 
 **Both pipelines in one session is supported.** Both WAF and CDN pipelines are zero LLM, <1 second each. Run WAF first, then CDN — fully automated, no user interaction.
 
-### Step 2: Extract config path and validate single-zone
+### Step 2: Locate and validate the backup root
 
-Extract the Cloudflare config directory path from the user's message and store it as `$CONFIG_PATH` (absolute). This is the path to pass to scripts. Do not read or analyze the files yourself.
+Do not read or analyze config files yourself — you only locate the correct directory and pass it to scripts.
 
-**Multi-zone detection (CRITICAL — must check before running any script):**
+**If the user did not give a path**, ask them where their CloudflareBackup output is (the directory produced by the backup script). Do not guess.
 
-This tool only supports converting ONE zone at a time. The CloudflareBackup tool creates directories as `<zone_name>/<timestamp>/`, so a backup directory containing multiple zones will have multiple zone subdirectories.
+**Why this matters:** the scripts recursively glob **downward** from `$CONFIG_PATH` — WAF needs `account/IP-Lists.txt`, CDN needs `account/List-Items-redirect-*.txt` for bulk redirects. Those `account/` files live *outside* the zone directory. If you pass a zone subdir (a natural mistake), `account/` is above it and the glob finds nothing — WAF silently loses all IP lists and CDN silently loses all bulk redirects. So you must resolve to the true root first.
 
-Before proceeding, check the structure of the provided path:
-1. Use `glob` or `fs_read` (directory mode) to list the contents of the provided path.
-2. Look for `DNS.txt` files. The expected layout is `$CONFIG_PATH/DNS.txt` (single zone) or `$CONFIG_PATH/<zone_name>/<timestamp>/DNS.txt` (CloudflareBackup structure).
-3. If the path directly contains `DNS.txt`, it is a single zone — proceed normally.
-4. If the path contains multiple subdirectories that each contain timestamped subdirectories with `DNS.txt`, this is a multi-zone backup. **Abort immediately** with:
-   > "This backup directory contains multiple zones: [list zone names]. This tool can only convert one zone at a time. Please specify which zone to convert by providing the path to a specific zone's backup directory (e.g., `$CONFIG_PATH/<zone_name>/<timestamp>/`)."
-5. If the path contains exactly one zone subdirectory, auto-resolve to that zone's latest timestamped backup and inform the user:
-   > "Detected single zone: {zone_name}. Using backup at {resolved_path}."
+**The backup root** is the directory that contains an `account/` subdirectory alongside one or more `<zone_name>/<timestamp>/DNS.txt`. `DNS.txt` never sits directly in the root — always at `<root>/<zone>/<timestamp>/DNS.txt`.
 
-**When passing the path to scripts**, always pass the original `$CONFIG_PATH` (backup root). Both WAF and CDN scripts use recursive glob to find files — WAF needs `account/IP-Lists.txt`, CDN needs `account/List-Items-redirect-*.txt` for bulk redirects. Do NOT resolve to the zone subdirectory before passing to scripts.
+**Resolve the true root.** Take the user-given path `P`, list it (glob / directory read), and normalize:
+1. If `P` contains an `account/` subdir → `P` is the backup root. Use it.
+2. Else if `P` contains `DNS.txt` directly → `P` is a *zone timestamp dir*. The root is `P/../..`. Verify `account/` exists there; if so, use that root.
+3. Else if `P` contains `<zone>/<timestamp>/DNS.txt` but no `account/` → walk up to 2 levels from `P` looking for a directory that contains `account/`; if found, use it.
+4. If no directory containing `account/` can be found near `P` → do NOT proceed. Tell the user the path doesn't look like a CloudflareBackup root, show what you found, and ask them to point at the directory that contains both `account/` and the zone folders.
 
-**Account directory check**: Verify that `$CONFIG_PATH` contains an `account/` subdirectory. If not found, warn the user: "No `account/` directory found under the provided path. IP lists and bulk redirect lists may not be found. CloudflareBackup always creates an `account/` directory — make sure you provided the backup root directory, not a zone subdirectory."
+Store the resolved root as `$CONFIG_PATH` (absolute). **Always pass the resolved root to scripts — never a zone subdir.**
+
+**Multi-zone check (CRITICAL — run on the resolved root before any script):**
+
+This tool converts ONE zone at a time, and the scripts glob for a single `DNS.txt` under the root. Count the zone directories in the resolved root (subdirectories other than `account/` that contain `<timestamp>/DNS.txt`):
+- **Exactly one zone** → proceed. Inform the user: "Detected single zone: {zone_name}."
+- **More than one zone** → **abort immediately**. Passing this root would make the scripts match multiple zones' `DNS.txt`, and there is no way to isolate one zone while keeping the shared `account/` files. Tell the user:
+  > "This backup contains multiple zones: [list zone names]. This tool converts one zone at a time. Please provide a backup root that contains a single zone plus its `account/` directory — re-run the backup tool for just one domain if needed."
 
 If the user requests CDN full pipeline (Terraform generation), also check for:
 - `$OUT/cloudflare-to-aws-cdn/domain_scope.json` — if it exists, pipeline can start from Stage 3
