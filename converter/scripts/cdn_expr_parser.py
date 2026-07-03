@@ -109,6 +109,30 @@ FIELD_KVS_TRIGGERS = {
     "is_eu": "needs_eu",
 }
 
+# Short field names (post CF_FIELD_MAP) that have NO CloudFront source and
+# cannot be evaluated in a CloudFront Function or Lambda@Edge. A rule (or the
+# single header op) that references one of these — as a match condition field
+# or as an action value — is non-convertible and must be reported, not emitted
+# as a bare JS identifier (which would throw ReferenceError at runtime).
+UNMAPPABLE_FIELDS = {
+    "subdivision_1",  # ip.src.subdivision_1_iso_code — no CloudFront-Viewer header
+}
+
+
+def field_convertibility(cf_field):
+    """Classify a raw Cloudflare field name for CDN (CFF/Lambda) conversion.
+
+    Returns (convertible: bool, reason: str). A field is non-convertible when
+    Cloudflare exposes it but CloudFront has no way to source it at the edge
+    (bot/WAF scores, TLS details, ray id, JWT claims, geo subdivisions, ...).
+    """
+    short = CF_FIELD_MAP.get(cf_field)
+    if short is None:
+        return False, f"Cloudflare field '{cf_field}' has no CloudFront equivalent"
+    if short in UNMAPPABLE_FIELDS:
+        return False, f"Cloudflare field '{cf_field}' has no CloudFront edge source"
+    return True, ""
+
 
 # ── single-condition parsers ─────────────────────────────────────────────────
 
@@ -856,6 +880,67 @@ def parse_dynamic_expression(expr):
     parser = _DynExprParser(tokens, expr)
     result = parser.parse()
     return result
+
+
+def _dyn_tree_fields(node):
+    """Collect all field references (raw CF names) from a dynamic-expr tree."""
+    if not isinstance(node, dict):
+        return []
+    t = node.get("type")
+    if t == "field":
+        return [node["value"]]
+    if t == "func_call":
+        out = []
+        for a in node.get("args", []):
+            out.extend(_dyn_tree_fields(a))
+        return out
+    return []
+
+
+def value_expression_unmappable(expr):
+    """Given a header/redirect/rewrite dynamic action value expression, return
+    a reason string if it references any non-convertible Cloudflare field, else
+    None. Parse failures are treated as convertible here (the generator has its
+    own fallback); this only flags fields with no CloudFront source.
+    """
+    try:
+        tree = parse_dynamic_expression(expr)
+    except Exception:
+        return None
+    for f in _dyn_tree_fields(tree):
+        ok, reason = field_convertibility(f)
+        if not ok:
+            return reason
+    return None
+
+
+def condition_unmappable_fields(cond):
+    """Walk a parsed condition tree; return list of (short_field, reason) for
+    any field that has no CloudFront equivalent. The condition tree stores
+    already-mapped short names for known fields and raw dotted names for
+    unknown ones, so we check both forms against the convertibility rules.
+    """
+    if not isinstance(cond, dict):
+        return []
+    if "logic" in cond:
+        out = []
+        for p in cond.get("parts", []):
+            out.extend(condition_unmappable_fields(p))
+        if "item" in cond:
+            out.extend(condition_unmappable_fields(cond["item"]))
+        return out
+    field = cond.get("field")
+    if field is None:
+        return []
+    # Known short names (values of CF_FIELD_MAP) are convertible unless listed
+    # in UNMAPPABLE_FIELDS. A raw dotted name that never got mapped is unknown.
+    if field in CF_FIELD_MAP.values():
+        if field in UNMAPPABLE_FIELDS:
+            return [(field, f"condition field '{field}' has no CloudFront edge source")]
+        return []
+    if "." in field or field in UNMAPPABLE_FIELDS:
+        return [(field, f"condition field '{field}' has no CloudFront equivalent")]
+    return []
 
 
 _DYN_FUNCS = {

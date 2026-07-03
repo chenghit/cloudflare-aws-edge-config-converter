@@ -95,6 +95,20 @@ def validate_domain(ir, output_dir, manifest=None):
         struct_issues.append("Missing: async function handler(event)")
     if "return request" not in vr_js and "return {statusCode" not in vr_js:
         struct_issues.append("Missing: return request or return response")
+    # Broken-output signatures: a redirect to an empty Location or a rewrite to
+    # an empty URI means the value was silently lost (past key-mismatch bugs).
+    # NOTE: these strings are coupled to _generate_op_js's exact emit format in
+    # cdn-generate-js.py (redirect body, rewrite `request.uri = ...`) and to the
+    # `no CloudFront source for` marker in _dyn_field_to_js. If that emitted JS
+    # is reformatted, update these signatures or the tripwires silently stop
+    # matching. test_dynamic_values.py exercises the generator output directly.
+    if "location: {value: ''}" in vr_js:
+        struct_issues.append("redirect emits empty Location value")
+    if "request.uri = '';" in vr_js:
+        struct_issues.append("rewrite emits empty request.uri")
+    # A field with no CloudFront source that leaked into emitted JS.
+    if "no CloudFront source for" in vr_js:
+        struct_issues.append("unresolved Cloudflare field leaked into JS")
     checks.append({
         "name": "required_structure",
         "status": "FAIL" if struct_issues else "PASS",
@@ -110,8 +124,14 @@ def validate_domain(ir, output_dir, manifest=None):
         op_type = op.get("type", "")
         if op_type == "redirect" and "statusCode" not in vr_js and "statusCode:" not in vr_js:
             coverage_issues.append(f"redirect op missing statusCode")
-        elif op_type == "rewrite" and "request.uri =" not in vr_js and "request.uri=" not in vr_js:
-            coverage_issues.append(f"rewrite op missing request.uri assignment")
+        elif op_type == "rewrite":
+            params = op.get("params", {})
+            wants_path = bool(params.get("path") or params.get("path_expression"))
+            wants_query = bool(params.get("query_expression") or params.get("new_query"))
+            if wants_path and "request.uri =" not in vr_js and "request.uri=" not in vr_js:
+                coverage_issues.append("rewrite op missing request.uri assignment")
+            if wants_query and "request.querystring" not in vr_js:
+                coverage_issues.append("rewrite op missing request.querystring assignment")
         elif op_type == "origin_override":
             # May have been escalated to Lambda@Edge
             le_path = os.path.join(lambda_dir, "origin_request_handler.js")

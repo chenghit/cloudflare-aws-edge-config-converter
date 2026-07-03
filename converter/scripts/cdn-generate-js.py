@@ -187,6 +187,28 @@ def _split_full_uri_wildcard(pattern):
 
 # ── Condition → JS ───────────────────────────────────────────────────────────
 
+# Short field names that have no direct accessor but ARE convertible because
+# condition_to_js resolves them via a KVS preamble (see _generate_continent_preamble).
+_PREAMBLE_FIELDS = {"continent", "is_eu"}
+
+
+def _field_is_mappable(field, target="cff"):
+    """True if a short (already CF_FIELD_MAP-mapped) field name has a real
+    CloudFront equivalent — a direct accessor or a preamble-resolved variable.
+
+    Fields with no CloudFront source (cf.bot_management.score, cf.waf.score,
+    ip.src.subdivision_1_iso_code, JWT claims, etc.) are NOT mappable and must
+    be reported as non-convertible rather than emitted as bare JS identifiers.
+    """
+    if field in _PREAMBLE_FIELDS:
+        return True
+    if target == "lambda" and field in LAMBDA_ACCESSORS:
+        return True
+    if target == "response" and field in RESPONSE_ACCESSORS:
+        return True
+    return field in CFF_ACCESSORS
+
+
 def _get_accessor(field, target="cff"):
     """Get JS accessor for a field. Returns (check_expr, value_expr) or just value_expr."""
     if target == "lambda":
@@ -248,6 +270,14 @@ def condition_to_js(cond, target="cff", indent=2):
 
     # Special: continent / is_eu handled via preamble (not inline condition)
     # These are handled at the section level, not here.
+
+    # Guard: an unmappable condition field would emit a bare (undefined) JS
+    # identifier. The processor already marks such ops non-convertible, but
+    # fail closed here — emit `false` so the op simply never fires.
+    if not _field_is_mappable(field, target):
+        print(f"  WARN: unmappable condition field, emitting false: {field}", file=sys.stderr)
+        js_false = "false"
+        return f"!({js_false})" if negated else js_false
 
     acc = _get_accessor(field, target)
     needs_check = _needs_check(field)
@@ -318,8 +348,16 @@ def _op_to_js(accessor, op, value, field=""):
 # ── Dynamic expression → JS ──────────────────────────────────────────────────
 
 def _dyn_field_to_js(cf_field, target="cff"):
-    """Map a Cloudflare field name to JS accessor in dynamic expressions."""
+    """Map a Cloudflare field name to JS accessor in dynamic expressions.
+
+    Non-convertible fields are screened out in the processor, but guard here
+    too: never emit a bare unmapped field name (it would be an undefined JS
+    variable). Fall back to an empty string with a warning comment.
+    """
     mapped = CF_FIELD_MAP.get(cf_field, cf_field)
+    if not _field_is_mappable(mapped, target):
+        print(f"  WARN: unmappable field in expression, dropping: {cf_field}", file=sys.stderr)
+        return f"'' /* WARNING: no CloudFront source for {cf_field} */"
     return _val_accessor(mapped, target)
 
 
@@ -505,28 +543,33 @@ def _header_value_to_js(value, target="cff"):
 
 # ── JS file assembly ─────────────────────────────────────────────────────────
 
-def _resolve_dynamic_value(params, key, target="cff"):
-    """Resolve a params value that may be a static string or dynamic expression."""
+def _resolve_static_value(params, key):
+    """Resolve a params value that is a plain static string (never an expression)."""
     val = params.get(key, "")
     if not val:
         return js_string("")
-    # Check if it's a dynamic expression (contains function calls)
-    if "(" in val and any(f + "(" in val for f in _DYN_FUNC_NAMES):
-        try:
-            tree = parse_dynamic_expression(val)
-            return dyn_expr_to_js(tree, target)
-        except Exception as e:
-            print(f"  WARN: dynamic expression parse failed, using literal: {val[:60]}... ({e})", file=sys.stderr)
-            return js_string(val)
     return js_string(val)
 
 
-_DYN_FUNC_NAMES = {
-    "concat", "regex_replace", "wildcard_replace", "lower", "upper",
-    "to_string", "substring", "len", "url_decode", "encode_base64",
-    "decode_base64", "lookup_json_string", "lookup_json_integer",
-    "sha256", "split", "join", "remove_query_args", "remove_bytes", "uuidv4",
-}
+def _resolve_expression_value(params, key, target="cff"):
+    """Resolve a params value that is ALWAYS a Cloudflare dynamic expression.
+
+    Unlike the old function-name heuristic, this parses every expression — so a
+    bare field reference like `ip.src` or `http.host` is resolved to its JS
+    accessor instead of being emitted as a string literal. Non-convertible
+    fields are screened out upstream in the processor (value_expression_unmappable),
+    so a parse/translate failure here falls back to an empty string with a
+    warning rather than emitting a raw field name.
+    """
+    val = params.get(key, "")
+    if not val:
+        return js_string("")
+    try:
+        tree = parse_dynamic_expression(val)
+        return dyn_expr_to_js(tree, target)
+    except Exception as e:
+        print(f"  WARN: dynamic expression parse failed, dropping value: {val[:60]}... ({e})", file=sys.stderr)
+        return js_string("")
 
 
 def _generate_op_js(op, target="cff", indent="  "):
@@ -550,9 +593,10 @@ def _generate_op_js(op, target="cff", indent="  "):
     cond_js = condition_to_js(cond, target)
 
     if op_type == "redirect":
-        target_url = _resolve_dynamic_value(params, "target_url", target)
-        if not target_url or target_url == "''":
-            target_url = _resolve_dynamic_value(params, "target_expression", target)
+        if params.get("target_expression"):
+            target_url = _resolve_expression_value(params, "target_expression", target)
+        else:
+            target_url = _resolve_static_value(params, "target_url")
         status = params.get("status_code", 301)
         body = f"return {{statusCode: {status}, headers: {{location: {{value: {target_url}}}}}}};"
         if cond_js:
@@ -561,10 +605,22 @@ def _generate_op_js(op, target="cff", indent="  "):
             lines.append(f"{indent}{body}")
 
     elif op_type == "rewrite":
-        new_uri = _resolve_dynamic_value(params, "path", target)
-        if not new_uri or new_uri == "''":
-            new_uri = _resolve_dynamic_value(params, "path_expression", target)
-        body = f"request.uri = {new_uri};"
+        stmts = []
+        # Path rewrite (only if the rule actually sets a path)
+        if params.get("path_expression"):
+            stmts.append(f"request.uri = {_resolve_expression_value(params, 'path_expression', target)};")
+        elif params.get("path"):
+            stmts.append(f"request.uri = {_resolve_static_value(params, 'path')};")
+        # Query rewrite. CloudFront Functions accept a raw string assigned to
+        # request.querystring (AWS-confirmed), same as Lambda@Edge — so a
+        # computed/static query string can be written directly.
+        if params.get("query_expression"):
+            stmts.append(f"request.querystring = {_resolve_expression_value(params, 'query_expression', target)};")
+        elif params.get("new_query") is not None and params.get("new_query") != "":
+            stmts.append(f"request.querystring = {_resolve_static_value(params, 'new_query')};")
+        body = " ".join(stmts)
+        if not body:
+            return lines  # nothing to rewrite
         if cond_js:
             lines.append(f"{indent}if ({cond_js}) {{ {body} }}")
         else:
@@ -605,7 +661,7 @@ def _generate_op_js(op, target="cff", indent="  "):
         value = params.get("value", "")
         value_expr = params.get("value_expression")
         if value_expr:
-            val_js = _resolve_dynamic_value(params, "value_expression", target)
+            val_js = _resolve_expression_value(params, "value_expression", target)
         else:
             val_js = _header_value_to_js(value, target)
         header_obj = "response.headers" if "response" in op_type else "request.headers"
