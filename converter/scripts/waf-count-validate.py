@@ -16,8 +16,12 @@ waf_dir = sys.argv[2]
 source = {}
 
 def find_file(base_path, filename):
-    """Find a file recursively under base_path. Returns first match or None."""
-    for root, dirs, files in os.walk(base_path):
+    """Find a file recursively under base_path. Returns first match or None.
+
+    followlinks=True so a symlinked per-zone view (see SKILL.md multi-zone
+    flow) is walked like the glob-based scripts, which follow symlinks.
+    """
+    for root, dirs, files in os.walk(base_path, followlinks=True):
         if filename in files:
             return os.path.join(root, filename)
     return None

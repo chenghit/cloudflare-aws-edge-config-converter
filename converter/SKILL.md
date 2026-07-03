@@ -132,16 +132,19 @@ The scripts process ONE zone per run: they glob for a single `DNS.txt` under the
 
 Count the zone directories in the resolved root (subdirectories other than `account/` that contain `<timestamp>/DNS.txt`):
 - **Exactly one zone** → proceed. Inform the user: "Detected single zone: {zone_name}."
-- **More than one zone** → do NOT tell the user to re-run their backup. A multi-domain backup is normal (`config.example` ships with two domains). Instead, offer to convert the zones **one at a time**, each into its own output subdirectory, by building a per-zone *view* that the scripts can accept:
+- **More than one zone** → do NOT tell the user to re-run their backup. A multi-domain backup is normal (`config.example` ships with two domains). Instead, convert the zones **one at a time**, each into its own output subdirectory. For each target zone, rebind two variables and then run the **entire single-zone flow (Step 2b through Step 4) exactly as written** — do not thread the zone name into individual stage commands:
   1. Tell the user: "This backup contains multiple zones: [list]. I'll convert them one at a time. Starting with {zone}." (Or let them pick which / which order.)
-  2. For each target zone, create a temp directory containing just that zone plus the shared `account/`, using symlinks (recursive glob follows symlinks, so this costs nothing and copies no data):
+  2. Build a temp *view* containing just that zone plus the shared `account/`, using symlinks (recursive glob follows symlinks, so this costs nothing and copies no data), and point `$CONFIG_PATH` at it:
      ```bash
      VIEW="$(mktemp -d)"
      ln -s "$CONFIG_PATH/<zone_name>" "$VIEW/<zone_name>"
      ln -s "$CONFIG_PATH/account"    "$VIEW/account"
+     CONFIG_PATH="$VIEW"          # for this iteration only
+     OUT="$OUT_BASE/<zone_name>"  # give this zone its own output tree
      ```
-  3. Run the full pipeline with `$CONFIG_PATH` = `$VIEW` and a zone-specific output dir, e.g. `$OUT/<zone_name>/cloudflare-to-aws-{waf,cdn}`.
-  4. Repeat for the next zone. Report each zone's results separately in Step 4.
+     (Set `OUT_BASE="$OUT"` once before the loop so each iteration derives from the original.)
+  3. Now run Step 2b onward unchanged — `cdn-init.sh "$OUT"`, `waf-pipeline.sh ... "$OUT/cloudflare-to-aws-waf"`, all CDN stages against `$OUT/cloudflare-to-aws-cdn` — all consistent because `$OUT` already points at the zone's subdir.
+  4. After Step 4 for this zone, restore `CONFIG_PATH` and `OUT`, then repeat for the next zone. Report each zone's results separately.
 
 If the user requests CDN full pipeline (Terraform generation), also check for:
 - `$OUT/cloudflare-to-aws-cdn/domain_scope.json` — if it exists, pipeline can start from Stage 3
@@ -157,11 +160,8 @@ bash "$REPO/converter/scripts/cdn-init.sh" "$OUT"
 
 This creates `$OUT/cloudflare-to-aws-cdn/` and copies the CloudFront distribution
 Terraform module. Scripts can then write directly to their output paths without
-needing to create directories.
-
-(Multi-zone: when converting zones one at a time, pass the zone-specific parent
-instead — `bash "$REPO/converter/scripts/cdn-init.sh" "$OUT/<zone_name>"` — and use
-`$OUT/<zone_name>/cloudflare-to-aws-cdn` as the output dir for that zone's CDN stages.)
+needing to create directories. (In the multi-zone flow `$OUT` is already the
+zone's subdir, so this line needs no change.)
 
 **IMPORTANT**: The output directory is always `$OUT/cloudflare-to-aws-cdn/`, NOT inside
 the Cloudflare config backup directory. Do NOT look for or use `cloudflare-to-aws-cdn/`

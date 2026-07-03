@@ -54,8 +54,12 @@ PHASE_MAP = {
 
 
 def find_zone_dir(config_path):
-    """Find the zone backup directory (contains DNS.txt)."""
-    for root, dirs, files in os.walk(config_path):
+    """Find the zone backup directory (contains DNS.txt).
+
+    followlinks=True so a symlinked per-zone view (see SKILL.md multi-zone
+    flow) is walked like the glob-based scripts, which follow symlinks.
+    """
+    for root, dirs, files in os.walk(config_path, followlinks=True):
         if "DNS.txt" in files and "account" not in root:
             return root
     return None
