@@ -61,9 +61,10 @@ def find_file(config_path, pattern):
     """Find a single per-zone/account file. Returns path or None.
 
     A file may legitimately appear under multiple timestamp dirs (the user
-    backed up the same zone more than once) — take the newest timestamp.
-    But if it appears under more than one logical source (zone/account dir),
-    the config path is a multi-zone root — that is fatal.
+    backed up the same zone more than once) — take the newest timestamp and
+    tell the user which backup was used. But if it appears under more than one
+    logical source (zone/account dir), the config path is a multi-zone root —
+    that is fatal, and we report the zones so the caller can convert one at a time.
     """
     matches = glob.glob(os.path.join(config_path, "**", pattern), recursive=True)
     if not matches:
@@ -71,9 +72,16 @@ def find_file(config_path, pattern):
     # Logical source = parent of the timestamp dir (the zone or account dir).
     sources = {os.path.dirname(os.path.dirname(m)) for m in matches}
     if len(sources) > 1:
-        print(f"ERROR: {pattern} found under multiple zones: {sorted(sources)}", file=sys.stderr)
+        zones = sorted(os.path.basename(s) for s in sources)
+        print(f"ERROR: {pattern} found under multiple zones: {zones}", file=sys.stderr)
+        print("\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
+              f"CONTEXT: multiple zones detected ({', '.join(zones)}); convert one zone at a time")
         sys.exit(1)
-    return sorted(matches)[-1]  # same source: timestamp lexical order = chronological
+    chosen = sorted(matches)[-1]  # same source: timestamp lexical order = chronological
+    if len(matches) > 1:
+        print(f"WARNING: {len(matches)} backups of {pattern} found; using newest "
+              f"({os.path.basename(os.path.dirname(chosen))})", file=sys.stderr)
+    return chosen
 
 
 def find_list_items(config_path, kind, name):

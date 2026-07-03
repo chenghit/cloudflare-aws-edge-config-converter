@@ -146,6 +146,10 @@ Count the zone directories in the resolved root (subdirectories other than `acco
   3. Now run Step 2b onward unchanged — `cdn-init.sh "$OUT"`, `waf-pipeline.sh ... "$OUT/cloudflare-to-aws-waf"`, all CDN stages against `$OUT/cloudflare-to-aws-cdn` — all consistent because `$OUT` already points at the zone's subdir.
   4. After Step 4 for this zone, restore `CONFIG_PATH` and `OUT`, then repeat for the next zone. Report each zone's results separately.
 
+**Safety net — if a script itself reports multi-zone:** even if you skipped the pre-check, a script may return `STATUS: FATAL` with `CONTEXT: multiple zones detected (...)`. Treat that exactly like the "more than one zone" branch above: don't error out to the user, switch to the per-zone view flow and convert each zone in turn.
+
+**Repeated backups of the same zone (multi-timestamp):** if the user backed up the same zone more than once into the same tree, scripts automatically use the **newest** timestamp and print `WARNING: N backups of <file> found; using newest (<timestamp>)` to stderr. This is not an error — but **relay it to the user** ("Found N backups; I used the newest, {timestamp}") so they can correct you if they meant an older one.
+
 If the user requests CDN full pipeline (Terraform generation), also check for:
 - `$OUT/cloudflare-to-aws-cdn/domain_scope.json` — if it exists, pipeline can start from Stage 3
 

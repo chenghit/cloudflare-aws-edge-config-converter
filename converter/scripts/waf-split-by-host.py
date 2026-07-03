@@ -20,9 +20,16 @@ def find_file(config_path, pattern):
         return None
     sources = {os.path.dirname(os.path.dirname(m)) for m in matches}
     if len(sources) > 1:
-        print(f"ERROR: {pattern} found under multiple zones: {sorted(sources)}", file=sys.stderr)
+        zones = sorted(os.path.basename(s) for s in sources)
+        print(f"ERROR: {pattern} found under multiple zones: {zones}", file=sys.stderr)
+        print("\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
+              f"CONTEXT: multiple zones detected ({', '.join(zones)}); convert one zone at a time")
         sys.exit(1)
-    return sorted(matches)[-1]
+    chosen = sorted(matches)[-1]
+    if len(matches) > 1:
+        print(f"WARNING: {len(matches)} backups of {pattern} found; using newest "
+              f"({os.path.basename(os.path.dirname(chosen))})", file=sys.stderr)
+    return chosen
 
 
 def extract_proxied_domains(config_path):

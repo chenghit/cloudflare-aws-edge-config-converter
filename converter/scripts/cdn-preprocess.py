@@ -89,7 +89,12 @@ def latest_account_dir(config_path):
     """Newest account/<timestamp>/ dir (user may have backed up more than once)."""
     dirs = sorted(d for d in globmod.glob(os.path.join(config_path, "account", "*"))
                   if os.path.isdir(d))
-    return dirs[-1] if dirs else None
+    if not dirs:
+        return None
+    if len(dirs) > 1:
+        print(f"WARNING: {len(dirs)} account backups found; using newest "
+              f"({os.path.basename(dirs[-1])})", file=sys.stderr)
+    return dirs[-1]
 
 
 def load_ip_lists(config_path):
