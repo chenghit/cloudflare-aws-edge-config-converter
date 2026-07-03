@@ -37,13 +37,24 @@ mkdir -p "$OUTPUT_DIR"
 run_step() {
     local step_name="$1"; shift
     echo "[WAF] $step_name ..."
-    if ! "$@"; then
-        echo ""
-        echo "---RESULT---"
-        echo "SPEC: 1"
-        echo "STATUS: ERROR"
-        echo "ACTION: FIX"
-        echo "CONTEXT: Pipeline failed at step: $step_name"
+    # Capture combined output so we can inspect it before deciding what to emit.
+    # `if ! out=$(...)` keeps this safe under `set -e` (a bare assignment from a
+    # failing command substitution would abort the script before we can react).
+    local out rc=0
+    if ! out="$("$@" 2>&1)"; then rc=1; fi
+    printf '%s\n' "$out"
+    if [ $rc -ne 0 ]; then
+        # One RESULT block per run: if the sub-step already emitted its own
+        # (e.g. find_file's "multiple zones detected" FATAL), it was passed
+        # through above — don't stack a generic block on top of it.
+        if ! printf '%s' "$out" | grep -q -- '---RESULT---'; then
+            echo ""
+            echo "---RESULT---"
+            echo "SPEC: 1"
+            echo "STATUS: ERROR"
+            echo "ACTION: FIX"
+            echo "CONTEXT: Pipeline failed at step: $step_name"
+        fi
         exit 1
     fi
 }

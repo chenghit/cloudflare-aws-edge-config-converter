@@ -52,6 +52,8 @@
 - `cdn-validate-chunk.py` reports FAIL for one or more domains
 - `cdn-finalize.py` or `cdn-validate-final.py` exits with error
 
+> **Running scripts by hand?** Scripts are not on your `PATH` — invoke them by their clone path (e.g. `python3 /path/to/clone/converter/scripts/cdn-preprocess.py`), and run from the working directory where your output lives so relative output paths like `cloudflare-to-aws-cdn` resolve. Commands below use bare names for brevity.
+
 **Solution**:
 1. Check the error output — Python scripts print specific error messages to stderr
 2. For preprocess failures: check `cloudflare-to-aws-cdn/ir/accumulator/<domain>.error.json` for details
@@ -60,7 +62,7 @@
    - `domain_scope.json` not found → run Stage 1 (cdn-parse-dns.py) first
    - JSON parse error in Cloudflare config → check if CloudflareBackup export is complete
    - Zone directory not found → verify the config path points to the CloudflareBackup root (containing `account/` and zone subdirectories)
-5. To retry a single domain: `python3 cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`
+5. To retry a single domain: `python3 /path/to/clone/converter/scripts/cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`
 
 ## "found under multiple zones" Error
 

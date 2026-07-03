@@ -52,6 +52,8 @@
 - `cdn-validate-chunk.py` 报告某些域名 FAIL
 - `cdn-finalize.py` 或 `cdn-validate-final.py` 报错退出
 
+> **手动运行脚本？** 脚本不在你的 `PATH` 里——用克隆路径调用（例如 `python3 /path/to/clone/converter/scripts/cdn-preprocess.py`），并在输出所在的工作目录下运行，这样 `cloudflare-to-aws-cdn` 这类相对输出路径才能正确解析。下面的命令为简洁起见用了裸文件名。
+
 **解决方案**：
 1. 查看错误输出——Python 脚本会在 stderr 打印具体错误信息
 2. 预处理失败：查看 `cloudflare-to-aws-cdn/ir/accumulator/<domain>.error.json`
@@ -60,7 +62,7 @@
    - `domain_scope.json` 未找到 → 先运行 Stage 1（cdn-parse-dns.py）
    - Cloudflare 配置 JSON 解析错误 → 检查 CloudflareBackup 导出是否完整
    - Zone 目录未找到 → 确认配置路径指向 CloudflareBackup 根目录（包含 `account/` 和 zone 子目录）
-5. 重试单个域名：`python3 cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`
+5. 重试单个域名：`python3 /path/to/clone/converter/scripts/cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`
 
 ## "found under multiple zones" 错误
 
