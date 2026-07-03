@@ -62,6 +62,14 @@
    - Zone directory not found → verify the config path points to the CloudflareBackup root (containing `account/` and zone subdirectories)
 5. To retry a single domain: `python3 cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`
 
+## "found under multiple zones" Error
+
+**Problem**: A script aborts with `ERROR: <file> found under multiple zones: [...]`
+
+**Cause**: The config path points at a backup containing more than one zone (multiple domains). The scripts process one zone per run, so they refuse to guess which zone you meant.
+
+**Solution**: This is expected for multi-domain backups — you don't need to re-run the backup. Convert each zone separately: point the pipeline at a directory that exposes only the target zone plus the shared `account/` directory. If you're driving this through an agent, it handles this automatically (it builds a per-zone view and converts each zone into its own output directory). If running scripts by hand, create a temp directory with symlinks to the one zone folder and `account/`, and pass that as the config path.
+
 ## CloudFront Console Cannot Edit Cache Behavior
 
 **Problem**: Clicking on a cache behavior in the CloudFront console shows "Your CloudFront distribution behavior configuration page failed to load"

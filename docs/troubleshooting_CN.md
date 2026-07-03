@@ -62,6 +62,14 @@
    - Zone 目录未找到 → 确认配置路径指向 CloudflareBackup 根目录（包含 `account/` 和 zone 子目录）
 5. 重试单个域名：`python3 cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`
 
+## "found under multiple zones" 错误
+
+**问题**：脚本中止并报 `ERROR: <file> found under multiple zones: [...]`
+
+**原因**：config 路径指向的备份包含多个 zone（多个域名）。脚本每次只处理一个 zone，所以拒绝猜测你想转哪个。
+
+**解决**：多域名备份出现这个是正常的——不需要重新备份。逐个 zone 转换：让 pipeline 指向一个只暴露目标 zone + 共享 `account/` 目录的路径。如果你通过 agent 操作，它会自动处理（构建单 zone 视图，把每个 zone 转换到各自的输出目录）。如果手动跑脚本，创建一个临时目录，用符号链接指向那一个 zone 文件夹和 `account/`，把它作为 config 路径传入。
+
 ## CloudFront Console 无法编辑 Cache Behavior
 
 **问题**：在 CloudFront console 点击某个 cache behavior 时显示 "Your CloudFront distribution behavior configuration page failed to load"

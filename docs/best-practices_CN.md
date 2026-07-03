@@ -10,7 +10,7 @@
 
 2. **提供 CloudflareBackup 目录路径**
    - 示例：`Convert security rules in /path/to/cloudflare-backup to AWS WAF`
-   - Kiro 会自动在备份目录中定位配置文件
+   - agent 会自动在备份目录中定位配置文件
 
 3. **使用明确的关键词**
    - WAF：提到 "security rules" 或 "AWS WAF"

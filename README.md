@@ -147,7 +147,7 @@ Shared policies → Lambda@Edge (if any) → each domain independently → KVS d
 <summary>Scaling and rate limits</summary>
 
 - **Design target:** Tested with up to 54 proxied domains per zone. Larger zones should work — Python scripts process all domains in a single invocation.
-- **Single zone per run.** Multiple zones detected → orchestrator asks you to pick one.
+- **One zone per run.** If your backup has multiple domains (normal — `config.example` ships with two), the agent converts them one at a time into separate output directories. No need to re-run the backup.
 - **CFF quota:** Default 100 per account. Content-hash dedup automatically shares identical CFF across domains (e.g., 54 domains → 5 CFF). Only a concern if many domains have unique CFF logic.
 - **KVS quota:** Default 50 per account (soft limit). Content-hash dedup shares identical KVS across domains (e.g., 54 domains → 2 KVS). [Request increase](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html) if still exceeded after dedup.
 

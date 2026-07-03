@@ -10,7 +10,7 @@
 
 2. **Provide the CloudflareBackup Directory Path**
    - Example: `Convert security rules in /path/to/cloudflare-backup to AWS WAF`
-   - Kiro will automatically locate the configuration files within the backup directory
+   - The agent will automatically locate the configuration files within the backup directory
 
 3. **Use Specific Keywords**
    - For WAF: mention "security rules" or "AWS WAF"
