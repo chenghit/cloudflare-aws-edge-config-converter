@@ -58,12 +58,22 @@ def split_ipv4_ipv6(addresses):
 # ── File discovery ───────────────────────────────────────────────────────────
 
 def find_file(config_path, pattern):
-    """Find a single file matching glob pattern. Returns path or None."""
+    """Find a single per-zone/account file. Returns path or None.
+
+    A file may legitimately appear under multiple timestamp dirs (the user
+    backed up the same zone more than once) — take the newest timestamp.
+    But if it appears under more than one logical source (zone/account dir),
+    the config path is a multi-zone root — that is fatal.
+    """
     matches = glob.glob(os.path.join(config_path, "**", pattern), recursive=True)
-    if len(matches) > 1:
-        print(f"ERROR: multiple {pattern} files found: {matches}", file=sys.stderr)
+    if not matches:
+        return None
+    # Logical source = parent of the timestamp dir (the zone or account dir).
+    sources = {os.path.dirname(os.path.dirname(m)) for m in matches}
+    if len(sources) > 1:
+        print(f"ERROR: {pattern} found under multiple zones: {sorted(sources)}", file=sys.stderr)
         sys.exit(1)
-    return matches[0] if matches else None
+    return sorted(matches)[-1]  # same source: timestamp lexical order = chronological
 
 
 def find_list_items(config_path, kind, name):

@@ -81,15 +81,17 @@ def load_json_file(path):
     return result
 
 
+def latest_account_dir(config_path):
+    """Newest account/<timestamp>/ dir (user may have backed up more than once)."""
+    dirs = sorted(d for d in globmod.glob(os.path.join(config_path, "account", "*"))
+                  if os.path.isdir(d))
+    return dirs[-1] if dirs else None
+
+
 def load_ip_lists(config_path):
     """Load account-level IP lists → {list_name: [ip1, ip2, ...]}."""
     ip_lists = {}
-    # Find account directory
-    account_dir = None
-    for d in globmod.glob(os.path.join(config_path, "account", "*")):
-        if os.path.isdir(d):
-            account_dir = d
-            break
+    account_dir = latest_account_dir(config_path)
     if not account_dir:
         return ip_lists
 
@@ -109,11 +111,7 @@ def load_ip_lists(config_path):
 def load_bulk_redirect_items(config_path):
     """Load account-level bulk redirect list items → {list_name: [items]}."""
     redirects = {}
-    account_dir = None
-    for d in globmod.glob(os.path.join(config_path, "account", "*")):
-        if os.path.isdir(d):
-            account_dir = d
-            break
+    account_dir = latest_account_dir(config_path)
     if not account_dir:
         return redirects
 

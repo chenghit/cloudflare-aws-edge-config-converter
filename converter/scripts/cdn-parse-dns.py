@@ -42,11 +42,15 @@ def classify_origin(content):
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def find_file(config_path, pattern):
+    """Newest timestamp of a per-zone file; fatal if it spans multiple zones."""
     matches = globmod.glob(os.path.join(config_path, "**", pattern), recursive=True)
-    if len(matches) > 1:
-        print(f"ERROR: multiple {pattern} files found: {matches}", file=sys.stderr)
+    if not matches:
+        return None
+    sources = {os.path.dirname(os.path.dirname(m)) for m in matches}
+    if len(sources) > 1:
+        print(f"ERROR: {pattern} found under multiple zones: {sorted(sources)}", file=sys.stderr)
         sys.exit(1)
-    return matches[0] if matches else None
+    return sorted(matches)[-1]
 
 
 def derive_zone_name(dns_path):
