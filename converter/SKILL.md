@@ -128,10 +128,20 @@ Store the resolved root as `$CONFIG_PATH` (absolute). **Always pass the resolved
 
 **Multi-zone check (CRITICAL — run on the resolved root before any script):**
 
-This tool converts ONE zone at a time, and the scripts glob for a single `DNS.txt` under the root. Count the zone directories in the resolved root (subdirectories other than `account/` that contain `<timestamp>/DNS.txt`):
+The scripts process ONE zone per run: they glob for a single `DNS.txt` under the root and **abort** (`ERROR: ... found under multiple zones`) if more than one zone's per-zone files are reachable. This is deliberate — the shared `account/` files sit as a sibling of every zone, so you cannot just point the scripts at a zone subdirectory (its `account/` would be unreachable by the downward glob).
+
+Count the zone directories in the resolved root (subdirectories other than `account/` that contain `<timestamp>/DNS.txt`):
 - **Exactly one zone** → proceed. Inform the user: "Detected single zone: {zone_name}."
-- **More than one zone** → **abort immediately**. Passing this root would make the scripts match multiple zones' `DNS.txt`, and there is no way to isolate one zone while keeping the shared `account/` files. Tell the user:
-  > "This backup contains multiple zones: [list zone names]. This tool converts one zone at a time. Please provide a backup root that contains a single zone plus its `account/` directory — re-run the backup tool for just one domain if needed."
+- **More than one zone** → do NOT tell the user to re-run their backup. A multi-domain backup is normal (`config.example` ships with two domains). Instead, offer to convert the zones **one at a time**, each into its own output subdirectory, by building a per-zone *view* that the scripts can accept:
+  1. Tell the user: "This backup contains multiple zones: [list]. I'll convert them one at a time. Starting with {zone}." (Or let them pick which / which order.)
+  2. For each target zone, create a temp directory containing just that zone plus the shared `account/`, using symlinks (recursive glob follows symlinks, so this costs nothing and copies no data):
+     ```bash
+     VIEW="$(mktemp -d)"
+     ln -s "$CONFIG_PATH/<zone_name>" "$VIEW/<zone_name>"
+     ln -s "$CONFIG_PATH/account"    "$VIEW/account"
+     ```
+  3. Run the full pipeline with `$CONFIG_PATH` = `$VIEW` and a zone-specific output dir, e.g. `$OUT/<zone_name>/cloudflare-to-aws-{waf,cdn}`.
+  4. Repeat for the next zone. Report each zone's results separately in Step 4.
 
 If the user requests CDN full pipeline (Terraform generation), also check for:
 - `$OUT/cloudflare-to-aws-cdn/domain_scope.json` — if it exists, pipeline can start from Stage 3
@@ -148,6 +158,10 @@ bash "$REPO/converter/scripts/cdn-init.sh" "$OUT"
 This creates `$OUT/cloudflare-to-aws-cdn/` and copies the CloudFront distribution
 Terraform module. Scripts can then write directly to their output paths without
 needing to create directories.
+
+(Multi-zone: when converting zones one at a time, pass the zone-specific parent
+instead — `bash "$REPO/converter/scripts/cdn-init.sh" "$OUT/<zone_name>"` — and use
+`$OUT/<zone_name>/cloudflare-to-aws-cdn` as the output dir for that zone's CDN stages.)
 
 **IMPORTANT**: The output directory is always `$OUT/cloudflare-to-aws-cdn/`, NOT inside
 the Cloudflare config backup directory. Do NOT look for or use `cloudflare-to-aws-cdn/`
