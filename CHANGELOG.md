@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-07-09
+
+### CDN: fix 15 convertibility / action-value bugs + subdivision classification
+
+A follow-up audit of the CDN pipeline (commit `ab45880`) surfaced a class of silent bugs where a Cloudflare rule was reported as "converted" but the generated CloudFront Function JS either did nothing, fired on every request, or threw at runtime. All were confirmed by exercising the real processor + generator end-to-end, and every Cloudflare-field / CloudFront-capability assumption was verified against the official docs. The example config exercises none of these paths, which is why they went undetected. All fixes are covered by regression tests in `test_dynamic_values.py` (now 45 checks); the full CDN pipeline still runs green on the example config (54 domains, 108→5 CFF dedup) and every generated JS file passes `node --check`.
+
+**Correctness — was producing silently wrong or crashing JS**:
+- `http.request.full_uri` with `contains` / `eq` / `matches` / scheme-less wildcard was dead-coded to `if (false)` — the rule never fired. Now reconstructed as `'https://' + host + uri (+ ?query)` per target and matched for real. Scheme is assumed https (CloudFront edge functions don't expose it); noted in `conversion_report.md`.
+- A negated unmappable-field condition emitted `!(false)` = `true` — fail **open** (fired on every request). Now emits `false` regardless of negation, including the `logic:not` wrapper form.
+- A viewer-request query rewrite using `sha256()` emitted `crypto.createHash` without `import crypto` → `ReferenceError`. Added `query_expression` to crypto detection.
+- A viewer-**response** header value using `sha256()`/HMAC had the same missing-import bug (the response generator never emitted the import at all). Fixed; `_needs_crypto` now scans a single handler's ops so each file pulls its own import.
+- `continent` / `is_eu` in a viewer-**response** condition referenced undefined variables — the response generator never emitted the country+KVS preamble and had no `const request`. Now mirrors viewer-request (KVS reads work in viewer-response, AWS-confirmed).
+- `add_*_header` dropped a dynamic `value_expression` and shipped `{value: ''}`. Now resolves it like `set_*_header`.
+- A redirect target / rewrite path / query expression referencing an unmappable field leaked an inline `'' /* WARNING… */` marker into the JS (tripping the whole-domain validator). Now screened per-rule into a clean `non_convertible`, matching how header values were already handled.
+- A single Redirect Rule's `preserve_query_string=True` was stored but never applied. The redirect now appends the incoming query to the `Location`, choosing `?` vs `&` by whether the target already has one.
+- A `value_expression` that failed to parse silently shipped an empty value. Now emits the same leak marker the unmappable path uses, so `cdn-validate-js` catches it.
+
+**Correctness — geo field classification** (verified against AWS + Cloudflare docs):
+- `ip.src.subdivision_1_iso_code` (first-level region) is convertible via the `CloudFront-Viewer-Country-Region` header — it was wrongly listed as non-convertible while `FIELD_TO_ORP_HEADERS` already mapped it, so the file contradicted itself. Now converts.
+- `ip.src.subdivision_2_iso_code` (second-level region) has no CloudFront header — added explicitly as non-convertible with a clear reason.
+- `conversion_report.md` now warns that Cloudflare sources geolocation from IPinfo while CloudFront uses MaxMind, so geo field values (country / region / subdivision / derived continent / EU) may differ for the same IP — spot-check geo-sensitive rules after cutover.
+
+**Robustness / cleanup**:
+- `cdn-validate-js.py` query-rewrite coverage now checks for the `request.querystring =` assignment, not a bare read that the `bulk_redirect` template's `_qs(request.querystring)` masked.
+- Broken-output tripwires (empty Location, empty URI, leaked field) factored into one helper and run over both the viewer-request and viewer-response JS.
+- `_dyn_tree_fields` recurses all child nodes instead of white-listing node types, so a field can't slip past the unmappable screen.
+- The deferred `raw_expression` parse tree is cached on the op (`_parsed_condition`) so the generator reuses it instead of re-parsing in a second process; the `condition`/`raw_expression` XOR invariant is preserved.
+- `_prune_unmappable` walks the OR tree once; the copy-pasted IP-list-resolve + unmappable screen in all 6 rule processors is extracted into `_screen_unmappable`; a dead branch in `_resolve_static_value` was removed.
+
+**What changed**:
+- Modified: `converter/scripts/cdn-generate-js.py` — full_uri reconstruction, fail-closed negation guard, subdivision_1 accessor, request/response crypto import, `add_*_header` value_expression, redirect `preserve_query_string`, parse-failure leak marker, `_parsed_condition` reuse
+- Modified: `converter/scripts/cdn_expr_parser.py` — subdivision_1/subdivision_2 classification, `_dyn_tree_fields` full recursion
+- Modified: `converter/scripts/cdn_rule_processors.py` — action-value expression screening for redirect/rewrite/query, `_screen_unmappable` / `_screen_value_expr` helpers, single-pass OR prune, parsed-tree caching
+- Modified: `converter/scripts/cdn-validate-js.py` — assignment-based query coverage check, dual-file broken-output tripwire helper
+- Modified: `converter/scripts/cdn-finalize.py` — IPinfo-vs-MaxMind geo caveat, full_uri https assumption note, subdivision_2 note in the report
+- Modified: `converter/scripts/test_dynamic_values.py` — a regression case per bug plus a `CF_FIELD_MAP`↔accessor classification invariant to prevent future drift
+
 ## 2026-07-03
 
 ### Drop the Agent Skill install; make it clone-and-run, and fold in the backup tool
