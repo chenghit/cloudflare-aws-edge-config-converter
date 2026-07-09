@@ -86,6 +86,14 @@ def validate_domain(ir, output_dir, manifest=None):
         "detail": ", ".join(forbidden_found) if forbidden_found else None,
     })
 
+    # Read viewer_response JS up front (if any) so broken-output tripwires can
+    # scan it too — a dropped value or leaked field can occur in a response op
+    # (set_response_header, redirect condition) just as in a request op.
+    vresp_js = ""
+    if vresp_path and os.path.exists(vresp_path):
+        with open(vresp_path) as f:
+            vresp_js = f.read()
+
     # 2. Required structure
     struct_issues = []
     needs_cf_import = "cf.kvs(" in vr_js or "cf.updateRequestOrigin(" in vr_js
@@ -95,20 +103,7 @@ def validate_domain(ir, output_dir, manifest=None):
         struct_issues.append("Missing: async function handler(event)")
     if "return request" not in vr_js and "return {statusCode" not in vr_js:
         struct_issues.append("Missing: return request or return response")
-    # Broken-output signatures: a redirect to an empty Location or a rewrite to
-    # an empty URI means the value was silently lost (past key-mismatch bugs).
-    # NOTE: these strings are coupled to _generate_op_js's exact emit format in
-    # cdn-generate-js.py (redirect body, rewrite `request.uri = ...`) and to the
-    # `no CloudFront source for` marker in _dyn_field_to_js. If that emitted JS
-    # is reformatted, update these signatures or the tripwires silently stop
-    # matching. test_dynamic_values.py exercises the generator output directly.
-    if "location: {value: ''}" in vr_js:
-        struct_issues.append("redirect emits empty Location value")
-    if "request.uri = '';" in vr_js:
-        struct_issues.append("rewrite emits empty request.uri")
-    # A field with no CloudFront source that leaked into emitted JS.
-    if "no CloudFront source for" in vr_js:
-        struct_issues.append("unresolved Cloudflare field leaked into JS")
+    struct_issues.extend(_broken_output_signatures(vr_js, vresp_js))
     checks.append({
         "name": "required_structure",
         "status": "FAIL" if struct_issues else "PASS",
@@ -130,7 +125,11 @@ def validate_domain(ir, output_dir, manifest=None):
             wants_query = bool(params.get("query_expression") or params.get("new_query"))
             if wants_path and "request.uri =" not in vr_js and "request.uri=" not in vr_js:
                 coverage_issues.append("rewrite op missing request.uri assignment")
-            if wants_query and "request.querystring" not in vr_js:
+            # Look for the ASSIGNMENT (`request.querystring =`), not a bare
+            # `request.querystring` read — the bulk_redirect template reads
+            # `_qs(request.querystring)`, which would otherwise mask a dropped
+            # query rewrite on any domain that also has bulk redirects.
+            if wants_query and "request.querystring =" not in vr_js and "request.querystring=" not in vr_js:
                 coverage_issues.append("rewrite op missing request.querystring assignment")
         elif op_type == "origin_override":
             # May have been escalated to Lambda@Edge
@@ -175,10 +174,8 @@ def validate_domain(ir, output_dir, manifest=None):
         "detail": f"{vr_size} bytes exceeds {CFF_SIZE_LIMIT}" if not size_ok else None,
     })
 
-    # Validate viewer_response.js if exists
+    # Validate viewer_response.js if exists (vresp_js already read above)
     if vresp_path and os.path.exists(vresp_path):
-        with open(vresp_path) as f:
-            vresp_js = f.read()
         resp_issues = []
         for pattern, desc in FORBIDDEN_PATTERNS:
             if re.search(pattern, vresp_js):
@@ -212,6 +209,33 @@ def validate_domain(ir, output_dir, manifest=None):
 
     overall = "FAIL" if any(c["status"] == "FAIL" for c in checks) else "PASS"
     return _report(hostname, overall, checks)
+
+
+def _broken_output_signatures(*js_sources):
+    """Scan generated JS for signatures of a silently-lost action value.
+
+    Applied to BOTH the viewer-request and viewer-response JS (a redirect to an
+    empty Location, a rewrite to an empty URI, or a leaked no-source field can
+    appear in either handler).
+
+    These signatures are coupled to _generate_op_js's emit format in
+    cdn-generate-js.py: the redirect body (`location: {value: ...}`), the
+    rewrite assignment (`request.uri = ...`), and the `no CloudFront source
+    for` leak marker emitted by _dyn_field_to_js / _resolve_expression_value.
+    The leak marker is a stable contract shared with the generator; the two
+    empty-value signatures track the redirect/rewrite emit format — if that
+    format changes, update these. test_dynamic_values.py exercises the
+    generator output directly to catch drift.
+    """
+    issues = []
+    combined = "\n".join(js_sources)
+    if "location: {value: ''}" in combined:
+        issues.append("redirect emits empty Location value")
+    if "request.uri = '';" in combined:
+        issues.append("rewrite emits empty request.uri")
+    if "no CloudFront source for" in combined:
+        issues.append("unresolved Cloudflare field leaked into JS")
+    return issues
 
 
 def _report(hostname, overall, checks):

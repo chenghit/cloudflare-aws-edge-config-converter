@@ -72,6 +72,9 @@ CFF_ACCESSORS = {
     "city": ("request.headers['cloudfront-viewer-city']", "request.headers['cloudfront-viewer-city'].value"),
     "region": ("request.headers['cloudfront-viewer-country-region-name']", "request.headers['cloudfront-viewer-country-region-name'].value"),
     "region_code": ("request.headers['cloudfront-viewer-country-region']", "request.headers['cloudfront-viewer-country-region'].value"),
+    # subdivision_1 (ip.src.subdivision_1_iso_code) = first-level ISO 3166-2
+    # region, same CloudFront header as region_code.
+    "subdivision_1": ("request.headers['cloudfront-viewer-country-region']", "request.headers['cloudfront-viewer-country-region'].value"),
     "latitude": ("request.headers['cloudfront-viewer-latitude']", "request.headers['cloudfront-viewer-latitude'].value"),
     "longitude": ("request.headers['cloudfront-viewer-longitude']", "request.headers['cloudfront-viewer-longitude'].value"),
     "postal_code": ("request.headers['cloudfront-viewer-postal-code']", "request.headers['cloudfront-viewer-postal-code'].value"),
@@ -244,6 +247,11 @@ def condition_to_js(cond, target="cff", indent=2):
             return " || ".join(f"({p})" if " && " in p else p for p in parts)
         if logic == "not":
             inner = condition_to_js(cond["item"], target, indent)
+            # `false` is the sentinel for an un-evaluable inner (unmappable
+            # field, unknown op). It means "never matches" and must stay that
+            # way under negation — `!(false)` would be `true` (fail OPEN).
+            if inner == "false":
+                return "false"
             return f"!({inner})"
 
     field = cond.get("field", "")
@@ -268,16 +276,24 @@ def condition_to_js(cond, target="cff", indent=2):
         expr = f"({host_js} && {path_js})" if host_js != "true" and path_js != "true" else (host_js if path_js == "true" else path_js)
         return f"!({expr})" if negated else expr
 
+    # Special: full_uri without a host/path split (contains, eq, matches, or a
+    # scheme-less wildcard) — reconstruct the absolute URL and match against it.
+    if field == "full_uri":
+        uri_acc = _full_uri_accessor(target)
+        js_cond = _op_to_js(uri_acc, base_op, value, field)
+        return f"!({js_cond})" if negated else js_cond
+
     # Special: continent / is_eu handled via preamble (not inline condition)
     # These are handled at the section level, not here.
 
     # Guard: an unmappable condition field would emit a bare (undefined) JS
     # identifier. The processor already marks such ops non-convertible, but
-    # fail closed here — emit `false` so the op simply never fires.
+    # fail closed here — emit `false` so the op NEVER fires, regardless of
+    # negation. (A negated `!(false)` would be `true` — fail OPEN — so the
+    # `false` is returned directly rather than run through the negation below.)
     if not _field_is_mappable(field, target):
         print(f"  WARN: unmappable condition field, emitting false: {field}", file=sys.stderr)
-        js_false = "false"
-        return f"!({js_false})" if negated else js_false
+        return "false"
 
     acc = _get_accessor(field, target)
     needs_check = _needs_check(field)
@@ -305,6 +321,30 @@ def _val_accessor(field, target="cff"):
     if isinstance(acc, tuple):
         return acc[1]
     return acc
+
+
+def _full_uri_accessor(target="cff"):
+    """Reconstruct http.request.full_uri as a JS string expression.
+
+    Cloudflare's full_uri is the absolute URL (scheme://host/path?query, minus
+    the #fragment). CloudFront exposes host, path and query separately and does
+    NOT surface the scheme in an edge function, so the scheme is assumed to be
+    https (see the note emitted into conversion_report.md). The result is
+    parenthesized so a following `.includes(...)` / `.startsWith(...)` /
+    `=== ...` binds to the whole concatenation, not just the last operand.
+
+    Query string: included for cff (via the always-injected `_qs` helper) and
+    lambda (raw string). Viewer-response has neither `_qs` nor `request` in
+    scope, so full_uri is reconstructed there without the query string.
+    """
+    host = _val_accessor("host", target)
+    path = _val_accessor("uri.path", target)
+    if target == "lambda":
+        return f"('https://' + {host} + {path} + (request.querystring ? '?' + request.querystring : ''))"
+    if target == "response":
+        return f"('https://' + {host} + {path})"
+    return (f"('https://' + {host} + {path} + "
+            f"(_qs(request.querystring) ? '?' + _qs(request.querystring) : ''))")
 
 
 def _op_to_js(accessor, op, value, field=""):
@@ -355,6 +395,9 @@ def _dyn_field_to_js(cf_field, target="cff"):
     variable). Fall back to an empty string with a warning comment.
     """
     mapped = CF_FIELD_MAP.get(cf_field, cf_field)
+    # full_uri has no single accessor but IS convertible via reconstruction.
+    if mapped == "full_uri":
+        return _full_uri_accessor(target)
     if not _field_is_mappable(mapped, target):
         print(f"  WARN: unmappable field in expression, dropping: {cf_field}", file=sys.stderr)
         return f"'' /* WARNING: no CloudFront source for {cf_field} */"
@@ -569,7 +612,10 @@ def _resolve_expression_value(params, key, target="cff"):
         return dyn_expr_to_js(tree, target)
     except Exception as e:
         print(f"  WARN: dynamic expression parse failed, dropping value: {val[:60]}... ({e})", file=sys.stderr)
-        return js_string("")
+        # Emit an empty string but tag it with the same leak marker the
+        # unmappable-field path uses, so cdn-validate-js flags the dropped value
+        # instead of it silently shipping as an empty header/redirect/URI.
+        return "'' /* WARNING: no CloudFront source for unparsed expression */"
 
 
 def _generate_op_js(op, target="cff", indent="  "):
@@ -583,12 +629,19 @@ def _generate_op_js(op, target="cff", indent="  "):
 
     # Resolve condition
     if raw_expr and not cond:
-        try:
-            cond = parse_expression_full(raw_expr)
-        except Exception as e:
-            print(f"  WARN: condition parse failed: {raw_expr[:60]}... ({e})", file=sys.stderr)
-            lines.append(f"{indent}// TODO: could not parse condition: {raw_expr[:80]}")
-            return lines
+        # The processor already parsed this raw_expr during its unmappable-field
+        # screen; reuse that tree instead of parsing the same string again in
+        # this second process (see _cache_parsed in cdn_rule_processors.py).
+        cached = op.get("_parsed_condition")
+        if cached is not None:
+            cond = cached
+        else:
+            try:
+                cond = parse_expression_full(raw_expr)
+            except Exception as e:
+                print(f"  WARN: condition parse failed: {raw_expr[:60]}... ({e})", file=sys.stderr)
+                lines.append(f"{indent}// TODO: could not parse condition: {raw_expr[:80]}")
+                return lines
 
     cond_js = condition_to_js(cond, target)
 
@@ -727,7 +780,9 @@ def _needs_crypto(ir):
     for beh in ir.get("cache_behaviors", []):
         for op in beh.get("viewer_request_ops", []) + beh.get("viewer_response_ops", []):
             params = op.get("params", {})
-            for key in ("value_expression", "target_expression", "path_expression", "target_url"):
+            # Only expression-valued keys can carry sha256(...); target_url is a
+            # static string and never an expression, so it is not checked here.
+            for key in ("value_expression", "target_expression", "path_expression", "query_expression"):
                 val = params.get(key, "")
                 if val and ("sha256(" in val or "encode_base64(sha256(" in val):
                     return True
@@ -900,6 +955,18 @@ def generate_viewer_response_js(ir):
 
     lines.append("async function handler(event) {")
     lines.append("  const response = event.response;")
+    # A viewer-response condition may reference the original request (geo
+    # headers like cloudfront-viewer-country, full_uri reconstruction, the
+    # continent/EU preamble). event.request is populated in viewer-response
+    # (AWS-confirmed), so expose it under the same `request` name the accessors
+    # and preamble use.
+    lines.append("  const request = event.request;")
+
+    # Continent/EU preamble — same KVS-backed country lookup as viewer-request
+    # (KVS reads work in viewer-response). Without it, a continent/is_eu
+    # condition would reference an undefined variable.
+    if _has_continent_or_eu(all_ops):
+        lines.extend(_generate_continent_preamble(all_ops))
 
     for op in all_ops:
         lines.extend(_generate_op_js(op, "response"))

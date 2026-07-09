@@ -464,6 +464,21 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "Only Lambda@Edge origin-response runs on all origin responses.",
         "- If your rules use more than 10 geo/device headers per cache behavior, "
         "request a CloudFront ORP headers quota increase via AWS Support.",
+        "- **Geolocation data source differs.** Cloudflare now sources IP geolocation "
+        "from IPinfo, while CloudFront uses MaxMind. Any rule that matches on a geo field "
+        "(country, region/subdivision, city, or the derived continent / EU-membership "
+        "lookups) is converted faithfully in logic, but the *value* for a given IP may "
+        "differ between the two providers — a request judged `US-CA` by Cloudflare could "
+        "resolve differently under CloudFront, especially near country/region borders or "
+        "for ranges the two providers disagree on. After cutover, spot-check geo-sensitive "
+        "rules with representative and boundary IPs before relying on them.",
+        "- `http.request.full_uri` is reconstructed as `https://<host><path>[?<query>]`. "
+        "CloudFront edge functions do not expose the request scheme, so the scheme is "
+        "assumed to be **https**; a rule that matched on an `http://` full URI will behave "
+        "as if the request were https.",
+        "- Second-level geo subdivisions (`ip.src.subdivision_2_iso_code`) are non-convertible: "
+        "CloudFront exposes only the first-level subdivision (`CloudFront-Viewer-Country-Region`). "
+        "First-level subdivisions (`ip.src.subdivision_1_iso_code`) convert normally.",
     ]
 
     # WAF + Custom Header pattern guidance (if CIDR-related non_convertible items exist)

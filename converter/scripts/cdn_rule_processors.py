@@ -108,18 +108,28 @@ def _prune_unmappable(condition):
         (potential over-match / security change), so mark the whole op
         non-convertible for human review.
     """
-    bad = condition_unmappable_fields(condition)
-    if not bad:
-        return condition, None
+    # Top-level OR: classify each branch exactly once. Drop every branch that
+    # references an unmappable field (this only narrows the match — safe), keep
+    # the rest. If every branch is dropped, the whole condition is unmappable.
     if "logic" in condition and condition["logic"] == "or":
-        kept = [p for p in condition["parts"]
-                if not condition_unmappable_fields(p)]
+        kept, first_bad = [], None
+        for p in condition["parts"]:
+            bad = condition_unmappable_fields(p)
+            if bad:
+                first_bad = first_bad or bad[0][1]
+            else:
+                kept.append(p)
+        if first_bad is None:
+            return condition, None      # nothing unmappable
         if not kept:
-            return None, bad[0][1]
+            return None, first_bad      # every branch dropped
         if len(kept) == 1:
             return kept[0], None
         return {**condition, "parts": kept}, None
     # AND / NOT / bare leaf → cannot safely drop; whole op is non-convertible.
+    bad = condition_unmappable_fields(condition)
+    if not bad:
+        return condition, None
     return None, bad[0][1]
 
 
@@ -131,26 +141,46 @@ def _resolve_unmappable_in_condition(condition, raw_expr=None):
     structure it, e.g. because it contains an unmapped field). In the raw case
     we parse it with the full parser so the unmappable check can see the fields.
 
-    Returns (condition, raw_expr, non_conv_reason). On OR-prune the pruned
-    condition is returned structured and raw_expr is cleared so the generator
-    uses the pruned form.
+    Returns (condition, raw_expr, non_conv_reason, parsed_tree). ``parsed_tree``
+    is the full parse of a deferred ``raw_expr`` when it is kept deferred and
+    fully convertible — the caller can stash it on the op (see _cache_parsed) so
+    the JS generator, which runs in a separate process and would otherwise parse
+    the same raw_expr again, can reuse it. It is None in every other case.
+    On OR-prune the pruned condition is returned structured and raw_expr is
+    cleared so the generator uses the pruned form.
     """
     if condition is not None:
         new_cond, reason = _prune_unmappable(condition)
-        return new_cond, raw_expr, reason
+        return new_cond, raw_expr, reason, None
     if raw_expr:
         try:
             full = parse_expression_full(raw_expr)
         except Exception:
-            return condition, raw_expr, None  # generator has its own guard
+            return condition, raw_expr, None, None  # generator has its own guard
         if not condition_unmappable_fields(full):
-            return condition, raw_expr, None  # nothing unmappable; leave as-is
+            # Nothing unmappable; keep it deferred, but hand back the parsed tree
+            # so the caller can cache it and the generator need not re-parse.
+            return condition, raw_expr, None, full
         new_cond, reason = _prune_unmappable(full)
         if reason:
-            return None, None, reason
+            return None, None, reason, None
         # OR-prune succeeded → use the structured pruned condition, drop raw.
-        return new_cond, None, None
-    return condition, raw_expr, None
+        return new_cond, None, None, None
+    return condition, raw_expr, None, None
+
+
+def _cache_parsed(op, raw_expr, parsed):
+    """Stash a parsed condition tree on a deferred-expression op.
+
+    The JS generator runs as a separate process (reads the IR from disk) and
+    re-parses ``raw_expression`` for exactly the deferred ops the processor
+    already parsed here. Persisting the tree under a private key lets the
+    generator reuse it, avoiding the double parse. The key is invisible to the
+    condition/raw_expression XOR invariant and to every other IR consumer.
+    """
+    if raw_expr is not None and parsed is not None:
+        op["_parsed_condition"] = parsed
+    return op
 
 
 def _extract_path_pattern(condition, expression):
@@ -204,7 +234,7 @@ def process_redirect_rule(rule, ip_lists, phase):
     # Screen match-condition fields with no CloudFront source (runs even when the
     # expression was deferred as raw text — that is exactly when unmapped fields
     # prevented structuring).
-    cond, raw_expr, unmap_reason = _resolve_unmappable_in_condition(cond, raw_expr)
+    cond, raw_expr, unmap_reason, _parsed = _resolve_unmappable_in_condition(cond, raw_expr)
     if unmap_reason:
         return _make_non_convertible(rule, unmap_reason)
 
@@ -231,7 +261,7 @@ def process_redirect_rule(rule, ip_lists, phase):
         # Static target: store under target_url (the key the JS generator reads).
         op["params"]["target_url"] = target_value
 
-    return op
+    return _cache_parsed(op, raw_expr, _parsed)
 
 
 def process_rewrite_rule(rule, ip_lists, phase):
@@ -251,7 +281,7 @@ def process_rewrite_rule(rule, ip_lists, phase):
     # Screen match-condition fields with no CloudFront source (runs even when the
     # expression was deferred as raw text — that is exactly when unmapped fields
     # prevented structuring).
-    cond, raw_expr, unmap_reason = _resolve_unmappable_in_condition(cond, raw_expr)
+    cond, raw_expr, unmap_reason, _parsed = _resolve_unmappable_in_condition(cond, raw_expr)
     if unmap_reason:
         return _make_non_convertible(rule, unmap_reason)
 
@@ -283,7 +313,7 @@ def process_rewrite_rule(rule, ip_lists, phase):
     elif query_value:
         op["params"]["new_query"] = query_value
 
-    return op
+    return _cache_parsed(op, raw_expr, _parsed)
 
 
 def process_config_rule(rule, ip_lists, phase):
@@ -347,7 +377,7 @@ def process_origin_rule(rule, ip_lists, phase):
     # Screen match-condition fields with no CloudFront source (runs even when the
     # expression was deferred as raw text — that is exactly when unmapped fields
     # prevented structuring).
-    cond, raw_expr, unmap_reason = _resolve_unmappable_in_condition(cond, raw_expr)
+    cond, raw_expr, unmap_reason, _parsed = _resolve_unmappable_in_condition(cond, raw_expr)
     if unmap_reason:
         return _make_non_convertible(rule, unmap_reason)
 
@@ -371,7 +401,7 @@ def process_origin_rule(rule, ip_lists, phase):
     if sni:
         op["params"]["sni"] = sni
 
-    return op
+    return _cache_parsed(op, raw_expr, _parsed)
 
 
 def process_cache_rule(rule, ip_lists, phase):
@@ -396,7 +426,7 @@ def process_cache_rule(rule, ip_lists, phase):
     # Screen match-condition fields with no CloudFront source (runs even when the
     # expression was deferred as raw text — that is exactly when unmapped fields
     # prevented structuring).
-    cond, raw_expr, unmap_reason = _resolve_unmappable_in_condition(cond, raw_expr)
+    cond, raw_expr, unmap_reason, _parsed = _resolve_unmappable_in_condition(cond, raw_expr)
     if unmap_reason:
         return _make_non_convertible(rule, unmap_reason)
 
@@ -467,7 +497,7 @@ def process_cache_rule(rule, ip_lists, phase):
     if "respect_strong_etags" in action_params:
         result["params"]["respect_strong_etags"] = action_params["respect_strong_etags"]
 
-    return result
+    return _cache_parsed(result, raw_expr, _parsed)
 
 
 def process_request_header_transform(rule, ip_lists, phase):
@@ -485,7 +515,7 @@ def process_request_header_transform(rule, ip_lists, phase):
     # Screen match-condition fields with no CloudFront source (runs even when the
     # expression was deferred as raw text — that is exactly when unmapped fields
     # prevented structuring).
-    cond, raw_expr, unmap_reason = _resolve_unmappable_in_condition(cond, raw_expr)
+    cond, raw_expr, unmap_reason, _parsed = _resolve_unmappable_in_condition(cond, raw_expr)
     if unmap_reason:
         return _make_non_convertible(rule, unmap_reason)
 
@@ -520,7 +550,7 @@ def process_request_header_transform(rule, ip_lists, phase):
         elif value:
             op["params"]["value"] = value
 
-        ops.append(op)
+        ops.append(_cache_parsed(op, raw_expr, _parsed))
 
     return ops
 
@@ -540,7 +570,7 @@ def process_response_header_transform(rule, ip_lists, phase):
     # Screen match-condition fields with no CloudFront source (runs even when the
     # expression was deferred as raw text — that is exactly when unmapped fields
     # prevented structuring).
-    cond, raw_expr, unmap_reason = _resolve_unmappable_in_condition(cond, raw_expr)
+    cond, raw_expr, unmap_reason, _parsed = _resolve_unmappable_in_condition(cond, raw_expr)
     if unmap_reason:
         return _make_non_convertible(rule, unmap_reason)
 
@@ -599,7 +629,7 @@ def process_response_header_transform(rule, ip_lists, phase):
                 op["params"]["value_expression"] = expression
             elif value:
                 op["params"]["value"] = value
-            ops.append(op)
+            ops.append(_cache_parsed(op, raw_expr, _parsed))
 
     return ops
 

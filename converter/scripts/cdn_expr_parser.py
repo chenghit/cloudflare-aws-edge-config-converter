@@ -82,6 +82,7 @@ CF_FIELD_MAP = {
     "ip.src.asnum": "asnum",
     "ip.src.is_in_european_union": "is_eu",
     "ip.src.subdivision_1_iso_code": "subdivision_1",
+    "ip.src.subdivision_2_iso_code": "subdivision_2",
     "http.response.code": "response_code",
 }
 
@@ -115,7 +116,11 @@ FIELD_KVS_TRIGGERS = {
 # or as an action value — is non-convertible and must be reported, not emitted
 # as a bare JS identifier (which would throw ReferenceError at runtime).
 UNMAPPABLE_FIELDS = {
-    "subdivision_1",  # ip.src.subdivision_1_iso_code — no CloudFront-Viewer header
+    # ip.src.subdivision_2_iso_code — CloudFront exposes only the first-level
+    # subdivision (CloudFront-Viewer-Country-Region); there is no header for the
+    # second-level (county/district) subdivision. subdivision_1 IS convertible
+    # and is intentionally NOT listed here.
+    "subdivision_2",
 }
 
 
@@ -883,18 +888,29 @@ def parse_dynamic_expression(expr):
 
 
 def _dyn_tree_fields(node):
-    """Collect all field references (raw CF names) from a dynamic-expr tree."""
+    """Collect all field references (raw CF names) from a dynamic-expr tree.
+
+    Recurses through every child of every node rather than white-listing known
+    node types, so a field reference nested under a node shape this walker does
+    not specifically know about is still surfaced (an unknown-but-field-bearing
+    node must not slip past the unmappable-field screen). Only ``field`` nodes
+    contribute a name; ``literal`` nodes contribute nothing.
+    """
+    if isinstance(node, list):
+        out = []
+        for item in node:
+            out.extend(_dyn_tree_fields(item))
+        return out
     if not isinstance(node, dict):
         return []
-    t = node.get("type")
-    if t == "field":
+    if node.get("type") == "field":
         return [node["value"]]
-    if t == "func_call":
-        out = []
-        for a in node.get("args", []):
-            out.extend(_dyn_tree_fields(a))
-        return out
-    return []
+    out = []
+    for key, value in node.items():
+        if key == "type":
+            continue
+        out.extend(_dyn_tree_fields(value))
+    return out
 
 
 def value_expression_unmappable(expr):
