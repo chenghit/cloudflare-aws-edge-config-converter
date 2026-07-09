@@ -52,8 +52,8 @@ def emit(op):
 
 # ── Redirect rule (from_value.target_url) ────────────────────────────────────
 
-def redirect_rule(expr, target_url=None, target_expr=None, status=301):
-    fv = {"status_code": status, "target_url": {}}
+def redirect_rule(expr, target_url=None, target_expr=None, status=301, preserve_qs=False):
+    fv = {"status_code": status, "target_url": {}, "preserve_query_string": preserve_qs}
     if target_expr is not None:
         fv["target_url"]["expression"] = target_expr
     elif target_url is not None:
@@ -232,6 +232,56 @@ op = first_op(res)
 check("op carries _parsed_condition cache", str("_parsed_condition" in op), expect_substr="True")
 check("condition/raw_expression still mutually exclusive",
       str(op.get("condition") is None and op.get("raw_expression") is not None), expect_substr="True")
+
+def resp_js(ops):
+    """Assemble a viewer_response.js from processor ops."""
+    ir = {"metadata": {"hostname": "h", "sanitized_name": "h", "kvs_id": "K"},
+          "cache_behaviors": [{"viewer_request_ops": [], "viewer_response_ops": ops}]}
+    return _gen.generate_viewer_response_js(ir) or ""
+
+def req_js(op):
+    """Assemble a full viewer_request.js from a single op (so _qs is in scope)."""
+    ir = {"metadata": {"hostname": "h", "sanitized_name": "h"},
+          "cache_behaviors": [{"viewer_request_ops": [op], "viewer_response_ops": []}]}
+    return _gen.generate_viewer_request_js(ir)
+
+print("== #5 response-side sha256 header pulls import crypto (runtime fix) ==")
+ops = _proc.process_response_header_transform(
+    header_rule("true", {"x-sig": {"operation": "set", "expression": "encode_base64(sha256(http.host))"}}), {}, "")
+rjs = resp_js(ops)
+check("response sha256 -> import crypto", rjs, expect_substr="import crypto")
+check("response sha256 -> createHash emitted", rjs, expect_substr="crypto.createHash")
+
+print("== #6 add_*_header honors value_expression (was dropped to '') ==")
+op = first_op(_proc.process_request_header_transform(
+    header_rule("true", {"x-c": {"operation": "add", "expression": "concat(http.host, ip.src)"}}), {}, ""))
+check("add_header resolves expression", emit(op),
+      expect_substr="request.headers.host.value + event.viewer.ip", forbid_substr="{value: ''}")
+
+print("== #7 unmappable action value -> clean per-rule non_convertible (no leak) ==")
+r = _proc.process_redirect_rule(
+    redirect_rule("true", target_expr='concat("https://x/", cf.bot_management.score)'), {}, "")
+check("redirect target unmappable -> non_convertible",
+      r.get("type", "") if isinstance(r, dict) else "list", expect_substr="non_convertible")
+r = _proc.process_rewrite_rule(
+    rewrite_rule("true", query_expr='concat("a=", cf.waf.score)'), {}, "")
+check("rewrite query unmappable -> non_convertible",
+      (r.get("type", "") if isinstance(r, dict) else "list"), expect_substr="non_convertible")
+# mappable action value still converts (no over-rejection)
+op = first_op(_proc.process_redirect_rule(
+    redirect_rule("true", target_expr='concat("https://x/", http.request.uri.path)'), {}, ""))
+check("mappable redirect expr still converts", str(op.get("type")), expect_substr="redirect")
+check("mappable redirect emits no leak marker", emit(op), forbid_substr="no CloudFront source")
+
+print("== #8 redirect preserve_query_string appends incoming query ==")
+op = first_op(_proc.process_redirect_rule(
+    redirect_rule("true", target_url="https://x.com/new", status=301, preserve_qs=True), {}, ""))
+js = req_js(op)
+check("preserve_qs appends _qs(request.querystring)", js, expect_substr="_qs(request.querystring)")
+check("preserve_qs picks ? vs & delimiter", js, expect_substr="indexOf('?')")
+op = first_op(_proc.process_redirect_rule(
+    redirect_rule("true", target_url="https://x.com/new", status=301), {}, ""))
+check("no preserve_qs stays simple", emit(op), forbid_substr="indexOf('?')")
 
 # ── classifier alignment: every CF_FIELD_MAP value must be handled somewhere ──
 print("== invariant: every mapped field is classifiable (no silent drift) ==")

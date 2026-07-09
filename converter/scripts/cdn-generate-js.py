@@ -588,10 +588,7 @@ def _header_value_to_js(value, target="cff"):
 
 def _resolve_static_value(params, key):
     """Resolve a params value that is a plain static string (never an expression)."""
-    val = params.get(key, "")
-    if not val:
-        return js_string("")
-    return js_string(val)
+    return js_string(params.get(key, ""))
 
 
 def _resolve_expression_value(params, key, target="cff"):
@@ -651,7 +648,18 @@ def _generate_op_js(op, target="cff", indent="  "):
         else:
             target_url = _resolve_static_value(params, "target_url")
         status = params.get("status_code", 301)
-        body = f"return {{statusCode: {status}, headers: {{location: {{value: {target_url}}}}}}};"
+        # preserve_query_string: append the incoming raw query to the target,
+        # picking the delimiter (? vs &) based on whether the target already has
+        # a query. Cloudflare's flag carries the original request query through.
+        if params.get("preserve_query_string"):
+            raw_qs = "request.querystring" if target == "lambda" else "_qs(request.querystring)"
+            loc_var = "__loc"
+            body = (f"var {loc_var} = {target_url}; "
+                    f"var __q = {raw_qs}; "
+                    f"if (__q) {{ {loc_var} += ({loc_var}.indexOf('?') === -1 ? '?' : '&') + __q; }} "
+                    f"return {{statusCode: {status}, headers: {{location: {{value: {loc_var}}}}}}};")
+        else:
+            body = f"return {{statusCode: {status}, headers: {{location: {{value: {target_url}}}}}}};"
         if cond_js:
             lines.append(f"{indent}if ({cond_js}) {{ {body} }}")
         else:
@@ -727,7 +735,11 @@ def _generate_op_js(op, target="cff", indent="  "):
     elif op_type in ("add_request_header", "add_response_header", "add_header"):
         name = params.get("name", "").lower()
         value = params.get("value", "")
-        val_js = _header_value_to_js(value, target)
+        value_expr = params.get("value_expression")
+        if value_expr:
+            val_js = _resolve_expression_value(params, "value_expression", target)
+        else:
+            val_js = _header_value_to_js(value, target)
         header_obj = "response.headers" if "response" in op_type else "request.headers"
         body = f"if (!{header_obj}[{js_string(name)}]) {{ {header_obj}[{js_string(name)}] = {{value: {val_js}}}; }}"
         if cond_js:
@@ -775,17 +787,22 @@ def _needs_qs_helper(all_ops):
     return True
 
 
-def _needs_crypto(ir):
-    """Check if any op uses sha256/hmac (needs crypto import)."""
-    for beh in ir.get("cache_behaviors", []):
-        for op in beh.get("viewer_request_ops", []) + beh.get("viewer_response_ops", []):
-            params = op.get("params", {})
-            # Only expression-valued keys can carry sha256(...); target_url is a
-            # static string and never an expression, so it is not checked here.
-            for key in ("value_expression", "target_expression", "path_expression", "query_expression"):
-                val = params.get(key, "")
-                if val and ("sha256(" in val or "encode_base64(sha256(" in val):
-                    return True
+def _needs_crypto(ops):
+    """Check if any op in the given list uses sha256/hmac (needs crypto import).
+
+    Scans a single handler's op list (viewer-request OR viewer-response) so each
+    generator emits `import crypto` based on its own ops — a response-only
+    sha256() must pull the import into the response file, and a request-only one
+    must not force it into the response file.
+    """
+    for op in ops:
+        params = op.get("params", {})
+        # Only expression-valued keys can carry sha256(...); target_url is a
+        # static string and never an expression, so it is not checked here.
+        for key in ("value_expression", "target_expression", "path_expression", "query_expression"):
+            val = params.get(key, "")
+            if val and ("sha256(" in val or "encode_base64(sha256(" in val):
+                return True
     return False
 
 
@@ -864,14 +881,12 @@ def generate_viewer_request_js(ir, target="cff"):
     """Generate complete viewer_request.js content."""
     lines = []
     needs_kvs_flag = _needs_kvs(ir)
-    needs_crypto_flag = _needs_crypto(ir)
+    request_ops = [op for beh in ir.get("cache_behaviors", [])
+                   for op in beh.get("viewer_request_ops", [])]
+    needs_crypto_flag = _needs_crypto(request_ops)
 
     # Imports
-    if needs_kvs_flag or any(
-        op.get("type") == "origin_override"
-        for beh in ir.get("cache_behaviors", [])
-        for op in beh.get("viewer_request_ops", [])
-    ):
+    if needs_kvs_flag or any(op.get("type") == "origin_override" for op in request_ops):
         lines.append("import cf from 'cloudfront';")
     if needs_crypto_flag:
         lines.append("import crypto from 'crypto';")
@@ -884,10 +899,8 @@ def generate_viewer_request_js(ir, target="cff"):
     lines.append("async function handler(event) {")
     lines.append("  const request = event.request;")
 
-    # Collect all viewer_request_ops across behaviors
-    all_ops = []
-    for beh in ir.get("cache_behaviors", []):
-        all_ops.extend(beh.get("viewer_request_ops", []))
+    # Collect all viewer_request_ops across behaviors (already gathered above)
+    all_ops = request_ops
 
     # Inject _qs helper when query string reconstruction is needed (CFF only).
     # CFF request.querystring is a parsed object; _qs rebuilds the raw string.
@@ -952,6 +965,10 @@ def generate_viewer_response_js(ir):
         lines.append("import cf from 'cloudfront';")
         kvs_id = ir.get("metadata", {}).get("kvs_id", "")
         lines.append(f"const kvsHandle = cf.kvs('{kvs_id}');")
+    # crypto import is independent of KVS — a response header value using
+    # sha256()/HMAC emits crypto.createHash and would otherwise ReferenceError.
+    if _needs_crypto(all_ops):
+        lines.append("import crypto from 'crypto';")
 
     lines.append("async function handler(event) {")
     lines.append("  const response = event.response;")

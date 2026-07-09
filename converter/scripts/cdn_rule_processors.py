@@ -183,6 +183,44 @@ def _cache_parsed(op, raw_expr, parsed):
     return op
 
 
+def _screen_unmappable(rule, cond, raw_expr, ip_lists):
+    """Resolve IP-list references then screen unmappable condition fields.
+
+    Folds the identical pre-processing that every rule-type processor ran
+    inline: resolve `$list` references in the condition, then apply the
+    unmappable-field policy (OR-prune / AND-NOT-bare reject). Returns
+    ``(cond, raw_expr, parsed, non_convertible)`` — when ``non_convertible`` is
+    a dict, the caller should return it immediately; otherwise the (possibly
+    rewritten) cond/raw_expr and cached parse tree are ready to use.
+    """
+    if cond:
+        cond, ip_reason = _resolve_ip_list_in_condition(cond, ip_lists)
+        if ip_reason:
+            return cond, raw_expr, None, _make_non_convertible(rule, ip_reason)
+    cond, raw_expr, unmap_reason, parsed = _resolve_unmappable_in_condition(cond, raw_expr)
+    if unmap_reason:
+        return cond, raw_expr, parsed, _make_non_convertible(rule, unmap_reason)
+    return cond, raw_expr, parsed, None
+
+
+def _screen_value_expr(rule, expression, what):
+    """Screen a dynamic ACTION-value expression (redirect target, rewrite path,
+    query) for fields with no CloudFront source.
+
+    Header transforms already screen per-header via value_expression_unmappable;
+    this gives redirect/rewrite/query the same treatment so an unmappable action
+    value becomes a clean per-rule non_convertible instead of a leaked
+    `'' /* WARNING… */` marker inlined into the generated JS. Returns a
+    non_convertible dict or None.
+    """
+    if not expression:
+        return None
+    reason = value_expression_unmappable(expression)
+    if reason:
+        return _make_non_convertible(rule, f"{what}: {reason}")
+    return None
+
+
 def _extract_path_pattern(condition, expression):
     """Extract a CloudFront path pattern from condition for cache behavior matching."""
     if condition is None:
@@ -226,21 +264,19 @@ def process_redirect_rule(rule, ip_lists, phase):
     if phase in IP_SRC_NON_CONVERTIBLE_PHASES and _condition_uses_ip_src(cond):
         return _make_non_convertible(rule, "ip.src condition in Cache Rules cannot be converted; CFF cannot control caching decisions")
 
-    # Resolve IP lists
-    if cond:
-        cond, ip_reason = _resolve_ip_list_in_condition(cond, ip_lists)
-        if ip_reason:
-            return _make_non_convertible(rule, ip_reason)
-    # Screen match-condition fields with no CloudFront source (runs even when the
-    # expression was deferred as raw text — that is exactly when unmapped fields
-    # prevented structuring).
-    cond, raw_expr, unmap_reason, _parsed = _resolve_unmappable_in_condition(cond, raw_expr)
-    if unmap_reason:
-        return _make_non_convertible(rule, unmap_reason)
+    # Resolve IP lists + screen unmappable condition fields.
+    cond, raw_expr, _parsed, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
+    if nc:
+        return nc
 
     # Check if target is a dynamic expression
     target_expr = target_url.get("expression")
     target_value = target_url.get("value")
+
+    # Screen the action-value expression too (redirect target).
+    nc = _screen_value_expr(rule, target_expr, "redirect target")
+    if nc:
+        return nc
 
     op = {
         "type": "redirect",
@@ -274,16 +310,20 @@ def process_rewrite_rule(rule, ip_lists, phase):
 
     cond, raw_expr = parse_expression(expr)
 
-    if cond:
-        cond, ip_reason = _resolve_ip_list_in_condition(cond, ip_lists)
-        if ip_reason:
-            return _make_non_convertible(rule, ip_reason)
-    # Screen match-condition fields with no CloudFront source (runs even when the
-    # expression was deferred as raw text — that is exactly when unmapped fields
-    # prevented structuring).
-    cond, raw_expr, unmap_reason, _parsed = _resolve_unmappable_in_condition(cond, raw_expr)
-    if unmap_reason:
-        return _make_non_convertible(rule, unmap_reason)
+    # Resolve IP lists + screen unmappable condition fields.
+    cond, raw_expr, _parsed, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
+    if nc:
+        return nc
+
+    # Screen the action-value expressions (path / query rewrite targets).
+    path_expr = path_info.get("expression")
+    path_value = path_info.get("value")
+    query_expr = query_info.get("expression")
+    query_value = query_info.get("value")
+    nc = _screen_value_expr(rule, path_expr, "rewrite path") or \
+        _screen_value_expr(rule, query_expr, "rewrite query")
+    if nc:
+        return nc
 
     op = {
         "type": "rewrite",
@@ -295,8 +335,6 @@ def process_rewrite_rule(rule, ip_lists, phase):
     }
 
     # Path rewrite
-    path_expr = path_info.get("expression")
-    path_value = path_info.get("value")
     if path_expr:
         # Keep condition as-is — tf-domain uses condition for JS if-check,
         # path_expression for JS rewrite target generation
@@ -305,9 +343,7 @@ def process_rewrite_rule(rule, ip_lists, phase):
         # Static path: store under "path" (the key the JS generator reads).
         op["params"]["path"] = path_value
 
-    # Query rewrite
-    query_expr = query_info.get("expression")
-    query_value = query_info.get("value")
+    # Query rewrite (query_expr / query_value resolved above for screening)
     if query_expr:
         op["params"]["query_expression"] = query_expr
     elif query_value:
@@ -370,16 +406,10 @@ def process_origin_rule(rule, ip_lists, phase):
 
     cond, raw_expr = parse_expression(expr)
 
-    if cond:
-        cond, ip_reason = _resolve_ip_list_in_condition(cond, ip_lists)
-        if ip_reason:
-            return _make_non_convertible(rule, ip_reason)
-    # Screen match-condition fields with no CloudFront source (runs even when the
-    # expression was deferred as raw text — that is exactly when unmapped fields
-    # prevented structuring).
-    cond, raw_expr, unmap_reason, _parsed = _resolve_unmappable_in_condition(cond, raw_expr)
-    if unmap_reason:
-        return _make_non_convertible(rule, unmap_reason)
+    # Resolve IP lists + screen unmappable condition fields.
+    cond, raw_expr, _parsed, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
+    if nc:
+        return nc
 
     host_header = action_params.get("host_header")
     origin_info = action_params.get("origin", {})
@@ -419,16 +449,10 @@ def process_cache_rule(rule, ip_lists, phase):
             "CFF cannot control caching decisions"
         )
 
-    if cond:
-        cond, ip_reason = _resolve_ip_list_in_condition(cond, ip_lists)
-        if ip_reason:
-            return _make_non_convertible(rule, ip_reason)
-    # Screen match-condition fields with no CloudFront source (runs even when the
-    # expression was deferred as raw text — that is exactly when unmapped fields
-    # prevented structuring).
-    cond, raw_expr, unmap_reason, _parsed = _resolve_unmappable_in_condition(cond, raw_expr)
-    if unmap_reason:
-        return _make_non_convertible(rule, unmap_reason)
+    # Resolve IP lists + screen unmappable condition fields.
+    cond, raw_expr, _parsed, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
+    if nc:
+        return nc
 
     cache_enabled = action_params.get("cache", True)
     edge_ttl = action_params.get("edge_ttl", {})
@@ -508,16 +532,10 @@ def process_request_header_transform(rule, ip_lists, phase):
 
     cond, raw_expr = parse_expression(expr)
 
-    if cond:
-        cond, ip_reason = _resolve_ip_list_in_condition(cond, ip_lists)
-        if ip_reason:
-            return _make_non_convertible(rule, ip_reason)
-    # Screen match-condition fields with no CloudFront source (runs even when the
-    # expression was deferred as raw text — that is exactly when unmapped fields
-    # prevented structuring).
-    cond, raw_expr, unmap_reason, _parsed = _resolve_unmappable_in_condition(cond, raw_expr)
-    if unmap_reason:
-        return _make_non_convertible(rule, unmap_reason)
+    # Resolve IP lists + screen unmappable condition fields.
+    cond, raw_expr, _parsed, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
+    if nc:
+        return nc
 
     ops = []
     for header_name, header_config in headers.items():
@@ -563,16 +581,10 @@ def process_response_header_transform(rule, ip_lists, phase):
 
     cond, raw_expr = parse_expression(expr)
 
-    if cond:
-        cond, ip_reason = _resolve_ip_list_in_condition(cond, ip_lists)
-        if ip_reason:
-            return _make_non_convertible(rule, ip_reason)
-    # Screen match-condition fields with no CloudFront source (runs even when the
-    # expression was deferred as raw text — that is exactly when unmapped fields
-    # prevented structuring).
-    cond, raw_expr, unmap_reason, _parsed = _resolve_unmappable_in_condition(cond, raw_expr)
-    if unmap_reason:
-        return _make_non_convertible(rule, unmap_reason)
+    # Resolve IP lists + screen unmappable condition fields.
+    cond, raw_expr, _parsed, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
+    if nc:
+        return nc
 
     ops = []
     for header_name, header_config in headers.items():
