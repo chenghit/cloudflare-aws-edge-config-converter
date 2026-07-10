@@ -207,7 +207,11 @@ def _field_is_mappable(field, target="cff"):
     be reported as non-convertible rather than emitted as bare JS identifiers.
     """
     if field in _PREAMBLE_FIELDS:
-        return True
+        # continent / is_eu depend on a KVS preamble that is only generated for
+        # the viewer-request and viewer-response handlers. The Lambda@Edge
+        # origin-request handler has no such preamble (and no cf.kvs()), so they
+        # are NOT mappable there.
+        return target != "lambda"
     if target == "lambda" and field in LAMBDA_ACCESSORS:
         return True
     if target == "response" and field in RESPONSE_ACCESSORS:
@@ -241,12 +245,22 @@ def _needs_check(field):
 
 def _is_false_sentinel(js):
     """True if a rendered condition is a 'never matches' sentinel — bare `false`
-    or a commented form like `/* TODO: ... */ false` / `/* unknown op */ false`.
+    or a comment-prefixed form (`/* TODO: ... */ false`, `/* unknown op */ false`)
+    emitted for an un-evaluable condition (unmappable field, unresolved list,
+    unknown op).
 
-    These mean the condition can't be evaluated at the edge. Negating one with
-    `!( ... )` would flip it to `true` (fail OPEN), so callers must return the
-    sentinel unchanged instead of wrapping it in a negation."""
-    return js == "false" or js.rstrip().endswith(" false")
+    Matched forms are only: exactly `false`, or `/* ... */ false` (a comment
+    that starts the string and ends in ` false`). A real leaf can't collide:
+    string comparisons render as `… === 'false'` (trailing quote), and a bare
+    boolean `false` is itself a sentinel. Negating one with `!( … )` would flip
+    it to `true` (fail OPEN), so callers must return it unchanged rather than
+    wrap it in a negation."""
+    if not js:  # None (unconditional) or "" — not a false-sentinel
+        return False
+    if js == "false":
+        return True
+    s = js.rstrip()
+    return s.startswith("/*") and s.endswith(" false")
 
 
 def condition_to_js(cond, target="cff", indent=2):
@@ -256,18 +270,36 @@ def condition_to_js(cond, target="cff", indent=2):
 
     if "logic" in cond:
         logic = cond["logic"]
+        # Combine sub-conditions with real boolean algebra over two special
+        # values so neither can corrupt the result:
+        #   None  = "always true" (unconditional / the `true` literal)
+        #   false-sentinel = "never matches" (unmappable field, unresolved list,
+        #     unknown op) — must never flip a sibling/negation to true (fail OPEN)
+        #     nor silently narrow a match by string position.
+        #   AND: drop None (identity); any false → whole thing false
+        #   OR:  any None → unconditional (None); drop false operands; all-false → false
+        #   NOT: !(false) → false; !(None/always) → false (never matches)
         if logic == "and":
             parts = [condition_to_js(p, target, indent) for p in cond["parts"]]
-            return " && ".join(f"({p})" if " || " in p else p for p in parts)
+            if any(_is_false_sentinel(p) for p in parts):
+                return "false"
+            live = [p for p in parts if p is not None]
+            if not live:
+                return None  # all unconditional → unconditional
+            return " && ".join(f"({p})" if " || " in p else p for p in live)
         if logic == "or":
             parts = [condition_to_js(p, target, indent) for p in cond["parts"]]
-            return " || ".join(f"({p})" if " && " in p else p for p in parts)
+            if any(p is None for p in parts):
+                return None  # an always-true branch makes the OR unconditional
+            live = [p for p in parts if not _is_false_sentinel(p)]
+            if not live:
+                return "false"
+            return " || ".join(f"({p})" if " && " in p else p for p in live)
         if logic == "not":
             inner = condition_to_js(cond["item"], target, indent)
-            # A false-sentinel inner (unmappable field, unresolved list, unknown
-            # op) means "never matches" and must stay that way under negation —
-            # `!(false)` would be `true` (fail OPEN).
-            if _is_false_sentinel(inner):
+            # !(never) → false; !(always) → false (both "never matches" post-negation
+            # of an absorbing value); a normal inner negates normally.
+            if inner is None or _is_false_sentinel(inner):
                 return "false"
             return f"!({inner})"
 
@@ -838,6 +870,27 @@ def _op_uses_continent_eu(op, which=("continent", "is_eu")):
     return False
 
 
+def _cond_has_op(cond, ops):
+    """True if any leaf in the condition tree uses one of the given ops
+    (e.g. in_kvs / not_in_kvs — which call kvsHandle and thus need cf.kvs())."""
+    if cond is None:
+        return False
+    if cond.get("op") in ops:
+        return True
+    for p in cond.get("parts", []):
+        if _cond_has_op(p, ops):
+            return True
+    if "item" in cond:
+        return _cond_has_op(cond["item"], ops)
+    return False
+
+
+def _op_uses_kvs(op):
+    """True if an op needs a KVS handle at runtime — a continent/is_eu preamble
+    lookup or an ip.src in_kvs/not_in_kvs membership test."""
+    return _op_uses_continent_eu(op) or _cond_has_op(op.get("condition"), ("in_kvs", "not_in_kvs"))
+
+
 def _has_continent_or_eu(ops):
     """Check if any op references continent or is_eu (structured or raw)."""
     return any(_op_uses_continent_eu(op) for op in ops)
@@ -981,7 +1034,7 @@ def generate_viewer_response_js(ir):
 
     lines = []
     needs_kvs = any(
-        _op_uses_continent_eu(op)
+        _op_uses_kvs(op)
         or op.get("type") == "serve_error_inline"
         for op in all_ops
     )
@@ -1655,6 +1708,13 @@ def _write_domain_functions_tf(san, config, ir, domain_dir, kvs_is_shared=False,
     vresp_cfg = config.get("viewer_response", {})
     has_kvs = any(ir["metadata"].get("kvs_requirements", {}).values())
     needs_local_kvs = has_kvs and not kvs_is_shared
+    # Does the viewer-response CFF itself use KVS (continent/is_eu/in_kvs)? Only
+    # then does its resource need a key_value_store_associations block.
+    resp_uses_kvs = any(
+        _op_uses_kvs(op)
+        for beh in ir.get("cache_behaviors", [])
+        for op in beh.get("viewer_response_ops", [])
+    )
     le = ir["metadata"].get("lambda_edge", {})
     has_le_origin_resp = le.get("origin_response") is not None
     escalated = "_escalated_origin_ops" in ir
@@ -1696,13 +1756,24 @@ def _write_domain_functions_tf(san, config, ir, domain_dir, kvs_is_shared=False,
         w(f'  runtime = "cloudfront-js-2.0"')
         w(f'  publish = true')
         w(f'  code    = file("${{path.module}}/functions/{san}_viewer_response.js")')
+        # A viewer-response CFF that does a continent/is_eu or in_kvs lookup calls
+        # cf.kvs(), which throws at init unless a store is associated — mirror the
+        # viewer-request association here (a function may have one KVS).
+        if resp_uses_kvs and needs_local_kvs:
+            w(f'  key_value_store_associations = [aws_cloudfront_key_value_store.{san}_kvs.arn]')
+        elif resp_uses_kvs and kvs_is_shared and has_kvs:
+            kvs_tf_id = shared_kvs_name.replace("-", "_") if shared_kvs_name else ""
+            w(f'  key_value_store_associations = [data.terraform_remote_state.shared.outputs.{kvs_tf_id}_arn]')
         w('}')
         vresp_arn_expr = f"aws_cloudfront_function.{san}_viewer_response.arn"
     else:
         vresp_arn_expr = ""
 
-    # Shared KVS reference (for independent CFF that uses shared KVS)
-    if kvs_is_shared and has_kvs and vr_cfg.get("mode") != "shared":
+    # Shared KVS reference (for an independent CFF — request or response — that
+    # associates a shared KVS via data.terraform_remote_state.shared).
+    req_refs_shared = kvs_is_shared and has_kvs and vr_cfg.get("mode") != "shared"
+    resp_refs_shared = kvs_is_shared and has_kvs and resp_uses_kvs and vresp_cfg.get("mode") == "independent"
+    if req_refs_shared or resp_refs_shared:
         w('')
         w(f'data "terraform_remote_state" "shared" {{')
         w(f'  backend = "local"')

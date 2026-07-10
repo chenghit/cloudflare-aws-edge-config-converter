@@ -384,15 +384,21 @@ def parse_expression(expression):
     if expr == "true":
         return {"always": True}, None
 
-    # Contains OR → too complex
+    # OR (and anything the simple matcher below can't structure) is handled by
+    # the full recursive-descent parser, which produces a proper structured
+    # {"logic": "or"/"and"/"not", ...} tree. Deferring OR to raw_expression (the
+    # old behavior) forced every downstream consumer to re-parse or string-scan
+    # raw text, which is where a whole class of fail-open / crash bugs lived.
     if _has_or(expr):
-        return None, expression
+        try:
+            return parse_expression_full(expr), None
+        except _ParseError:
+            return None, expression  # genuinely unparseable → defer to raw
 
     # Strip outer parens
     expr = _strip_outer_parens(expr)
 
     # Try dual AND first (before single, to avoid partial matches)
-    # 3+ AND conditions: _split_and returns 3+ parts, falls through to raw_expression
     parts = _split_and(expr)
     if len(parts) == 2:
         c1 = _parse_single_condition(_strip_outer_parens(parts[0]))
@@ -406,8 +412,12 @@ def parse_expression(expression):
         if cond:
             return cond, None
 
-    # Cannot parse
-    return None, expression
+    # 3+ ANDs or other shapes the simple matcher missed — try the full parser
+    # before giving up to raw.
+    try:
+        return parse_expression_full(expr), None
+    except _ParseError:
+        return None, expression
 
 
 def extract_orp_headers(condition):
@@ -436,6 +446,8 @@ def _collect_orp(cond, headers):
     if "logic" in cond:
         for p in cond.get("parts", []):
             _collect_orp(p, headers)
+        if "item" in cond:  # NOT node — child is under "item", not "parts"
+            _collect_orp(cond["item"], headers)
     elif "field" in cond:
         for h in FIELD_TO_ORP_HEADERS.get(cond["field"], []):
             headers.add(h)
@@ -454,6 +466,8 @@ def _collect_kvs(cond, triggers):
     if "logic" in cond:
         for p in cond.get("parts", []):
             _collect_kvs(p, triggers)
+        if "item" in cond:  # NOT node — child is under "item", not "parts"
+            _collect_kvs(cond["item"], triggers)
     elif "field" in cond:
         t = FIELD_KVS_TRIGGERS.get(cond["field"])
         if t:

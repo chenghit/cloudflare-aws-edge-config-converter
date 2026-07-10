@@ -100,8 +100,15 @@ def _resolve_ip_list_in_condition(condition, ip_lists):
     if condition is None:
         return condition, None
     if "logic" in condition:
+        # A logic node is either AND/OR (children under "parts") or NOT (single
+        # child under "item"). Handle both — assuming "parts" crashes on `not`.
+        if "item" in condition:
+            ni, reason = _resolve_ip_list_in_condition(condition["item"], ip_lists)
+            if reason:
+                return None, reason
+            return {**condition, "item": ni}, None
         new_parts = []
-        for p in condition["parts"]:
+        for p in condition.get("parts", []):
             np, reason = _resolve_ip_list_in_condition(p, ip_lists)
             if reason:
                 return None, reason
@@ -109,6 +116,16 @@ def _resolve_ip_list_in_condition(condition, ip_lists):
         return {**condition, "parts": new_parts}, None
     op = condition.get("op")
     if op in ("in_list", "not_in_list"):
+        # Only ip.src lists map to the IP KVS lookup. A $list on any other field
+        # (http.host in $hosts, ip.src.country in $geo, ip.src.asnum in $asns)
+        # has no CloudFront equivalent — resolving it as an IP list would build
+        # a bogus `ip:<list>:` lookup that never matches (silently narrowing the
+        # rule). Report those as non-convertible instead.
+        if condition.get("field") != "ip.src":
+            return None, (
+                f"'{condition.get('field')} in ${condition['value'].lstrip('$')}' "
+                "references a named list with no CloudFront equivalent "
+                "(only ip.src IP lists convert to a KVS lookup)")
         list_name = condition["value"].lstrip("$")
         ips, reason = _check_ip_list(list_name, ip_lists)
         if reason:
@@ -191,11 +208,6 @@ def _resolve_unmappable_in_condition(condition, raw_expr=None, target="cff"):
     return condition, raw_expr, None
 
 
-def _raw_references_ip_list(raw_expr):
-    """True if a deferred raw expression contains an `ip.src in $list` reference."""
-    return bool(raw_expr) and bool(re.search(r"ip\.src(?:\.\w+)?\s+in\s+\$", raw_expr))
-
-
 def _screen_unmappable(rule, cond, raw_expr, ip_lists, target="cff"):
     """Resolve IP-list references then screen unmappable condition fields.
 
@@ -206,24 +218,11 @@ def _screen_unmappable(rule, cond, raw_expr, ip_lists, target="cff"):
     the caller should return it immediately; otherwise the (possibly rewritten)
     cond/raw_expr are ready to use.
 
-    A deferred raw expression (an OR that parse_expression couldn't structure)
-    that references an IP list must be structured here so the list is resolved
-    to a KVS lookup. Otherwise the generator re-parses the raw text, hits an
-    unresolved in_list/not_in_list op, and emits `/* TODO */ false` — which a
-    surrounding `not` flips to `true` (fail OPEN).
+    parse_expression now structures OR/NOT via the full parser, so IP-list
+    expressions arrive here already structured and are resolved by
+    _resolve_ip_list_in_condition below — no raw force-structuring needed. A
+    non-None raw_expr means the expression was genuinely unparseable.
     """
-    # Force a deferred IP-list expression into structured form so it goes
-    # through _resolve_ip_list_in_condition below (and never reaches the
-    # generator as an unresolved raw in_list).
-    if cond is None and _raw_references_ip_list(raw_expr):
-        try:
-            cond = parse_expression_full(raw_expr)
-            raw_expr = None
-        except Exception:
-            # Can't structure it — refuse rather than risk a fail-open IP rule.
-            return cond, raw_expr, _make_non_convertible(
-                rule, "IP-list condition could not be parsed for CloudFront; "
-                "review manually (CFF cannot safely evaluate it)")
     if cond:
         cond, ip_reason = _resolve_ip_list_in_condition(cond, ip_lists)
         if ip_reason:

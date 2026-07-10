@@ -224,16 +224,16 @@ op = first_op(_proc.process_request_header_transform(
     header_rule("true", {"X-B": {"operation": "set", "expression": "broken((("}}), {}, ""))
 check("parse failure tagged for validator", emit(op), expect_substr="no CloudFront source for")
 
-print("== deferred raw_expr: XOR invariant intact, no stray cache key ==")
+print("== OR expressions are structured (not deferred to raw) ==")
 res = _proc.process_origin_rule(
     {"id": "r", "expression": 'http.host eq "a.com" or http.host eq "b.com"',
      "action_parameters": {"origin": {"host": "o.com"}}}, {}, "")
 op = first_op(res)
-# An OR expression is deferred as raw_expression (condition None). It must NOT
-# also carry a structured condition, and must NOT leak the old _parsed_condition
-# cache key (removed — it never survived _place_result's op rebuild anyway).
-check("condition/raw_expression mutually exclusive",
-      str(op.get("condition") is None and op.get("raw_expression") is not None), expect_substr="True")
+# Root fix: an OR is now structured via parse_expression_full — a proper
+# {"logic": "or"} condition, NOT deferred to raw_expression. This is what kills
+# the whole raw-deferral bandaid class.
+check("OR yields structured condition", str(op.get("condition")), expect_substr="'logic': 'or'")
+check("OR leaves raw_expression empty", str(op.get("raw_expression")), expect_substr="None")
 check("no dead _parsed_condition key", str("_parsed_condition" in op), expect_substr="False")
 
 def resp_js(ops):
@@ -396,6 +396,75 @@ check("request-phase response_code condition rejected",
 check("response-phase response_code condition allowed (cff-only check)",
       str(_parser.condition_unmappable_fields({"field": "response_code", "op": "eq", "value": 200}, "response")),
       expect_substr="[]")
+
+print("== ROOT: OR is structured via full parser (not deferred to raw) ==")
+c, raw = _parser.parse_expression('http.host eq "a" or http.request.uri.path eq "/b"')
+check("OR parse yields structured cond", str(c), expect_substr="'logic': 'or'")
+check("OR parse leaves no raw", str(raw), expect_substr="None")
+
+print("== S1: not(OR containing ip.src list) doesn't crash ==")
+for _e in ['ip.src in $allow or not (http.host eq "z.com" and ip.src in $deny)',
+           'not (ip.src in $allow or http.host eq "x.com")']:
+    try:
+        _r = _proc.process_redirect_rule(
+            {"id": "r", "description": "t", "expression": _e,
+             "action_parameters": {"from_value": {"status_code": 302, "target_url": {"value": "https://b"}}}},
+            {"allow": ["1.2.3.4"], "deny": ["9.9.9.9"]}, "")
+        check(f"no crash: {_e[:32]}", (_r.get("type") if isinstance(_r, dict) else "list") or "ok",
+              forbid_substr="__never__")
+    except Exception as _ex:
+        check(f"no crash: {_e[:32]}", f"CRASH {type(_ex).__name__}", forbid_substr="CRASH")
+
+print("== S2: boolean algebra over false-sentinel (no fail-open / positional bug) ==")
+check("false || X drops the sentinel",
+      _gen.condition_to_js({"logic": "or", "parts": [
+          {"field": "subdivision_2", "op": "eq", "value": "x"},
+          {"field": "uri.path", "op": "eq", "value": "/a"}]}, "cff"),
+      expect_substr="request.uri === '/a'", forbid_substr="false")
+check("X && false collapses to false",
+      _gen.condition_to_js({"logic": "and", "parts": [
+          {"field": "uri.path", "op": "eq", "value": "/a"},
+          {"field": "subdivision_2", "op": "eq", "value": "x"}]}, "cff"),
+      expect_substr="false")
+check("not(sentinel) stays false (no fail-open)",
+      _gen.condition_to_js({"logic": "not", "item": {"logic": "or", "parts": [
+          {"field": "subdivision_2", "op": "eq", "value": "x"}]}}, "cff"),
+      expect_substr="false", forbid_substr="!(")
+check("legit 'false' leaf not tripped",
+      str(_gen._is_false_sentinel("request.headers.host.value === 'false'")), expect_substr="False")
+
+print("== S2b: None (always) parts handled, no crash / literal None ==")
+check("not(always) -> false", _gen.condition_to_js({"logic": "not", "item": {"always": True}}, "cff"),
+      expect_substr="false", forbid_substr="None")
+check("and[X, always] drops always",
+      _gen.condition_to_js({"logic": "and", "parts": [
+          {"field": "uri.path", "op": "eq", "value": "/a"}, {"always": True}]}, "cff"),
+      expect_substr="request.uri === '/a'", forbid_substr="None")
+check("_is_false_sentinel(None) is safe", str(_gen._is_false_sentinel(None)), expect_substr="False")
+
+print("== S3: response op with in_kvs pulls cf.kvs() into response JS ==")
+_ipop = _proc.process_response_header_transform(
+    header_rule('ip.src in $blk', {"x": {"operation": "set", "value": "1"}}), {"blk": ["1.2.3.4"]}, "")
+_ipjs = resp_js(_ipop)
+check("response in_kvs -> cf.kvs()", _ipjs, expect_substr="cf.kvs()")
+
+print("== S5/S6: non-ip.src named list -> non_convertible (not bogus IP-KVS) ==")
+for _e in ['http.host in $hostlist or http.request.uri.path eq "/a"',
+           'ip.src.country in $geo', 'ip.src.asnum in $asns']:
+    _r = _proc.process_redirect_rule(
+        {"id": "r", "description": "t", "expression": _e,
+         "action_parameters": {"from_value": {"status_code": 302, "target_url": {"value": "https://b"}}}}, {}, "")
+    check(f"{_e[:28]} -> non_convertible",
+          _r.get("type", "") if isinstance(_r, dict) else "list", expect_substr="non_convertible")
+
+print("== S7: continent/is_eu unmappable in Lambda@Edge target ==")
+check("lambda continent -> false", _gen.condition_to_js({"field": "continent", "op": "eq", "value": "EU"}, "lambda"),
+      expect_substr="false")
+check("lambda is_eu -> false", _gen.condition_to_js({"field": "is_eu", "op": "eq", "value": True}, "lambda"),
+      expect_substr="false")
+check("(a) NOT(continent) still triggers KVS provisioning",
+      str(_parser.extract_kvs_triggers({"logic": "not", "item": {"field": "continent", "op": "eq", "value": "EU"}})),
+      expect_substr="needs_continent")
 
 # ── classifier alignment: every CF_FIELD_MAP value must be handled somewhere ──
 print("== invariant: every mapped field is classifiable (no silent drift) ==")
