@@ -872,11 +872,20 @@ def _expression_uses_response_fields(cond, raw_expr):
 
 
 def _find_response_code_value(cond):
-    """Return the value of a response_code leaf anywhere in the tree, else None."""
+    """Return the value of a POSITIVE response_code leaf anywhere in the tree.
+
+    A negated leaf (`not (http.response.code eq 404)`, op `not_eq`/`not_*`) means
+    "exclude 404", NOT "the code is 404" — using its value would install a custom
+    error response for exactly the code the rule excludes. Skip negated leaves.
+    Returns None if there is no positive response_code equality.
+    """
     if not isinstance(cond, dict):
         return None
     if cond.get("field") == "response_code":
-        return cond.get("value")
+        op = cond.get("op", "eq")
+        if op == "eq":  # only a positive equality names the code
+            return cond.get("value")
+        return None
     for child in iter_condition_children(cond):
         v = _find_response_code_value(child)
         if v is not None:

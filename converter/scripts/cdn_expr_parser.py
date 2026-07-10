@@ -10,21 +10,6 @@ import re
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _strip_outer_parens(expr):
-    """Remove one layer of wrapping parentheses if balanced."""
-    e = expr.strip()
-    if e.startswith("(") and e.endswith(")"):
-        depth, i = 0, 0
-        for ch in e:
-            if ch == "(": depth += 1
-            elif ch == ")": depth -= 1
-            if depth == 0 and i < len(e) - 1:
-                return e  # closing paren is not the last char
-            i += 1
-        return e[1:-1].strip()
-    return e
-
-
 def _parse_in_set(raw):
     """Parse '{\"a\" \"b\" \"c\"}' or '{1.2.3.4 5.6.7.8}' into a list."""
     inner = raw.strip().strip("{}")
@@ -309,40 +294,6 @@ def _parse_single_condition(expr):
 
 # ── top-level parser ─────────────────────────────────────────────────────────
 
-def _split_and(expr):
-    """Split 'A and B' at the top level (not inside parens)."""
-    depth = 0
-    tokens = []
-    current = []
-    for ch in expr:
-        if ch == "(":
-            depth += 1
-            current.append(ch)
-        elif ch == ")":
-            depth -= 1
-            current.append(ch)
-        else:
-            current.append(ch)
-        # Check for ' and ' at depth 0
-        s = "".join(current)
-        if depth == 0 and s.endswith(" and "):
-            tokens.append(s[:-5].strip())
-            current = []
-    tokens.append("".join(current).strip())
-    return [t for t in tokens if t]
-
-
-def _has_or(expr):
-    """Check if expression contains top-level OR."""
-    depth = 0
-    for i, ch in enumerate(expr):
-        if ch == "(": depth += 1
-        elif ch == ")": depth -= 1
-        if depth == 0 and expr[i:i+4] == " or ":
-            return True
-    return False
-
-
 def split_or(expr):
     """Split 'A or B or C' at the top level (not inside parens).
 
@@ -384,39 +335,13 @@ def parse_expression(expression):
     if expr == "true":
         return {"always": True}, None
 
-    # Strip outer parens FIRST — a fully-wrapped `(A or B)` hides its top-level
-    # OR at depth 1, so an _has_or check before stripping would miss it and fall
-    # through to single-condition parse, silently dropping every branch but the
-    # first. Cloudflare exports routinely wrap expressions in parens.
-    expr = _strip_outer_parens(expr)
-
-    # OR (and anything the simple matcher below can't structure) is handled by
-    # the full recursive-descent parser, which produces a proper structured
-    # {"logic": "or"/"and"/"not", ...} tree. Deferring OR to raw_expression (the
-    # old behavior) forced every downstream consumer to re-parse or string-scan
-    # raw text, which is where a whole class of fail-open / crash bugs lived.
-    if _has_or(expr):
-        try:
-            return parse_expression_full(expr), None
-        except (_ParseError, RecursionError):
-            return None, expression  # unparseable / pathological → defer to raw
-
-    # Try dual AND first (before single, to avoid partial matches)
-    parts = _split_and(expr)
-    if len(parts) == 2:
-        c1 = _parse_single_condition(_strip_outer_parens(parts[0]))
-        c2 = _parse_single_condition(_strip_outer_parens(parts[1]))
-        if c1 and c2:
-            return {"logic": "and", "parts": [c1, c2]}, None
-
-    # Try single condition (only if not an AND expression)
-    if len(parts) == 1:
-        cond = _parse_single_condition(expr)
-        if cond:
-            return cond, None
-
-    # 3+ ANDs or other shapes the simple matcher missed — try the full parser
-    # before giving up to raw.
+    # Everything else goes through the full recursive-descent parser, which
+    # produces a proper structured {"logic": "or"/"and"/"not", ...} tree for OR,
+    # AND, nested groups, and NOT alike. The old hand-rolled AND/single-condition
+    # path here was OR-blind — `A and (B or C)` split on the top-level AND and
+    # then parsed `(B or C)` with a single-condition regex that silently dropped
+    # the OR branch. The full parser handles all of these correctly; we only
+    # defer to raw_expression when it genuinely cannot parse the text.
     try:
         return parse_expression_full(expr), None
     except (_ParseError, RecursionError):
@@ -1001,10 +926,8 @@ def condition_unmappable_fields(cond, target="cff"):
         return []
     if "logic" in cond:
         out = []
-        for p in cond.get("parts", []):
-            out.extend(condition_unmappable_fields(p, target))
-        if "item" in cond:
-            out.extend(condition_unmappable_fields(cond["item"], target))
+        for child in iter_condition_children(cond):
+            out.extend(condition_unmappable_fields(child, target))
         return out
     field = cond.get("field")
     if field is None:

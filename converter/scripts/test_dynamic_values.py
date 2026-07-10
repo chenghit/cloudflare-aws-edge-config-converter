@@ -24,6 +24,7 @@ _parser = _load("cdn_expr_parser", "cdn_expr_parser.py")
 sys.modules["cdn_expr_parser"] = _parser
 _proc = _load("cdn_rule_processors", "cdn_rule_processors.py")
 _gen = _load("cdn_generate_js", "cdn-generate-js.py")
+_pre = _load("cdn_preprocess", "cdn-preprocess.py")
 
 FAILURES = []
 
@@ -430,8 +431,13 @@ check("not(sentinel) stays false (no fail-open)",
       _gen.condition_to_js({"logic": "not", "item": {"logic": "or", "parts": [
           {"field": "subdivision_2", "op": "eq", "value": "x"}]}}, "cff"),
       expect_substr="false", forbid_substr="!(")
-check("legit 'false' leaf not tripped",
-      str(_gen._is_false_sentinel("request.headers.host.value === 'false'")), expect_substr="False")
+# #6: a real OR whose rendered form starts with a `/*` regex and ends in
+# `=== false` must NOT be misread as a never-match sentinel and collapsed.
+check("real OR ending in '=== false' not collapsed (structural sentinel)",
+      _gen.condition_to_js({"logic": "or", "parts": [
+          {"field": "uri.path", "op": "matches", "value": "*x"},
+          {"field": "method", "op": "eq", "value": False}]}, "cff"),
+      expect_substr="request.method === false", forbid_substr="/* ")
 
 print("== S2b: None (always) parts handled, no crash / literal None ==")
 check("not(always) -> false", _gen.condition_to_js({"logic": "not", "item": {"always": True}}, "cff"),
@@ -440,7 +446,11 @@ check("and[X, always] drops always",
       _gen.condition_to_js({"logic": "and", "parts": [
           {"field": "uri.path", "op": "eq", "value": "/a"}, {"always": True}]}, "cff"),
       expect_substr="request.uri === '/a'", forbid_substr="None")
-check("_is_false_sentinel(None) is safe", str(_gen._is_false_sentinel(None)), expect_substr="False")
+# #7: malformed logic nodes must not crash — fail closed (false) or unconditional.
+check("malformed not-node (no item) doesn't crash",
+      str(_gen.condition_to_js({"logic": "not"}, "cff")), expect_substr="false")
+check("malformed and-node (no parts) doesn't crash",
+      str(_gen.condition_to_js({"logic": "and"}, "cff")), forbid_substr="Error")
 
 print("== S3: response op with in_kvs pulls cf.kvs() into response JS ==")
 _ipop = _proc.process_response_header_transform(
@@ -509,6 +519,49 @@ try:
     check("deep OR -> no crash", "ok", forbid_substr="__never__")
 except RecursionError:
     check("deep OR -> no crash", "RecursionError", forbid_substr="RecursionError")
+
+print("== U2: A and (B or C) keeps the OR branch (was dropped) ==")
+_c, _raw = _parser.parse_expression(
+    'http.host eq "a" and (http.request.uri.path eq "/x" or http.request.uri.path eq "/y")')
+check("nested OR-in-AND keeps /y", str(_c), expect_substr="/y")
+check("nested OR-in-AND has inner or", str(_c), expect_substr="'logic': 'or'")
+_c, _raw = _parser.parse_expression(
+    '(http.request.uri.path eq "/x" or http.request.uri.path eq "/y") and http.host eq "a"')
+check("OR-in-AND (other order) keeps /y", str(_c), expect_substr="/y")
+
+print("== U4: negated response_code not used as the error code ==")
+check("not(code eq 404) -> no code extracted",
+      str(_proc._find_response_code_value({"field": "response_code", "op": "not_eq", "value": 404})),
+      expect_substr="None")
+check("positive code eq 500 -> 500",
+      str(_proc._find_response_code_value({"field": "response_code", "op": "eq", "value": 500})),
+      expect_substr="500")
+
+print("== U5: extension fan-out only when condition is purely extensions ==")
+# pure extension set → fan out is allowed
+check("pure ext set is fan-out-eligible",
+      str(_pre._condition_is_pure_extension(
+          {"field": "uri.path.extension", "op": "in", "value": ["pdf", "jpg"]})),
+      expect_substr="True")
+# host AND ext → NOT pure (must keep host scope, no global fan-out)
+check("host AND ext is NOT fan-out-eligible",
+      str(_pre._condition_is_pure_extension(
+          {"logic": "and", "parts": [
+              {"field": "host", "op": "eq", "value": "x"},
+              {"field": "uri.path.extension", "op": "in", "value": ["pdf", "jpg"]}]})),
+      expect_substr="False")
+
+print("== U1: cache OR-split reads the structured condition ==")
+# an OR of two path leaves → splits into per-path list
+check("OR of two paths splits",
+      str(_pre._try_split_or_cache_paths({"logic": "or", "parts": [
+          {"field": "uri.path", "op": "eq", "value": "/a"},
+          {"field": "uri.path", "op": "eq", "value": "/b"}]})),
+      expect_substr="/a")
+# a non-OR condition is not splittable (returns None → routed elsewhere)
+check("non-OR condition not splittable",
+      str(_pre._try_split_or_cache_paths({"field": "uri.path", "op": "eq", "value": "/a"})),
+      expect_substr="None")
 
 # ── classifier alignment: every CF_FIELD_MAP value must be handled somewhere ──
 print("== invariant: every mapped field is classifiable (no silent drift) ==")

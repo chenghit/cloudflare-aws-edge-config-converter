@@ -243,65 +243,69 @@ def _needs_check(field):
     return field not in ALWAYS_AVAILABLE
 
 
-def _is_false_sentinel(js):
-    """True if a rendered condition is a 'never matches' sentinel — bare `false`
-    or a comment-prefixed form (`/* TODO: ... */ false`, `/* unknown op */ false`)
-    emitted for an un-evaluable condition (unmappable field, unresolved list,
-    unknown op).
-
-    Matched forms are only: exactly `false`, or `/* ... */ false` (a comment
-    that starts the string and ends in ` false`). A real leaf can't collide:
-    string comparisons render as `… === 'false'` (trailing quote), and a bare
-    boolean `false` is itself a sentinel. Negating one with `!( … )` would flip
-    it to `true` (fail OPEN), so callers must return it unchanged rather than
-    wrap it in a negation."""
-    if not js:  # None (unconditional) or "" — not a false-sentinel
-        return False
-    if js == "false":
-        return True
-    s = js.rstrip()
-    return s.startswith("/*") and s.endswith(" false")
+# Structural "never matches" marker. A condition that can't be evaluated at the
+# edge (unmappable field, unresolved list, unknown op, malformed node) resolves
+# to this VALUE — never a magic string — so boolean combination is done on the
+# value, not by inspecting rendered JS (which collides with real output such as
+# `/*x/.test(uri) || m === false`). Only the public wrapper renders it, as the
+# JS literal `false`.
+_NEVER = object()
 
 
 def condition_to_js(cond, target="cff", indent=2):
-    """Convert a CDN condition tree to JS expression string."""
+    """Convert a CDN condition tree to a JS expression string.
+
+    Returns None when the condition is unconditional (caller emits the body with
+    no `if`), or a JS string otherwise. An un-evaluable condition renders as the
+    literal `false` (fail-closed: the guarded op never fires)."""
+    r = _condition_to_js(cond, target, indent)
+    if r is _NEVER:
+        return "false"
+    return r  # None (unconditional) or a JS string
+
+
+def _condition_to_js(cond, target="cff", indent=2):
+    """Inner recursion. Returns one of three kinds:
+      - None    → unconditional ("always true")
+      - _NEVER  → never matches (un-evaluable / fail-closed)
+      - str     → a JS boolean expression
+    Combining these at the value level (not by string inspection) is what keeps
+    a never-match from flipping a sibling/negation to true (fail OPEN) and stops
+    real output from being misread as a sentinel."""
     if cond is None or cond.get("always"):
         return None  # unconditional
 
     if "logic" in cond:
         logic = cond["logic"]
-        # Combine sub-conditions with real boolean algebra over two special
-        # values so neither can corrupt the result:
-        #   None  = "always true" (unconditional / the `true` literal)
-        #   false-sentinel = "never matches" (unmappable field, unresolved list,
-        #     unknown op) — must never flip a sibling/negation to true (fail OPEN)
-        #     nor silently narrow a match by string position.
-        #   AND: drop None (identity); any false → whole thing false
-        #   OR:  any None → unconditional (None); drop false operands; all-false → false
-        #   NOT: !(false) → false; !(None/always) → false (never matches)
+        # Three-valued boolean algebra over {None=always, _NEVER=never, str}:
+        #   AND: any _NEVER → _NEVER; drop None (identity); none left → None
+        #   OR:  any None → None (absorbing); drop _NEVER; none left → _NEVER
+        #   NOT: not(None)=_NEVER, not(_NEVER)=_NEVER (an absorbing value negates
+        #        to "never" for fail-closed purposes), else !(inner)
         if logic == "and":
-            parts = [condition_to_js(p, target, indent) for p in cond["parts"]]
-            if any(_is_false_sentinel(p) for p in parts):
-                return "false"
+            parts = [_condition_to_js(p, target, indent) for p in cond.get("parts", [])]
+            if any(p is _NEVER for p in parts):
+                return _NEVER
             live = [p for p in parts if p is not None]
             if not live:
-                return None  # all unconditional → unconditional
+                return None
             return " && ".join(f"({p})" if " || " in p else p for p in live)
         if logic == "or":
-            parts = [condition_to_js(p, target, indent) for p in cond["parts"]]
+            parts = [_condition_to_js(p, target, indent) for p in cond.get("parts", [])]
             if any(p is None for p in parts):
-                return None  # an always-true branch makes the OR unconditional
-            live = [p for p in parts if not _is_false_sentinel(p)]
+                return None
+            live = [p for p in parts if p is not _NEVER]
             if not live:
-                return "false"
+                return _NEVER
             return " || ".join(f"({p})" if " && " in p else p for p in live)
         if logic == "not":
-            inner = condition_to_js(cond["item"], target, indent)
-            # !(never) → false; !(always) → false (both "never matches" post-negation
-            # of an absorbing value); a normal inner negates normally.
-            if inner is None or _is_false_sentinel(inner):
-                return "false"
+            inner = _condition_to_js(cond.get("item"), target, indent)
+            if inner is None or inner is _NEVER:
+                return _NEVER
             return f"!({inner})"
+        # Unknown logic operator → fail closed rather than KeyError.
+        print(f"  WARN: unknown logic operator, emitting false: {logic}", file=sys.stderr)
+        return _NEVER
 
     field = cond.get("field", "")
     op = cond.get("op", "eq")
@@ -330,19 +334,18 @@ def condition_to_js(cond, target="cff", indent=2):
     if field == "full_uri":
         uri_acc = _full_uri_accessor(target)
         js_cond = _op_to_js(uri_acc, base_op, value, field)
+        if js_cond is _NEVER:
+            return _NEVER
         return f"!({js_cond})" if negated else js_cond
 
     # Special: continent / is_eu handled via preamble (not inline condition)
     # These are handled at the section level, not here.
 
     # Guard: an unmappable condition field would emit a bare (undefined) JS
-    # identifier. The processor already marks such ops non-convertible, but
-    # fail closed here — emit `false` so the op NEVER fires, regardless of
-    # negation. (A negated `!(false)` would be `true` — fail OPEN — so the
-    # `false` is returned directly rather than run through the negation below.)
+    # identifier. Fail closed — never matches, regardless of negation.
     if not _field_is_mappable(field, target):
         print(f"  WARN: unmappable condition field, emitting false: {field}", file=sys.stderr)
-        return "false"
+        return _NEVER
 
     acc = _get_accessor(field, target)
     needs_check = _needs_check(field)
@@ -354,11 +357,10 @@ def condition_to_js(cond, target="cff", indent=2):
 
     js_cond = _op_to_js(val_expr, base_op, value, field)
 
-    # A false-sentinel (e.g. an unresolved in_list op) must not be negated into
-    # `true` — that would fire the rule on every request (fail OPEN). Return it
-    # unchanged regardless of negation / existence-check.
-    if _is_false_sentinel(js_cond):
-        return "false"
+    # An un-evaluable op (unresolved in_list, unknown op) is never-match — do NOT
+    # negate it into `true` (fail OPEN).
+    if js_cond is _NEVER:
+        return _NEVER
 
     if needs_check and check_expr:
         if negated:
@@ -403,7 +405,9 @@ def _full_uri_accessor(target="cff"):
 
 
 def _op_to_js(accessor, op, value, field=""):
-    """Convert a single operator to JS expression."""
+    """Convert a single operator to a JS expression, or _NEVER if the op can't
+    be evaluated at the edge (unresolved list, unknown op) — a fail-closed
+    'never matches' that callers propagate structurally."""
     if op == "eq":
         if value is True:
             return accessor
@@ -430,14 +434,17 @@ def _op_to_js(accessor, op, value, field=""):
         # String set from parser
         return f"{js_array(value)}.includes({accessor})"
     if op == "in_list":
-        return f"/* TODO: list {value} not resolved to KVS */ false"
+        # An unresolved named list can't be evaluated at the edge → never match.
+        print(f"  WARN: unresolved list in condition, emitting false: {value}", file=sys.stderr)
+        return _NEVER
     if op == "in_kvs":
         return f"await kvsHandle.exists('ip:{value}:' + {accessor})"
     if op in ("wildcard", "strict_wildcard"):
         return wildcard_to_js(accessor, value, op == "strict_wildcard")
     if op == "matches":
         return f"/{_cf_regex_to_js(value)}/.test({accessor})"
-    return f"/* unknown op: {op} */ false"
+    print(f"  WARN: unknown op in condition, emitting false: {op}", file=sys.stderr)
+    return _NEVER
 
 
 # ── Dynamic expression → JS ──────────────────────────────────────────────────
@@ -887,7 +894,11 @@ def _cond_has_op(cond, ops):
 
 def _op_uses_kvs(op):
     """True if an op needs a KVS handle at runtime — a continent/is_eu preamble
-    lookup or an ip.src in_kvs/not_in_kvs membership test."""
+    lookup, an ip.src in_kvs/not_in_kvs membership test, or an inline error page
+    served from KVS (serve_error_inline). Single source of truth for both the
+    response-JS `cf.kvs()` emission and the Terraform KVS association."""
+    if op.get("type") == "serve_error_inline":
+        return True
     return _op_uses_continent_eu(op) or _cond_has_op(op.get("condition"), ("in_kvs", "not_in_kvs"))
 
 
@@ -1033,11 +1044,7 @@ def generate_viewer_response_js(ir):
         return None
 
     lines = []
-    needs_kvs = any(
-        _op_uses_kvs(op)
-        or op.get("type") == "serve_error_inline"
-        for op in all_ops
-    )
+    needs_kvs = any(_op_uses_kvs(op) for op in all_ops)
     if needs_kvs:
         lines.append("import cf from 'cloudfront';")
         # cf.kvs() takes no argument — bound via Terraform key_value_store_associations.
@@ -1080,6 +1087,15 @@ def generate_lambda_origin_request_js(ops):
         "  const uri = request.uri;",
     ]
     for op in ops:
+        # continent/is_eu depend on a KVS preamble that only the CFF handlers
+        # generate — in the Lambda@Edge target they fail closed to `false`, so an
+        # escalated op guarded by one becomes a dead rule. Surface it rather than
+        # let it silently no-op.
+        if _op_uses_continent_eu(op):
+            print(f"  WARN: origin_override escalated to Lambda@Edge has a "
+                  f"continent/is_eu condition that cannot be evaluated there; "
+                  f"the rule will not fire. Rule: {op.get('cf_source_rule','?')}",
+                  file=sys.stderr)
         lines.extend(_generate_op_js(op, "lambda", "  "))
     lines.append("  callback(null, request);")
     lines.append("};")

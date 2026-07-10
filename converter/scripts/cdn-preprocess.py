@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdn_expr_parser import (
     parse_expression, extract_orp_headers, extract_orp_headers_from_raw,
     extract_kvs_triggers, extract_host_filter, extract_path_pattern_single,
-    split_or, iter_condition_children,
+    iter_condition_children,
 )
 from cdn_rule_processors import (
     process_redirect_rule, process_rewrite_rule, process_config_rule,
@@ -448,25 +448,31 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         # Fall through to viewer_request_ops placement below
 
     if rtype == "cache_setting":
-        # Cache rules with raw_expression: try OR path split first
-        if result.get("raw_expression") and not result.get("condition"):
-            or_paths = _try_split_or_cache_paths(result["raw_expression"])
+        # OR cache rule: try to split into one behavior per path. OR is now a
+        # structured {"logic":"or"} condition (no longer deferred to raw), so
+        # read it from the condition. A raw_expression still means genuinely
+        # unparseable — route that (and any non-splittable OR) to Lambda@Edge.
+        result_cond = result.get("condition")
+        if (result_cond and result_cond.get("logic") == "or") or \
+           (result.get("raw_expression") and not result_cond):
+            or_paths = _try_split_or_cache_paths(result_cond)
             if or_paths:
                 for path in or_paths:
                     beh = find_or_create_behavior(ir, path, domain_config, origin_content)
                     _apply_cache_setting(beh, result)
                 return
             # Cannot split → route to L@E origin-response conditional cache rule
-            _add_conditional_cache_rule(ir, result)
+            _add_conditional_cache_rule(ir, result, expr)
             return
         path = _extract_path_from_result(result, cond, expr)
-        # For extension-based cache rules with multiple extensions, create an
-        # individual behavior per extension. _extract_extensions_from_condition
-        # finds the extension list at any positive depth (and correctly ignores
-        # a NOT node, where the extensions are an exclusion, not a fan-out set).
+        # Fan out to one *.ext behavior per extension ONLY when the condition is
+        # PURELY an extension set. A sibling scope (host eq x and ext in [...])
+        # must NOT fan out — that would apply the cache setting to *.pdf on every
+        # host, dropping the host scope. In that case fall through to the normal
+        # single-path placement below (which keeps the host/path scope).
         result_cond = result.get("condition") or cond
         exts = _extract_extensions_from_condition(result_cond)
-        if len(exts) > 1:
+        if len(exts) > 1 and _condition_is_pure_extension(result_cond):
             for ext in exts:
                 ext_path = f"*.{ext}"
                 beh = find_or_create_behavior(ir, ext_path, domain_config, origin_content)
@@ -532,21 +538,26 @@ def _collect_kvs_ip_entries(ir, condition):
             })
 
 
-def _try_split_or_cache_paths(raw_expression):
-    """Try to split an OR expression into individual path patterns for cache rules.
+def _try_split_or_cache_paths(condition):
+    """Try to split a top-level OR condition into individual path patterns.
 
-    Returns a list of CloudFront path patterns if ALL OR branches are path-based,
-    or None if any branch cannot be parsed as a path condition.
+    Takes the STRUCTURED condition (OR is now parsed into {"logic":"or",...} —
+    it is no longer deferred to raw text). Returns a list of CloudFront path
+    patterns if the condition is an OR whose every branch is a single
+    path-based leaf, or None otherwise (caller then routes to Lambda@Edge).
     """
-    parts = split_or(raw_expression)
+    if not isinstance(condition, dict) or condition.get("logic") != "or":
+        return None
+    parts = condition.get("parts", [])
     if len(parts) < 2:
         return None
     paths = []
     for part in parts:
-        cond, raw = parse_expression(part)
-        if raw is not None or cond is None:
-            return None  # branch can't be parsed
-        pp = extract_path_pattern_single(cond)
+        # Each branch must be a single path leaf — a nested logic node or a
+        # non-path field can't map to a per-path cache behavior.
+        if "logic" in part:
+            return None
+        pp = extract_path_pattern_single(part)
         if not pp or pp == "*":
             return None  # branch doesn't yield a specific path
         paths.append(pp)
@@ -681,16 +692,18 @@ def _process_managed_transforms(ir, managed_transforms, default_beh):
             )
 
 
-def _add_conditional_cache_rule(ir, result):
-    """Route a raw_expression cache rule to L@E origin-response.
+def _add_conditional_cache_rule(ir, result, expr=None):
+    """Route a non-path-splittable cache rule to L@E origin-response.
 
     Creates or extends lambda_edge.origin_response with conditional_cache_rules.
-    The L@E handler will evaluate the raw_expression at runtime and set
-    Cache-Control headers accordingly.
+    The L@E handler evaluates the original Cloudflare expression at runtime and
+    sets Cache-Control accordingly. Prefer result["raw_expression"] (a genuinely
+    unparseable expr), else fall back to the original expression text — OR is now
+    structured, so a non-splittable OR has raw_expression=None but a valid expr.
     """
     params = result.get("params", {})
     entry = {
-        "raw_expression": result["raw_expression"],
+        "raw_expression": result.get("raw_expression") or expr or "true",
         "cf_source_rule": result.get("cf_source_rule", ""),
         "description": result.get("description", ""),
     }
@@ -825,6 +838,25 @@ def _extract_extensions_from_condition(condition):
         if condition.get("op") == "eq" and isinstance(condition.get("value"), str):
             return [condition["value"]]
     return []
+
+
+def _condition_is_pure_extension(condition):
+    """True if the condition is ONLY a uri.path.extension test (a single leaf,
+    or an OR of extension leaves) — with no sibling scope such as a host or path.
+
+    Per-extension fan-out (one *.ext behavior each) is only safe when the whole
+    condition is the extension set. If a host/path scope sits alongside it (an
+    AND), fanning out would drop that scope and apply the setting site-wide.
+    """
+    if not isinstance(condition, dict):
+        return False
+    if "logic" in condition:
+        # Only an OR of pure-extension branches stays pure; an AND has a sibling.
+        if condition.get("logic") != "or":
+            return False
+        parts = condition.get("parts", [])
+        return bool(parts) and all(_condition_is_pure_extension(p) for p in parts)
+    return condition.get("field") == "uri.path.extension"
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
