@@ -950,20 +950,25 @@ def value_expression_unmappable(expr, target="cff"):
     return None
 
 
-def condition_unmappable_fields(cond):
+def condition_unmappable_fields(cond, target="cff"):
     """Walk a parsed condition tree; return list of (short_field, reason) for
     any field that has no CloudFront equivalent. The condition tree stores
     already-mapped short names for known fields and raw dotted names for
     unknown ones, so we check both forms against the convertibility rules.
+
+    ``target`` is the phase the condition is evaluated in. A response-only field
+    (response_code) in a request-phase condition ("cff"/"lambda") is unmappable
+    — matching the generator, which would otherwise dead-code it to if(false)
+    with no non_convertible report.
     """
     if not isinstance(cond, dict):
         return []
     if "logic" in cond:
         out = []
         for p in cond.get("parts", []):
-            out.extend(condition_unmappable_fields(p))
+            out.extend(condition_unmappable_fields(p, target))
         if "item" in cond:
-            out.extend(condition_unmappable_fields(cond["item"]))
+            out.extend(condition_unmappable_fields(cond["item"], target))
         return out
     field = cond.get("field")
     if field is None:
@@ -973,6 +978,8 @@ def condition_unmappable_fields(cond):
     if field in CF_FIELD_MAP.values():
         if field in UNMAPPABLE_FIELDS:
             return [(field, f"condition field '{field}' has no CloudFront edge source")]
+        if field in RESPONSE_ONLY_FIELDS and target != "response":
+            return [(field, f"condition field '{field}' is only available in the response phase")]
         return []
     if "." in field or field in UNMAPPABLE_FIELDS:
         return [(field, f"condition field '{field}' has no CloudFront equivalent")]

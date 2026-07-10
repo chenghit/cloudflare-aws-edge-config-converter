@@ -122,7 +122,7 @@ def _resolve_ip_list_in_condition(condition, ip_lists):
     return condition, None
 
 
-def _prune_unmappable(condition):
+def _prune_unmappable(condition, target="cff"):
     """Apply the conservative unmappable-field policy to a structured condition.
 
     Returns (new_condition, non_conv_reason). reason is None when convertible.
@@ -132,6 +132,9 @@ def _prune_unmappable(condition):
       - AND / NOT / a bare leaf: dropping a branch would WIDEN the match
         (potential over-match / security change), so mark the whole op
         non-convertible for human review.
+
+    ``target`` selects the phase so response-only fields (response_code) are
+    flagged in a request-phase condition.
     """
     # Top-level OR: classify each branch exactly once. Drop every branch that
     # references an unmappable field (this only narrows the match — safe), keep
@@ -139,7 +142,7 @@ def _prune_unmappable(condition):
     if "logic" in condition and condition["logic"] == "or":
         kept, first_bad = [], None
         for p in condition["parts"]:
-            bad = condition_unmappable_fields(p)
+            bad = condition_unmappable_fields(p, target)
             if bad:
                 first_bad = first_bad or bad[0][1]
             else:
@@ -152,13 +155,13 @@ def _prune_unmappable(condition):
             return kept[0], None
         return {**condition, "parts": kept}, None
     # AND / NOT / bare leaf → cannot safely drop; whole op is non-convertible.
-    bad = condition_unmappable_fields(condition)
+    bad = condition_unmappable_fields(condition, target)
     if not bad:
         return condition, None
     return None, bad[0][1]
 
 
-def _resolve_unmappable_in_condition(condition, raw_expr=None):
+def _resolve_unmappable_in_condition(condition, raw_expr=None, target="cff"):
     """Handle match-condition fields with no CloudFront equivalent.
 
     Works whether the expression was structured (``condition``) or deferred as
@@ -171,16 +174,16 @@ def _resolve_unmappable_in_condition(condition, raw_expr=None):
     uses the pruned form.
     """
     if condition is not None:
-        new_cond, reason = _prune_unmappable(condition)
+        new_cond, reason = _prune_unmappable(condition, target)
         return new_cond, raw_expr, reason
     if raw_expr:
         try:
             full = parse_expression_full(raw_expr)
         except Exception:
             return condition, raw_expr, None  # generator has its own guard
-        if not condition_unmappable_fields(full):
+        if not condition_unmappable_fields(full, target):
             return condition, raw_expr, None  # nothing unmappable; leave deferred
-        new_cond, reason = _prune_unmappable(full)
+        new_cond, reason = _prune_unmappable(full, target)
         if reason:
             return None, None, reason
         # OR-prune succeeded → use the structured pruned condition, drop raw.
@@ -188,7 +191,12 @@ def _resolve_unmappable_in_condition(condition, raw_expr=None):
     return condition, raw_expr, None
 
 
-def _screen_unmappable(rule, cond, raw_expr, ip_lists):
+def _raw_references_ip_list(raw_expr):
+    """True if a deferred raw expression contains an `ip.src in $list` reference."""
+    return bool(raw_expr) and bool(re.search(r"ip\.src(?:\.\w+)?\s+in\s+\$", raw_expr))
+
+
+def _screen_unmappable(rule, cond, raw_expr, ip_lists, target="cff"):
     """Resolve IP-list references then screen unmappable condition fields.
 
     Folds the identical pre-processing that every rule-type processor ran
@@ -197,12 +205,30 @@ def _screen_unmappable(rule, cond, raw_expr, ip_lists):
     ``(cond, raw_expr, non_convertible)`` — when ``non_convertible`` is a dict,
     the caller should return it immediately; otherwise the (possibly rewritten)
     cond/raw_expr are ready to use.
+
+    A deferred raw expression (an OR that parse_expression couldn't structure)
+    that references an IP list must be structured here so the list is resolved
+    to a KVS lookup. Otherwise the generator re-parses the raw text, hits an
+    unresolved in_list/not_in_list op, and emits `/* TODO */ false` — which a
+    surrounding `not` flips to `true` (fail OPEN).
     """
+    # Force a deferred IP-list expression into structured form so it goes
+    # through _resolve_ip_list_in_condition below (and never reaches the
+    # generator as an unresolved raw in_list).
+    if cond is None and _raw_references_ip_list(raw_expr):
+        try:
+            cond = parse_expression_full(raw_expr)
+            raw_expr = None
+        except Exception:
+            # Can't structure it — refuse rather than risk a fail-open IP rule.
+            return cond, raw_expr, _make_non_convertible(
+                rule, "IP-list condition could not be parsed for CloudFront; "
+                "review manually (CFF cannot safely evaluate it)")
     if cond:
         cond, ip_reason = _resolve_ip_list_in_condition(cond, ip_lists)
         if ip_reason:
             return cond, raw_expr, _make_non_convertible(rule, ip_reason)
-    cond, raw_expr, unmap_reason = _resolve_unmappable_in_condition(cond, raw_expr)
+    cond, raw_expr, unmap_reason = _resolve_unmappable_in_condition(cond, raw_expr, target)
     if unmap_reason:
         return cond, raw_expr, _make_non_convertible(rule, unmap_reason)
     return cond, raw_expr, None
@@ -593,8 +619,9 @@ def process_response_header_transform(rule, ip_lists, phase):
 
     cond, raw_expr = parse_expression(expr)
 
-    # Resolve IP lists + screen unmappable condition fields.
-    cond, raw_expr, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
+    # Resolve IP lists + screen unmappable condition fields. Response phase:
+    # response_code IS sourceable here, so screen with target="response".
+    cond, raw_expr, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists, target="response")
     if nc:
         return nc
 

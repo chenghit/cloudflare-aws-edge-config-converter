@@ -345,6 +345,58 @@ r = _proc.process_cache_rule(
 check("ip.src.country-OR is not mistaken for direct ip.src",
       (r.get("type", "") if isinstance(r, dict) else "list"), forbid_substr="non_convertible")
 
+print("== R1: is_eu condition references the isEU preamble var (not undefined) ==")
+# is_eu must resolve to the exact variable the preamble declares.
+check("is_eu accessor is isEU", _gen._get_accessor("is_eu"), expect_substr="isEU")
+eu_ops = _proc.process_response_header_transform(
+    header_rule("ip.src.is_in_european_union", {"x": {"operation": "set", "value": "1"}}), {}, "")
+eu_js = resp_js(eu_ops)
+check("preamble declares isEU", eu_js, expect_substr="let isEU")
+check("condition references isEU", eu_js, expect_substr="if (isEU)")
+# and the preamble var name matches what conditions use (no drift)
+check("continent accessor matches preamble", _gen._get_accessor("continent"),
+      expect_substr=_gen._PREAMBLE_ACCESSORS["continent"])
+
+print("== R2: OR-deferred not-in-list is structured + resolved (no fail-open) ==")
+r = _proc.process_redirect_rule(
+    redirect_rule('not ip.src in $allow or http.host eq "x.com"', target_url="https://b"),
+    {"allow": ["1.2.3.4"]}, "")
+op = first_op(r)
+if op.get("type") != "non_convertible":
+    js = _gen.condition_to_js(op.get("condition")
+                              or _parser.parse_expression_full(op.get("raw_expression")), "cff")
+    check("OR not-in-list negated KVS lookup", js, expect_substr="!(await kvsHandle.exists")
+    check("OR not-in-list no fail-open sentinel", js, forbid_substr="!(false)")
+    check("OR not-in-list no leaked TODO", js, forbid_substr="TODO")
+
+print("== R3: negation of a false-sentinel stays false (never !(false)) ==")
+check("not_in_list unresolved -> false", _gen.condition_to_js({"field": "ip.src", "op": "not_in_list", "value": "$x"}, "cff"),
+      expect_substr="false", forbid_substr="!(")
+check("logic-not over unresolved in_list -> false",
+      _gen.condition_to_js({"logic": "not", "item": {"field": "ip.src", "op": "in_list", "value": "$x"}}, "cff"),
+      expect_substr="false", forbid_substr="!(")
+
+print("== R4: continent in a RESPONSE op sets kvs_requirements (provisioning) ==")
+# Mirror cdn-preprocess's KVS-requirements scan over BOTH op lists.
+_kreq = {}
+_resp_ops = _proc.process_response_header_transform(
+    header_rule('ip.src.continent eq "EU"', {"x": {"operation": "set", "value": "1"}}), {}, "")
+for _op in _resp_ops:
+    _c = _op.get("condition")
+    if _c:
+        for _t in _parser.extract_kvs_triggers(_c):
+            _kreq[_t] = True
+check("response continent triggers needs_continent", str(_kreq.get("needs_continent")), expect_substr="True")
+
+print("== R5: response_code in a REQUEST-phase condition -> non_convertible ==")
+r = _proc.process_redirect_rule(redirect_rule("http.response.code eq 200", target_url="https://x"), {}, "")
+check("request-phase response_code condition rejected",
+      r.get("type", "") if isinstance(r, dict) else "list", expect_substr="non_convertible")
+# response phase: response_code IS fine (must NOT be rejected)
+check("response-phase response_code condition allowed (cff-only check)",
+      str(_parser.condition_unmappable_fields({"field": "response_code", "op": "eq", "value": 200}, "response")),
+      expect_substr="[]")
+
 # ── classifier alignment: every CF_FIELD_MAP value must be handled somewhere ──
 print("== invariant: every mapped field is classifiable (no silent drift) ==")
 _PREAMBLE = _gen._PREAMBLE_FIELDS

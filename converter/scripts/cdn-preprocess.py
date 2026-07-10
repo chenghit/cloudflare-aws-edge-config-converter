@@ -355,9 +355,13 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
                     orp_set.add(h)
         beh["required_orp_headers"] = sorted(orp_set)
 
-    # Collect KVS requirements
+    # Collect KVS requirements. Scan BOTH request and response ops — a
+    # continent/is_eu condition on a response-header rule also needs the KVS
+    # provisioned + associated + seeded, else the response CFF calls
+    # kvsHandle.get('continent:'…) against a store that was never created and
+    # cf.kvs() throws at init.
     for beh in ir["cache_behaviors"]:
-        for op in beh["viewer_request_ops"]:
+        for op in beh["viewer_request_ops"] + beh["viewer_response_ops"]:
             c = op.get("condition")
             if c:
                 for trigger in extract_kvs_triggers(c):

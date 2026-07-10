@@ -192,7 +192,10 @@ def _split_full_uri_wildcard(pattern):
 
 # Short field names that have no direct accessor but ARE convertible because
 # condition_to_js resolves them via a KVS preamble (see _generate_continent_preamble).
-_PREAMBLE_FIELDS = {"continent", "is_eu"}
+# The value is the exact JS variable the preamble declares — a condition on the
+# field must reference that same name (is_eu → isEU, NOT the raw field name).
+_PREAMBLE_ACCESSORS = {"continent": "continent", "is_eu": "isEU"}
+_PREAMBLE_FIELDS = set(_PREAMBLE_ACCESSORS)
 
 
 def _field_is_mappable(field, target="cff"):
@@ -214,6 +217,10 @@ def _field_is_mappable(field, target="cff"):
 
 def _get_accessor(field, target="cff"):
     """Get JS accessor for a field. Returns (check_expr, value_expr) or just value_expr."""
+    # continent / is_eu are resolved to a preamble-declared variable (isEU, not
+    # the raw field name) — same in every target.
+    if field in _PREAMBLE_ACCESSORS:
+        return _PREAMBLE_ACCESSORS[field]
     if target == "lambda":
         acc = LAMBDA_ACCESSORS.get(field)
         if acc:
@@ -232,6 +239,16 @@ def _needs_check(field):
     return field not in ALWAYS_AVAILABLE
 
 
+def _is_false_sentinel(js):
+    """True if a rendered condition is a 'never matches' sentinel — bare `false`
+    or a commented form like `/* TODO: ... */ false` / `/* unknown op */ false`.
+
+    These mean the condition can't be evaluated at the edge. Negating one with
+    `!( ... )` would flip it to `true` (fail OPEN), so callers must return the
+    sentinel unchanged instead of wrapping it in a negation."""
+    return js == "false" or js.rstrip().endswith(" false")
+
+
 def condition_to_js(cond, target="cff", indent=2):
     """Convert a CDN condition tree to JS expression string."""
     if cond is None or cond.get("always"):
@@ -247,10 +264,10 @@ def condition_to_js(cond, target="cff", indent=2):
             return " || ".join(f"({p})" if " && " in p else p for p in parts)
         if logic == "not":
             inner = condition_to_js(cond["item"], target, indent)
-            # `false` is the sentinel for an un-evaluable inner (unmappable
-            # field, unknown op). It means "never matches" and must stay that
-            # way under negation — `!(false)` would be `true` (fail OPEN).
-            if inner == "false":
+            # A false-sentinel inner (unmappable field, unresolved list, unknown
+            # op) means "never matches" and must stay that way under negation —
+            # `!(false)` would be `true` (fail OPEN).
+            if _is_false_sentinel(inner):
                 return "false"
             return f"!({inner})"
 
@@ -304,6 +321,12 @@ def condition_to_js(cond, target="cff", indent=2):
         check_expr, val_expr = None, acc
 
     js_cond = _op_to_js(val_expr, base_op, value, field)
+
+    # A false-sentinel (e.g. an unresolved in_list op) must not be negated into
+    # `true` — that would fire the rule on every request (fail OPEN). Return it
+    # unchanged regardless of negation / existence-check.
+    if _is_false_sentinel(js_cond):
+        return "false"
 
     if needs_check and check_expr:
         if negated:
@@ -867,11 +890,13 @@ def _generate_continent_preamble(ops, indent="  "):
         f"{indent}const country = countryHeader ? countryHeader.value : '';",
     ]
     if needs_continent:
-        lines.append(f"{indent}let continent = '';")
-        lines.append(f"{indent}if (country) {{ try {{ continent = await kvsHandle.get('continent:' + country); }} catch(e) {{}} }}")
+        cvar = _PREAMBLE_ACCESSORS["continent"]
+        lines.append(f"{indent}let {cvar} = '';")
+        lines.append(f"{indent}if (country) {{ try {{ {cvar} = await kvsHandle.get('continent:' + country); }} catch(e) {{}} }}")
     if needs_eu:
-        lines.append(f"{indent}let isEU = false;")
-        lines.append(f"{indent}if (country) {{ try {{ isEU = await kvsHandle.exists('eu:' + country); }} catch(e) {{}} }}")
+        evar = _PREAMBLE_ACCESSORS["is_eu"]
+        lines.append(f"{indent}let {evar} = false;")
+        lines.append(f"{indent}if (country) {{ try {{ {evar} = await kvsHandle.exists('eu:' + country); }} catch(e) {{}} }}")
     return lines
 
 
