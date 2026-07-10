@@ -149,10 +149,13 @@ def validate_domain(ir, output_dir, manifest=None):
         "detail": "; ".join(coverage_issues) if coverage_issues else None,
     })
 
-    # 4. KVS consistency
+    # 4. KVS consistency. cf.kvs() emission is PER-HANDLER (a response-only KVS
+    # need puts cf.kvs() in viewer_response.js, not viewer_request.js), so check
+    # BOTH handlers — testing only vr_js would spuriously FAIL a response-only
+    # KVS domain and abort the pipeline.
     kvs_req = ir.get("metadata", {}).get("kvs_requirements", {})
     needs_kvs = any(kvs_req.values())
-    has_kvs = "cf.kvs(" in vr_js
+    has_kvs = "cf.kvs(" in vr_js or "cf.kvs(" in vresp_js
     kvs_issues = []
     if needs_kvs and not has_kvs:
         kvs_issues.append("IR requires KVS but cf.kvs() not found in JS")

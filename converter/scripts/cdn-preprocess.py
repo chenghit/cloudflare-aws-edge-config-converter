@@ -172,6 +172,51 @@ def rule_applies_to_domain(hosts, hostname, apex_domain):
     return False
 
 
+def _strip_host_condition(cond):
+    """Remove the now-redundant host test from a condition once the rule has been
+    routed to a single host's distribution.
+
+    The CDN pipeline builds one CloudFront distribution per proxied host, so a
+    `http.host eq "<this domain>"` leaf inside that domain's IR is always true —
+    keeping it makes an otherwise-convertible rule look "compound / non-single
+    path" (e.g. `host eq x AND uri.path eq /api` would not reduce to the `/api`
+    behavior). Mirrors WAF's _strip_host_from_and. Removes `host` leaves and a
+    `full_uri` leaf carrying a host_pattern (host-scoped) from AND nodes; a
+    bare host leaf becomes unconditional ({"always": True}, NOT None, so the
+    op still carries a condition for validate-chunk Check11). OR/NOT stay — a host
+    inside an OR/NOT is not a plain positive scope and rule_applies_to_domain
+    already decided membership.
+    """
+    if cond is None:
+        return None
+    if "logic" not in cond:
+        # bare leaf
+        if cond.get("field") == "host":
+            return {"always": True}  # unconditional (see note: NOT None)
+        # full_uri with host_pattern: the path part still matters, so keep it.
+        return cond
+    if cond["logic"] == "and":
+        kept = []
+        for p in cond.get("parts", []):
+            if p.get("field") == "host":
+                continue  # redundant host conjunct
+            kept.append(p)
+        if not kept:
+            return {"always": True}  # was only host conjuncts -> unconditional
+        if len(kept) == 1:
+            return kept[0]
+        return {**cond, "parts": kept}
+    # OR / NOT: leave as-is (host here isn't a plain positive scope).
+    return cond
+
+
+def _strip_host_in_result(result):
+    """Strip the redundant host test from a processor result's `condition`
+    in place (the processor re-parsed the expression into its own condition)."""
+    if isinstance(result, dict) and result.get("condition") is not None:
+        result["condition"] = _strip_host_condition(result["condition"])
+
+
 # ── IR assembly ──────────────────────────────────────────────────────────────
 
 def make_empty_ir(domain_config):
@@ -312,11 +357,19 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
 
             result = processor(rule, ip_lists, phase)
 
+            # This rule is now scoped to this host's distribution, so the host
+            # test is redundant — strip it from both the loop cond and each
+            # result's condition (the processor re-parsed the expr into its own
+            # `condition`). This is what lets `host eq x AND uri.path eq /api`
+            # reduce to the `/api` behavior instead of looking "compound".
+            cond = _strip_host_condition(cond)
             # Handle list results (config rules, header transforms)
             if isinstance(result, list):
                 for r in result:
+                    _strip_host_in_result(r)
                     _place_result(ir, r, domain_config, origin_content, cond, expr)
             else:
+                _strip_host_in_result(result)
                 _place_result(ir, result, domain_config, origin_content, cond, expr)
 
     # Process Cloud Connector rules
@@ -329,6 +382,8 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
         if not rule_applies_to_domain(hosts, hostname, apex):
             continue
         result = process_cloud_connector(rule, ip_lists, "")
+        cond = _strip_host_condition(cond)
+        _strip_host_in_result(result)
         _place_result(ir, result, domain_config, origin_content, cond, expr)
 
     # Process bulk redirects
@@ -461,8 +516,8 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
                     beh = find_or_create_behavior(ir, path, domain_config, origin_content)
                     _apply_cache_setting(beh, result)
                 return
-            # Cannot split → route to L@E origin-response conditional cache rule
-            _add_conditional_cache_rule(ir, result, expr)
+            # Non-splittable OR → can't be expressed as CloudFront path behaviors.
+            _mark_cache_non_convertible(ir, result, expr)
             return
         path = _extract_path_from_result(result, cond, expr)
         # Fan out to one *.ext behavior per extension ONLY when the condition is
@@ -480,12 +535,14 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
             return
         # A cache setting is applied to a specific behavior (not via the shared
         # CFF), so its condition MUST be representable as that behavior's single
-        # path pattern. A compound scope (host AND path, host AND ext, 3+ AND,
-        # …) can't be — placing it on `_extract_path_from_result`'s best-effort
-        # path (often `*`) would apply the setting site-wide. Route those to
-        # Lambda@Edge conditional-cache, which evaluates the full expr at runtime.
+        # path pattern. After host-stripping, a still-compound scope (e.g.
+        # ip.src.country, a multi-field AND, a NOT) can't be — placing it on
+        # `_extract_path_from_result`'s best-effort path (often `*`) would apply
+        # the setting site-wide. There is no working Lambda@Edge conditional-cache
+        # generator (the origin_response template only emits error pages), so
+        # report these as non-convertible instead of silently dropping them.
         if not _cache_cond_is_single_path(result_cond):
-            _add_conditional_cache_rule(ir, result, expr)
+            _mark_cache_non_convertible(ir, result, expr)
             return
         beh = find_or_create_behavior(ir, path, domain_config, origin_content)
         _apply_cache_setting(beh, result)
@@ -706,58 +763,26 @@ def _process_managed_transforms(ir, managed_transforms, default_beh):
             )
 
 
-def _add_conditional_cache_rule(ir, result, expr=None):
-    """Route a non-path-splittable cache rule to L@E origin-response.
+def _mark_cache_non_convertible(ir, result, expr=None):
+    """Record a cache rule whose scope can't be expressed as a CloudFront path
+    behavior (after host-stripping) as non-convertible, on the default behavior.
 
-    Creates or extends lambda_edge.origin_response with conditional_cache_rules.
-    The L@E handler evaluates the original Cloudflare expression at runtime and
-    sets Cache-Control accordingly. Prefer result["raw_expression"] (a genuinely
-    unparseable expr), else fall back to the original expression text — OR is now
-    structured, so a non-splittable OR has raw_expression=None but a valid expr.
+    CloudFront cache settings attach to a path-matched cache behavior; a scope
+    like ip.src.country, a multi-field AND, or a NOT has no single path pattern.
+    There is no working Lambda@Edge conditional-cache generator (the
+    origin_response template only emits error pages), so we surface the rule in
+    the conversion report instead of silently dropping it or mis-applying it
+    site-wide.
     """
-    params = result.get("params", {})
-    # Use the deferred raw expr, else the original expression text. Do NOT fall
-    # back to "true" (match-all) on an empty expr — that would apply the cache
-    # setting to every request (fail open). A genuinely unconditional cache rule
-    # already arrives with expr == "true" from the processor, so a missing expr
-    # here means something is wrong: skip it rather than cache everything.
-    rule_expr = result.get("raw_expression") or expr
-    if not rule_expr:
-        print(f"  WARN: conditional cache rule has no expression; skipping "
-              f"(rule {result.get('cf_source_rule','?')}) rather than caching all",
-              file=sys.stderr)
-        return
-    entry = {
-        "raw_expression": rule_expr,
+    ir["cache_behaviors"][0]["non_convertible"].append({
         "cf_source_rule": result.get("cf_source_rule", ""),
         "description": result.get("description", ""),
-    }
-    if params.get("bypass"):
-        entry["cache_control"] = "no-store"
-    elif "edge_ttl_override" in params:
-        entry["cache_control"] = f"max-age={params['edge_ttl_override']}"
-    elif params.get("edge_ttl_respect_origin"):
-        entry["cache_control"] = None  # let origin header pass through
-    else:
-        entry["cache_control"] = None
-
-    if params.get("status_code_ttl"):
-        entry["status_code_ttl"] = params["status_code_ttl"]
-
-    le = ir["metadata"]["lambda_edge"]
-    if le["origin_response"] is None:
-        le["origin_response"] = {
-            "type": "conditional_cache",
-            "conditional_cache_rules": [],
-        }
-    if "conditional_cache_rules" not in le["origin_response"]:
-        le["origin_response"]["conditional_cache_rules"] = []
-    le["origin_response"]["conditional_cache_rules"].append(entry)
-
-    # Ensure default behavior cache policy allows L@E Cache-Control to take effect
-    default_beh = ir["cache_behaviors"][0]
-    default_beh["cache_policy"]["ttl"]["min"] = 0
-    default_beh["cache_policy"]["ttl"]["max"] = 31536000
+        "reason": ("Cache rule condition cannot be expressed as a CloudFront "
+                   "cache behavior (path-only). Scope: "
+                   f"{result.get('raw_expression') or expr or '(complex)'}. "
+                   "Apply the cache policy manually to the matching behavior, "
+                   "or handle at the origin."),
+    })
 
 
 # Cloudflare default cached extensions (~70 types)
@@ -866,19 +891,24 @@ def _extract_extensions_from_condition(condition):
 
 
 def _cache_cond_is_single_path(condition):
-    """True if a cache-rule condition can be represented by ONE CloudFront path
-    pattern (so applying the setting to one behavior is faithful).
+    """True if a cache-rule condition can be represented by ONE specific
+    CloudFront path pattern (so applying the setting to one behavior is faithful).
 
-    That means: unconditional (→ `*`), or a single leaf on uri.path / uri /
-    uri.path.extension. Anything compound (a logic node — AND/OR/NOT — or a leaf
-    on some other field like host) is NOT single-path and must be handled by
-    Lambda@Edge instead of mis-placed on a best-effort behavior.
+    Unconditional (→ default `*` behavior) is fine. Otherwise the leaf must
+    actually yield a SPECIFIC path pattern — verified by asking
+    extract_path_pattern_single and rejecting `*`. This catches leaves that are
+    "path-ish" but don't reduce to a concrete pattern, e.g.
+    `uri.path.extension eq "pdf"` (only `in [one]` yields `*.pdf`; `eq` → `*`),
+    which would otherwise be mis-applied site-wide. A logic node (AND/OR/NOT) or
+    a non-path field is never single-path.
     """
     if condition is None or condition.get("always"):
         return True
     if "logic" in condition:
         return False
-    return condition.get("field") in ("uri.path", "uri", "uri.path.extension")
+    if condition.get("field") not in ("uri.path", "uri", "uri.path.extension"):
+        return False
+    return extract_path_pattern_single(condition) != "*"
 
 
 def _condition_is_pure_extension(condition):

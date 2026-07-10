@@ -872,31 +872,31 @@ def _expression_uses_response_fields(cond, raw_expr):
 
 
 def _find_response_code_value(cond, negated=False):
-    """Return the code named by a POSITIVE `response_code eq N` leaf, else None.
+    """Return the code named by a SINGLE positive `response_code eq N` leaf.
 
-    "Positive" means: op `eq` AND an even number of negations above it. A code
-    reached through a negation — either the `not_eq` op prefix OR a `logic:not`
-    wrapper anywhere above (`not (code eq 500 and …)`) — is an EXCLUSION, not the
-    code to serve; returning it would install a custom error for exactly the
-    code the rule excludes. `negated` tracks the running polarity.
+    A CloudFront custom_error_response maps exactly ONE error code to one
+    response, so only an unambiguous single code is convertible:
+      - a logic node (AND/OR/NOT) → None. An OR of codes can't map to one
+        response (returning the first would silently drop the rest); an
+        AND-scoped code (`code eq 500 and uri.path eq /api`) can't be scoped by
+        path (custom errors are per-distribution) — both must fall through to
+        the caller's Path-5 non_convertible.
+      - a negated leaf (`not_eq`) is an EXCLUSION, not the code to serve.
+    Returns an int (coerced from a quoted "404") or None.
     """
     if not isinstance(cond, dict):
         return None
     if "logic" in cond:
-        # A NOT flips polarity for everything beneath it.
-        child_negated = negated ^ (cond.get("logic") == "not")
-        for child in iter_condition_children(cond):
-            v = _find_response_code_value(child, child_negated)
-            if v is not None:
-                return v
         return None
     if cond.get("field") == "response_code":
         op = cond.get("op", "eq")
-        base_op = op[4:] if op.startswith("not_") else op
-        leaf_negated = negated ^ op.startswith("not_")
-        if base_op == "eq" and not leaf_negated:
-            return cond.get("value")
-        return None
+        if op != "eq":  # not_eq / ne / ranges don't name a single served code
+            return None
+        val = cond.get("value")
+        try:
+            return int(val)  # a quoted `eq "404"` parses to str; coerce
+        except (TypeError, ValueError):
+            return None
     return None
 
 

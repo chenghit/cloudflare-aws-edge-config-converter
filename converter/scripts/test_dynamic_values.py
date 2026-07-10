@@ -502,18 +502,33 @@ check("ip.src under NOT trips cache guard",
 check("continent under NOT triggers KVS",
       str(_parser.extract_kvs_triggers({"logic": "not", "item": {"field": "continent", "op": "eq", "value": "EU"}})),
       expect_substr="needs_continent")
-# positive response_code found under nested logic
-check("positive response_code found under AND",
-      str(_proc._find_response_code_value({"logic": "and", "parts": [
-          {"field": "host", "op": "eq", "value": "x"},
-          {"field": "response_code", "op": "eq", "value": 502}]})),
+# A single positive response_code eq leaf IS the code to serve.
+check("single response_code eq -> the code",
+      str(_proc._find_response_code_value({"field": "response_code", "op": "eq", "value": 502})),
       expect_substr="502")
-# a response_code under a NOT is an EXCLUSION — must NOT be extracted (finding #3)
-check("response_code under NOT is not extracted",
+# A CloudFront custom_error_response maps exactly ONE code → one response. A code
+# under ANY logic node is not faithfully representable and must NOT be extracted:
+#  - AND-scoped (code eq 500 and uri.path /api): custom errors are
+#    per-distribution, can't scope by path → over-match if extracted.
+#  - OR of codes: returning the first silently drops the others.
+#  - under NOT: it's an exclusion, not the served code.
+check("response_code AND-scoped is not extracted",
       str(_proc._find_response_code_value({"logic": "and", "parts": [
-          {"field": "host", "op": "eq", "value": "x"},
-          {"logic": "not", "item": {"field": "response_code", "op": "eq", "value": 404}}]})),
+          {"field": "uri.path", "op": "eq", "value": "/api"},
+          {"field": "response_code", "op": "eq", "value": 500}]})),
       expect_substr="None")
+check("response_code OR-of-codes is not extracted",
+      str(_proc._find_response_code_value({"logic": "or", "parts": [
+          {"field": "response_code", "op": "eq", "value": 500},
+          {"field": "response_code", "op": "eq", "value": 502}]})),
+      expect_substr="None")
+check("response_code under NOT is not extracted",
+      str(_proc._find_response_code_value({"logic": "not",
+          "item": {"field": "response_code", "op": "eq", "value": 404}})),
+      expect_substr="None")
+check("quoted response_code coerced to int",
+      str(_proc._find_response_code_value({"field": "response_code", "op": "eq", "value": "404"})),
+      expect_substr="404")
 # path extraction on a NOT node doesn't crash and stays global
 check("path pattern on NOT node -> * (no crash)",
       _proc._extract_path_pattern({"logic": "not", "item": {"field": "uri.path", "op": "eq", "value": "/a"}}, ""),
@@ -592,6 +607,37 @@ for short in sorted(set(_parser.CF_FIELD_MAP.values())):
         unclassified.append(short)
 check("no CF_FIELD_MAP value is unclassified", str(unclassified),
       expect_substr="[]", forbid_substr="'")
+
+print("== V (round 8): host-strip, dead-sink, lambda/kvs, empty-OR ==")
+# A: redundant host condition is stripped after host-routing
+check("host-only strips to unconditional ({always:True}, not None)",
+      str(_pre._strip_host_condition({"field": "host", "op": "eq", "value": "x"})),
+      expect_substr="'always': True")
+check("host AND path strips to just path",
+      str(_pre._strip_host_condition({"logic": "and", "parts": [
+          {"field": "host", "op": "eq", "value": "x"},
+          {"field": "uri.path", "op": "eq", "value": "/api"}]})),
+      expect_substr="'field': 'uri.path'")
+# B: single-path gate rejects extension-eq (→*), accepts extension-in-one
+check("ext eq is not single-path (would be site-wide)",
+      str(_pre._cache_cond_is_single_path({"field": "uri.path.extension", "op": "eq", "value": "pdf"})),
+      expect_substr="False")
+check("ext in [one] is single-path",
+      str(_pre._cache_cond_is_single_path({"field": "uri.path.extension", "op": "in", "value": ["pdf"]})),
+      expect_substr="True")
+# C: lambda in_kvs fails closed (no undefined kvsHandle)
+check("lambda in_kvs -> false", _gen.condition_to_js({"field": "ip.src", "op": "in_kvs", "value": "deny"}, "lambda"),
+      expect_substr="false")
+check("cff in_kvs still works", _gen.condition_to_js({"field": "ip.src", "op": "in_kvs", "value": "deny"}, "cff"),
+      expect_substr="kvsHandle.exists")
+# F: empty OR fails closed (was None = fires always)
+check("empty OR -> false (fail closed)",
+      _gen.condition_to_js({"logic": "or", "parts": []}, "cff"), expect_substr="false")
+check("empty AND -> unconditional (None)",
+      str(_gen.condition_to_js({"logic": "and", "parts": []}, "cff")), expect_substr="None")
+# G: dead code removed
+check("_needs_kvs removed", str(hasattr(_gen, "_needs_kvs")), expect_substr="False")
+check("_parse_single_condition removed", str(hasattr(_parser, "_parse_single_condition")), expect_substr="False")
 
 # ── PROPERTY TEST: no fail-open across ALL small condition trees ─────────────
 # Enumerate every condition tree (depth ≤ 2) over three leaves — two mappable

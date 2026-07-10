@@ -225,10 +225,15 @@ def validate_domain(ir, filename):
 
 
 def _collect_needed_orp(cond, needed):
-    """Recursively collect ORP headers needed by a condition."""
+    """Recursively collect ORP headers needed by a condition. Descends BOTH a
+    logic node's `parts` and a NOT node's `item` — a geo field under a NOT (e.g.
+    `not (ip.src.continent eq "EU")`) still needs its ORP header, and skipping
+    `item` would miss it (the NOT-blind walker bug this validator shared)."""
     if "logic" in cond:
         for p in cond.get("parts", []):
             _collect_needed_orp(p, needed)
+        if "item" in cond:
+            _collect_needed_orp(cond["item"], needed)
     elif "field" in cond:
         field = cond["field"]
         for h in FIELD_TO_ORP_HEADERS.get(field, []):

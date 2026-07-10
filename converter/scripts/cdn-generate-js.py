@@ -294,15 +294,19 @@ def _condition_to_js(cond, target="cff", indent=2):
             if any(p is _NEVER for p in parts):
                 return _NEVER
             if logic == "and":
+                # AND is a conjunction of constraints; with no parts there is no
+                # constraint → unconditional (identity). None parts are dropped.
                 live = [p for p in parts if p is not None]
                 if not live:
-                    return None  # all unconditional → unconditional
+                    return None
                 return " && ".join(f"({p})" if " || " in p else p for p in live)
             # or
+            if not parts:
+                # A disjunction of nothing matches nothing → fail closed (an
+                # empty OR returning None would fire the op on every request).
+                return _NEVER
             if any(p is None for p in parts):
                 return None  # an always-true branch makes the OR unconditional
-            if not parts:
-                return None
             return " || ".join(f"({p})" if " && " in p else p for p in parts)
         if logic == "not":
             inner = _condition_to_js(cond.get("item"), target, indent)
@@ -351,6 +355,14 @@ def _condition_to_js(cond, target="cff", indent=2):
     # identifier. Fail closed — never matches, regardless of negation.
     if not _field_is_mappable(field, target):
         print(f"  WARN: unmappable condition field, emitting false: {field}", file=sys.stderr)
+        return _NEVER
+
+    # in_kvs / not_in_kvs read kvsHandle, which only the CFF handlers have.
+    # The Lambda@Edge origin-request handler has no cf.kvs() (not an L@E API),
+    # so fail closed there rather than emit an undefined-kvsHandle ReferenceError.
+    # (Mirror of the continent/is_eu lambda guard in _field_is_mappable.)
+    if target == "lambda" and base_op == "in_kvs":
+        print(f"  WARN: in_kvs condition unsupported in Lambda@Edge, emitting false: {field}", file=sys.stderr)
         return _NEVER
 
     acc = _get_accessor(field, target)
@@ -836,12 +848,6 @@ def _generate_op_js(op, target="cff", indent="  "):
     return lines
 
 
-def _needs_kvs(ir):
-    """Check if the DOMAIN needs a KVS at all (drives resource provisioning)."""
-    kvs = ir.get("metadata", {}).get("kvs_requirements", {})
-    return any(kvs.values())
-
-
 def _ops_need_kvs(ops):
     """Check if a specific handler's op list needs a cf.kvs() handle at runtime.
 
@@ -859,6 +865,30 @@ def _needs_qs_helper(all_ops):
     """_qs is always injected in CFF — 180 bytes, negligible vs 10KB limit.
     Avoids detection gaps (bulk redirect, conditions, dynamic expressions)."""
     return True
+
+
+def _qs_helper_lines(indent="  "):
+    """The `_qs` helper that rebuilds CFF's parsed querystring object into a raw
+    string. Shared by the viewer-request and viewer-response handlers (a
+    uri.query condition renders `_qs(request.querystring)` in either)."""
+    return [
+        f"{indent}function _qs(q) {{",
+        f"{indent}  var p = [];",
+        f"{indent}  for (var k in q) {{",
+        f"{indent}    if (q[k].multiValue) {{",
+        f"{indent}      q[k].multiValue.forEach(function(mv) {{ p.push(k + '=' + mv.value); }});",
+        f"{indent}    }} else {{",
+        f"{indent}      p.push(k + '=' + q[k].value);",
+        f"{indent}    }}",
+        f"{indent}  }}",
+        f"{indent}  return p.join('&');",
+        f"{indent}}}",
+    ]
+
+
+def _cond_uses_query(ops):
+    """True if any op condition references uri.query (renders _qs(...))."""
+    return any(_cond_has_field(op.get("condition"), ("uri.query",)) for op in ops)
 
 
 def _needs_crypto(ops):
@@ -1005,17 +1035,7 @@ def generate_viewer_request_js(ir, target="cff"):
     # CFF request.querystring is a parsed object; _qs rebuilds the raw string.
     # Lambda@Edge request.querystring is already a raw string — no helper needed.
     if target == "cff" and _needs_qs_helper(all_ops):
-        lines.append("  function _qs(q) {")
-        lines.append("    var p = [];")
-        lines.append("    for (var k in q) {")
-        lines.append("      if (q[k].multiValue) {")
-        lines.append("        q[k].multiValue.forEach(function(mv) { p.push(k + '=' + mv.value); });")
-        lines.append("      } else {")
-        lines.append("        p.push(k + '=' + q[k].value);")
-        lines.append("      }")
-        lines.append("    }")
-        lines.append("    return p.join('&');")
-        lines.append("  }")
+        lines.extend(_qs_helper_lines())
 
     # Continent/EU preamble
     if _has_continent_or_eu(all_ops):
@@ -1073,6 +1093,12 @@ def generate_viewer_response_js(ir):
     # (AWS-confirmed), so expose it under the same `request` name the accessors
     # and preamble use.
     lines.append("  const request = event.request;")
+
+    # _qs helper — a uri.query condition renders `_qs(request.querystring)` here
+    # too; without the helper it's a ReferenceError. (viewer-response is always
+    # the CFF target, where querystring is a parsed object.)
+    if _cond_uses_query(all_ops):
+        lines.extend(_qs_helper_lines())
 
     # Continent/EU preamble — same KVS-backed country lookup as viewer-request
     # (KVS reads work in viewer-response). Without it, a continent/is_eu
@@ -1735,8 +1761,14 @@ def _write_domain_functions_tf(san, config, ir, domain_dir, kvs_is_shared=False,
     vresp_cfg = config.get("viewer_response", {})
     has_kvs = any(ir["metadata"].get("kvs_requirements", {}).values())
     needs_local_kvs = has_kvs and not kvs_is_shared
-    # Does the viewer-response CFF itself use KVS (continent/is_eu/in_kvs)? Only
-    # then does its resource need a key_value_store_associations block.
+    # KVS association is PER-HANDLER, matching the per-handler cf.kvs() emission:
+    # only associate a store with the CFF that actually calls cf.kvs(). Otherwise
+    # a response-only-KVS domain gets a spurious association on the request CFF
+    # (and vice-versa). _ops_need_kvs mirrors generate_viewer_request_js.
+    req_uses_kvs = _ops_need_kvs([
+        op for beh in ir.get("cache_behaviors", [])
+        for op in beh.get("viewer_request_ops", [])
+    ])
     resp_uses_kvs = any(
         _op_uses_kvs(op)
         for beh in ir.get("cache_behaviors", [])
@@ -1761,9 +1793,9 @@ def _write_domain_functions_tf(san, config, ir, domain_dir, kvs_is_shared=False,
         w(f'  runtime = "cloudfront-js-2.0"')
         w(f'  publish = true')
         w(f'  code    = file("${{path.module}}/functions/{san}_viewer_request.js")')
-        if needs_local_kvs:
+        if req_uses_kvs and needs_local_kvs:
             w(f'  key_value_store_associations = [aws_cloudfront_key_value_store.{san}_kvs.arn]')
-        elif kvs_is_shared and has_kvs:
+        elif req_uses_kvs and kvs_is_shared and has_kvs:
             kvs_tf_id = shared_kvs_name.replace("-", "_") if shared_kvs_name else ""
             w(f'  key_value_store_associations = [data.terraform_remote_state.shared.outputs.{kvs_tf_id}_arn]')
         w('}')

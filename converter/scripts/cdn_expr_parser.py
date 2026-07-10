@@ -141,45 +141,6 @@ def field_convertibility(cf_field, target="cff"):
 
 # ── single-condition parsers ─────────────────────────────────────────────────
 
-# Order matters: longer field names first to avoid partial matches
-_FIELD_PATTERN = "|".join(
-    re.escape(f) for f in sorted(CF_FIELD_MAP.keys(), key=len, reverse=True)
-)
-
-# Pattern: field op value
-_RE_EQ = re.compile(
-    rf'({_FIELD_PATTERN})\s+(eq|ne|gt|ge|lt|le)\s+"([^"]*)"'
-)
-_RE_EQ_NUM = re.compile(
-    rf'({_FIELD_PATTERN})\s+(eq|ne|gt|ge|lt|le)\s+(\d+)'
-)
-_RE_WILDCARD = re.compile(
-    rf'({_FIELD_PATTERN})\s+wildcard\s+r?"([^"]*)"'
-)
-_RE_MATCHES = re.compile(
-    rf'({_FIELD_PATTERN})\s+matches\s+r?"([^"]*)"'
-)
-_RE_CONTAINS = re.compile(
-    rf'({_FIELD_PATTERN})\s+contains\s+"([^"]*)"'
-)
-_RE_IN_SET = re.compile(
-    rf'({_FIELD_PATTERN})\s+in\s+(\{{[^}}]*\}})'
-)
-_RE_IN_LIST = re.compile(
-    rf'({_FIELD_PATTERN})\s+in\s+\$(\w+)'
-)
-_RE_STARTS_WITH = re.compile(
-    rf'starts_with\(({_FIELD_PATTERN}),\s*"([^"]*)"\)'
-)
-_RE_ENDS_WITH = re.compile(
-    rf'ends_with\(({_FIELD_PATTERN}),\s*"([^"]*)"\)'
-)
-# Boolean field (no operator): ip.src.is_in_european_union
-_RE_BOOL_FIELD = re.compile(
-    r'^(ip\.src\.is_in_european_union)$'
-)
-
-
 def _try_simple_regex_to_wildcard(regex_str):
     """Convert trivial regex to wildcard. Returns wildcard string or None."""
     # ^/literal-prefix/(.*)  → /literal-prefix/*
@@ -190,105 +151,6 @@ def _try_simple_regex_to_wildcard(regex_str):
     m = re.match(r'^\^(/[^()\[\]{}|+?*\\]+)\$$', regex_str)
     if m:
         return m.group(1)
-    return None
-
-
-def _parse_single_condition(expr):
-    """Try to parse a single atomic condition. Returns condition dict or None."""
-    e = expr.strip()
-
-    # Boolean field
-    m = _RE_BOOL_FIELD.match(e)
-    if m:
-        mapped = CF_FIELD_MAP.get(m.group(1))
-        if mapped:
-            return {"field": mapped, "op": "eq", "value": True}
-
-    # not <expr>
-    if e.startswith("not "):
-        inner = _parse_single_condition(e[4:].strip())
-        if inner:
-            inner["op"] = "not_" + inner["op"]
-            return inner
-        return None
-
-    # starts_with(field, "value")
-    m = _RE_STARTS_WITH.search(e)
-    if m:
-        mapped = CF_FIELD_MAP.get(m.group(1))
-        if mapped:
-            return {"field": mapped, "op": "starts_with", "value": m.group(2)}
-
-    # ends_with(field, "value")
-    m = _RE_ENDS_WITH.search(e)
-    if m:
-        mapped = CF_FIELD_MAP.get(m.group(1))
-        if mapped:
-            return {"field": mapped, "op": "ends_with", "value": m.group(2)}
-
-    # field in $list_name
-    m = _RE_IN_LIST.search(e)
-    if m:
-        mapped = CF_FIELD_MAP.get(m.group(1))
-        if mapped:
-            return {"field": mapped, "op": "in_list", "value": "$" + m.group(2)}
-
-    # field in {set}
-    m = _RE_IN_SET.search(e)
-    if m:
-        mapped = CF_FIELD_MAP.get(m.group(1))
-        if mapped:
-            return {"field": mapped, "op": "in", "value": _parse_in_set(m.group(2))}
-
-    # field wildcard "pattern"
-    m = _RE_WILDCARD.search(e)
-    if m:
-        field_name = m.group(1)
-        pattern = m.group(2)
-        mapped = CF_FIELD_MAP.get(field_name)
-        if mapped == "full_uri":
-            host_pat, path_pat = _parse_full_uri_wildcard(pattern)
-            if host_pat and path_pat:
-                return {
-                    "field": "full_uri", "op": "wildcard", "value": pattern,
-                    "host_pattern": host_pat, "path_pattern": path_pat,
-                }
-        if mapped:
-            return {"field": mapped, "op": "wildcard", "value": pattern}
-
-    # field matches "regex"
-    m = _RE_MATCHES.search(e)
-    if m:
-        mapped = CF_FIELD_MAP.get(m.group(1))
-        regex_str = m.group(2)
-        if mapped:
-            wc = _try_simple_regex_to_wildcard(regex_str)
-            if wc:
-                return {"field": mapped, "op": "wildcard", "value": wc}
-            # Complex regex → cannot parse
-            return None
-
-    # field contains "value"
-    m = _RE_CONTAINS.search(e)
-    if m:
-        mapped = CF_FIELD_MAP.get(m.group(1))
-        if mapped:
-            return {"field": mapped, "op": "contains", "value": m.group(2)}
-
-    # field eq/ne/gt/ge/lt/le "string"
-    m = _RE_EQ.search(e)
-    if m:
-        mapped = CF_FIELD_MAP.get(m.group(1))
-        if mapped:
-            return {"field": mapped, "op": m.group(2), "value": m.group(3)}
-
-    # field eq/ne/gt/ge/lt/le number
-    m = _RE_EQ_NUM.search(e)
-    if m:
-        mapped = CF_FIELD_MAP.get(m.group(1))
-        if mapped:
-            return {"field": mapped, "op": m.group(2), "value": int(m.group(3))}
-
     return None
 
 
@@ -405,15 +267,29 @@ def extract_host_filter(condition, expression):
 
 
 def _scan_host_from_condition(cond):
-    """Extract host filter from parsed condition."""
+    """Extract host filter from parsed condition (list of hosts, or None=global)."""
     if "logic" in cond:
-        # Deliberately do NOT descend into a NOT node's "item": a host inside a
-        # negation ("not http.host eq x") is an EXCLUSION, not a positive scope —
-        # returning it as the host filter would scope the rule to exactly the
-        # host it excludes. A negated host condition means "applies globally".
+        # NOT: a host inside a negation is an EXCLUSION, not a positive scope —
+        # returning it would scope the rule to exactly the host it excludes. A
+        # negated host condition means "applies globally".
         if cond.get("logic") == "not":
             return None
-        for p in cond.get("parts", []):
+        parts = cond.get("parts", [])
+        if cond.get("logic") == "or":
+            # The rule fires if ANY branch matches. It is host-scoped ONLY if
+            # EVERY branch pins a host (then the scope is their union); if any
+            # branch has no host (e.g. a path/geo branch), the rule can fire on
+            # any host → global (None). Returning just the first branch's host
+            # would silently drop the rule for the other branches' hosts.
+            union = []
+            for p in parts:
+                h = _scan_host_from_condition(p)
+                if h is None:
+                    return None  # a hostless branch → global
+                union.extend(h)
+            return union or None
+        # AND: any host-pinning conjunct legitimately scopes the whole rule.
+        for p in parts:
             hosts = _scan_host_from_condition(p)
             if hosts is not None:
                 return hosts
@@ -657,9 +533,12 @@ class _CDNParser:
         if self.peek().type == _TT_NOT:
             self.advance()
             inner = self._not_expr()
-            # Flatten not into op: not {field, op: eq} → {field, op: not_eq}
+            # Flatten not into op: not {field, op: eq} → {field, op: not_eq}.
+            # Double negation cancels: not(not_eq) → eq (NOT not_not_eq, which is
+            # an unknown op that would render as `false` — rule never fires).
             if "field" in inner and "op" in inner:
-                inner["op"] = "not_" + inner["op"]
+                op = inner["op"]
+                inner["op"] = op[4:] if op.startswith("not_") else "not_" + op
                 return inner
             # not (logic expr) → wrap
             return {"logic": "not", "item": inner}
