@@ -173,7 +173,7 @@ def redirect_cond_js(expr):
     cond = op.get("condition")
     raw = op.get("raw_expression")
     if raw and not cond:
-        cond = op.get("_parsed_condition") or _parser.parse_expression_full(raw)
+        cond = _parser.parse_expression_full(raw)
     return _gen.condition_to_js(cond, "cff") or "None"
 
 print("== #1 full_uri (contains/eq/no-scheme wildcard) -> real match, not false ==")
@@ -224,18 +224,21 @@ op = first_op(_proc.process_request_header_transform(
     header_rule("true", {"X-B": {"operation": "set", "expression": "broken((("}}), {}, ""))
 check("parse failure tagged for validator", emit(op), expect_substr="no CloudFront source for")
 
-print("== #9 deferred raw_expr parse tree cached on op (XOR invariant intact) ==")
+print("== deferred raw_expr: XOR invariant intact, no stray cache key ==")
 res = _proc.process_origin_rule(
     {"id": "r", "expression": 'http.host eq "a.com" or http.host eq "b.com"',
      "action_parameters": {"origin": {"host": "o.com"}}}, {}, "")
 op = first_op(res)
-check("op carries _parsed_condition cache", str("_parsed_condition" in op), expect_substr="True")
-check("condition/raw_expression still mutually exclusive",
+# An OR expression is deferred as raw_expression (condition None). It must NOT
+# also carry a structured condition, and must NOT leak the old _parsed_condition
+# cache key (removed — it never survived _place_result's op rebuild anyway).
+check("condition/raw_expression mutually exclusive",
       str(op.get("condition") is None and op.get("raw_expression") is not None), expect_substr="True")
+check("no dead _parsed_condition key", str("_parsed_condition" in op), expect_substr="False")
 
 def resp_js(ops):
     """Assemble a viewer_response.js from processor ops."""
-    ir = {"metadata": {"hostname": "h", "sanitized_name": "h", "kvs_id": "K"},
+    ir = {"metadata": {"hostname": "h", "sanitized_name": "h"},
           "cache_behaviors": [{"viewer_request_ops": [], "viewer_response_ops": ops}]}
     return _gen.generate_viewer_response_js(ir) or ""
 
@@ -282,6 +285,65 @@ check("preserve_qs picks ? vs & delimiter", js, expect_substr="indexOf('?')")
 op = first_op(_proc.process_redirect_rule(
     redirect_rule("true", target_url="https://x.com/new", status=301), {}, ""))
 check("no preserve_qs stays simple", emit(op), forbid_substr="indexOf('?')")
+
+print("== cf.kvs() takes NO argument (bound via TF association) ==")
+# continent condition needs KVS -> the handle must be cf.kvs(), never cf.kvs('...')
+kvs_ops = _proc.process_response_header_transform(
+    header_rule('ip.src.continent eq "EU"', {"x": {"operation": "set", "value": "1"}}), {}, "")
+kjs = resp_js(kvs_ops)
+check("emits cf.kvs() with no arg", kjs, expect_substr="cf.kvs();", forbid_substr="cf.kvs('")
+rq_op = first_op(_proc.process_redirect_rule(
+    redirect_rule('ip.src in $blk', target_url="https://x"), {"blk": ["1.2.3.4"]}, ""))
+rq_ir = {"metadata": {"hostname": "h", "sanitized_name": "h",
+                      "kvs_requirements": {"needs_ip_lists": True}},
+         "cache_behaviors": [{"viewer_request_ops": [rq_op], "viewer_response_ops": []}]}
+rq = _gen.generate_viewer_request_js(rq_ir)
+check("request handle also cf.kvs() no-arg", rq, expect_substr="cf.kvs();", forbid_substr="cf.kvs('")
+
+print("== A: response_code in a REQUEST-phase action value -> non_convertible ==")
+r = _proc.process_redirect_rule(
+    redirect_rule("true", target_expr='concat("https://x/", to_string(http.response.code))'), {}, "")
+check("request-phase response_code value -> non_convertible",
+      r.get("type", "") if isinstance(r, dict) else "list", expect_substr="non_convertible")
+# but response_code in a RESPONSE header value is fine (sourceable there)
+ops = _proc.process_response_header_transform(
+    header_rule("true", {"x-code": {"operation": "set", "expression": "to_string(http.response.code)"}}), {}, "")
+types = [o["type"] for o in ops]
+check("response-phase response_code value still converts", str(types), expect_substr="set_response_header")
+
+print("== B: not ip.src in $list -> fail CLOSED (negated KVS lookup) ==")
+r = _proc.process_redirect_rule(
+    redirect_rule('not ip.src in $allow', target_url="https://blocked"), {"allow": ["1.2.3.4"]}, "")
+op = first_op(r)
+bjs = _gen.condition_to_js(op.get("condition"), "cff")
+check("not-in-list emits negated KVS exists", bjs,
+      expect_substr="!(await kvsHandle.exists", forbid_substr="!(false)")
+# CIDR in a not-list is still safety-rejected
+r = _proc.process_redirect_rule(
+    redirect_rule('not ip.src in $cidr', target_url="https://x"), {"cidr": ["10.0.0.0/8"]}, "")
+check("not-in-list with CIDR still rejected",
+      r.get("type", "") if isinstance(r, dict) else "list", expect_substr="non_convertible")
+
+print("== C: continent/is_eu in an OR condition -> preamble emitted (no undefined) ==")
+ops = _proc.process_response_header_transform(
+    header_rule('ip.src.continent eq "EU" or http.host eq "x.com"',
+                {"x": {"operation": "set", "value": "1"}}), {}, "")
+cjs = resp_js(ops)
+check("OR-deferred continent still gets preamble", cjs, expect_substr="let continent = '';")
+check("OR-deferred continent references defined var", cjs, expect_substr="kvsHandle.get('continent:")
+
+print("== D: ip.src in an OR condition on a Cache Rule -> non_convertible ==")
+r = _proc.process_cache_rule(
+    {"id": "r", "expression": 'ip.src eq "1.2.3.4" or ip.src eq "5.6.7.8"',
+     "action_parameters": {"cache": False}}, {}, "http_request_cache_settings")
+check("ip.src-OR cache rule rejected (IP restriction not dropped)",
+      (r.get("type", "") if isinstance(r, dict) else "list"), expect_substr="non_convertible")
+# a geo OR (ip.src.country) must NOT trip the direct-ip guard
+r = _proc.process_cache_rule(
+    {"id": "r", "expression": 'ip.src.country eq "US" or ip.src.country eq "CA"',
+     "action_parameters": {"cache": False}}, {}, "http_request_cache_settings")
+check("ip.src.country-OR is not mistaken for direct ip.src",
+      (r.get("type", "") if isinstance(r, dict) else "list"), forbid_substr="non_convertible")
 
 # ── classifier alignment: every CF_FIELD_MAP value must be handled somewhere ──
 print("== invariant: every mapped field is classifiable (no silent drift) ==")

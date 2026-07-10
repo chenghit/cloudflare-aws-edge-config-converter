@@ -52,6 +52,26 @@ def _condition_uses_ip_src(condition):
     return condition.get("field") in ("ip.src",)
 
 
+# `ip.src` as a direct-IP field: the token `ip.src` NOT followed by another
+# `.<subfield>` (which would be a geo field like ip.src.country / .continent).
+_RE_RAW_IP_SRC = re.compile(r"\bip\.src\b(?!\.)")
+
+
+def _uses_ip_src(condition, raw_expr=None):
+    """Direct-IP (ip.src) check that also covers a deferred raw expression.
+
+    An OR expression is deferred as raw text (condition is None), so a
+    structured-only check would let `ip.src eq "..." or ip.src eq "..."` slip
+    past the cache/compression ip.src guard and silently drop the IP
+    restriction. Scan the raw text too.
+    """
+    if _condition_uses_ip_src(condition):
+        return True
+    if raw_expr and _RE_RAW_IP_SRC.search(raw_expr):
+        return True
+    return False
+
+
 def _check_ip_list(list_name, ip_lists):
     """Check an IP list for CIDR. Returns (ips, non_convertible_reason).
 
@@ -87,13 +107,18 @@ def _resolve_ip_list_in_condition(condition, ip_lists):
                 return None, reason
             new_parts.append(np)
         return {**condition, "parts": new_parts}, None
-    if condition.get("op") == "in_list":
+    op = condition.get("op")
+    if op in ("in_list", "not_in_list"):
         list_name = condition["value"].lstrip("$")
         ips, reason = _check_ip_list(list_name, ip_lists)
         if reason:
             return None, reason
-        # Use KVS exists() for IP list matching
-        return {**condition, "op": "in_kvs", "value": list_name, "kvs_ips": ips}, None
+        # Use KVS exists() for IP list matching. Preserve the not_ prefix so a
+        # negated membership test ("... unless IP in allowlist") stays negated —
+        # otherwise it would fall through to the raw op and condition_to_js would
+        # emit !(/* TODO */ false) = true, firing the rule on EVERY request.
+        new_op = "not_in_kvs" if op == "not_in_list" else "in_kvs"
+        return {**condition, "op": new_op, "value": list_name, "kvs_ips": ips}, None
     return condition, None
 
 
@@ -141,46 +166,26 @@ def _resolve_unmappable_in_condition(condition, raw_expr=None):
     structure it, e.g. because it contains an unmapped field). In the raw case
     we parse it with the full parser so the unmappable check can see the fields.
 
-    Returns (condition, raw_expr, non_conv_reason, parsed_tree). ``parsed_tree``
-    is the full parse of a deferred ``raw_expr`` when it is kept deferred and
-    fully convertible — the caller can stash it on the op (see _cache_parsed) so
-    the JS generator, which runs in a separate process and would otherwise parse
-    the same raw_expr again, can reuse it. It is None in every other case.
-    On OR-prune the pruned condition is returned structured and raw_expr is
-    cleared so the generator uses the pruned form.
+    Returns (condition, raw_expr, non_conv_reason). On OR-prune the pruned
+    condition is returned structured and raw_expr is cleared so the generator
+    uses the pruned form.
     """
     if condition is not None:
         new_cond, reason = _prune_unmappable(condition)
-        return new_cond, raw_expr, reason, None
+        return new_cond, raw_expr, reason
     if raw_expr:
         try:
             full = parse_expression_full(raw_expr)
         except Exception:
-            return condition, raw_expr, None, None  # generator has its own guard
+            return condition, raw_expr, None  # generator has its own guard
         if not condition_unmappable_fields(full):
-            # Nothing unmappable; keep it deferred, but hand back the parsed tree
-            # so the caller can cache it and the generator need not re-parse.
-            return condition, raw_expr, None, full
+            return condition, raw_expr, None  # nothing unmappable; leave deferred
         new_cond, reason = _prune_unmappable(full)
         if reason:
-            return None, None, reason, None
+            return None, None, reason
         # OR-prune succeeded → use the structured pruned condition, drop raw.
-        return new_cond, None, None, None
-    return condition, raw_expr, None, None
-
-
-def _cache_parsed(op, raw_expr, parsed):
-    """Stash a parsed condition tree on a deferred-expression op.
-
-    The JS generator runs as a separate process (reads the IR from disk) and
-    re-parses ``raw_expression`` for exactly the deferred ops the processor
-    already parsed here. Persisting the tree under a private key lets the
-    generator reuse it, avoiding the double parse. The key is invisible to the
-    condition/raw_expression XOR invariant and to every other IR consumer.
-    """
-    if raw_expr is not None and parsed is not None:
-        op["_parsed_condition"] = parsed
-    return op
+        return new_cond, None, None
+    return condition, raw_expr, None
 
 
 def _screen_unmappable(rule, cond, raw_expr, ip_lists):
@@ -189,21 +194,21 @@ def _screen_unmappable(rule, cond, raw_expr, ip_lists):
     Folds the identical pre-processing that every rule-type processor ran
     inline: resolve `$list` references in the condition, then apply the
     unmappable-field policy (OR-prune / AND-NOT-bare reject). Returns
-    ``(cond, raw_expr, parsed, non_convertible)`` — when ``non_convertible`` is
-    a dict, the caller should return it immediately; otherwise the (possibly
-    rewritten) cond/raw_expr and cached parse tree are ready to use.
+    ``(cond, raw_expr, non_convertible)`` — when ``non_convertible`` is a dict,
+    the caller should return it immediately; otherwise the (possibly rewritten)
+    cond/raw_expr are ready to use.
     """
     if cond:
         cond, ip_reason = _resolve_ip_list_in_condition(cond, ip_lists)
         if ip_reason:
-            return cond, raw_expr, None, _make_non_convertible(rule, ip_reason)
-    cond, raw_expr, unmap_reason, parsed = _resolve_unmappable_in_condition(cond, raw_expr)
+            return cond, raw_expr, _make_non_convertible(rule, ip_reason)
+    cond, raw_expr, unmap_reason = _resolve_unmappable_in_condition(cond, raw_expr)
     if unmap_reason:
-        return cond, raw_expr, parsed, _make_non_convertible(rule, unmap_reason)
-    return cond, raw_expr, parsed, None
+        return cond, raw_expr, _make_non_convertible(rule, unmap_reason)
+    return cond, raw_expr, None
 
 
-def _screen_value_expr(rule, expression, what):
+def _screen_value_expr(rule, expression, what, target="cff"):
     """Screen a dynamic ACTION-value expression (redirect target, rewrite path,
     query) for fields with no CloudFront source.
 
@@ -212,10 +217,14 @@ def _screen_value_expr(rule, expression, what):
     value becomes a clean per-rule non_convertible instead of a leaked
     `'' /* WARNING… */` marker inlined into the generated JS. Returns a
     non_convertible dict or None.
+
+    ``target`` is the emit phase — redirect/rewrite/query values are all
+    request-phase ("cff"), so a response-only field like http.response.code is
+    correctly flagged there.
     """
     if not expression:
         return None
-    reason = value_expression_unmappable(expression)
+    reason = value_expression_unmappable(expression, target)
     if reason:
         return _make_non_convertible(rule, f"{what}: {reason}")
     return None
@@ -261,11 +270,11 @@ def process_redirect_rule(rule, ip_lists, phase):
         }
 
     # Check ip.src convertibility
-    if phase in IP_SRC_NON_CONVERTIBLE_PHASES and _condition_uses_ip_src(cond):
+    if phase in IP_SRC_NON_CONVERTIBLE_PHASES and _uses_ip_src(cond, raw_expr):
         return _make_non_convertible(rule, "ip.src condition in Cache Rules cannot be converted; CFF cannot control caching decisions")
 
     # Resolve IP lists + screen unmappable condition fields.
-    cond, raw_expr, _parsed, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
+    cond, raw_expr, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
     if nc:
         return nc
 
@@ -297,7 +306,7 @@ def process_redirect_rule(rule, ip_lists, phase):
         # Static target: store under target_url (the key the JS generator reads).
         op["params"]["target_url"] = target_value
 
-    return _cache_parsed(op, raw_expr, _parsed)
+    return op
 
 
 def process_rewrite_rule(rule, ip_lists, phase):
@@ -311,7 +320,7 @@ def process_rewrite_rule(rule, ip_lists, phase):
     cond, raw_expr = parse_expression(expr)
 
     # Resolve IP lists + screen unmappable condition fields.
-    cond, raw_expr, _parsed, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
+    cond, raw_expr, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
     if nc:
         return nc
 
@@ -349,7 +358,7 @@ def process_rewrite_rule(rule, ip_lists, phase):
     elif query_value:
         op["params"]["new_query"] = query_value
 
-    return _cache_parsed(op, raw_expr, _parsed)
+    return op
 
 
 def process_config_rule(rule, ip_lists, phase):
@@ -407,7 +416,7 @@ def process_origin_rule(rule, ip_lists, phase):
     cond, raw_expr = parse_expression(expr)
 
     # Resolve IP lists + screen unmappable condition fields.
-    cond, raw_expr, _parsed, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
+    cond, raw_expr, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
     if nc:
         return nc
 
@@ -431,7 +440,7 @@ def process_origin_rule(rule, ip_lists, phase):
     if sni:
         op["params"]["sni"] = sni
 
-    return _cache_parsed(op, raw_expr, _parsed)
+    return op
 
 
 def process_cache_rule(rule, ip_lists, phase):
@@ -441,8 +450,10 @@ def process_cache_rule(rule, ip_lists, phase):
 
     cond, raw_expr = parse_expression(expr)
 
-    # ip.src in cache rules → non_convertible
-    if _condition_uses_ip_src(cond):
+    # ip.src in cache rules → non_convertible (raw_expr too: an OR defers to raw
+    # text with cond=None, and dropping the IP restriction silently would change
+    # who gets cached)
+    if _uses_ip_src(cond, raw_expr):
         return _make_non_convertible(
             rule,
             "ip.src condition in Cache Rules cannot be converted; "
@@ -450,7 +461,7 @@ def process_cache_rule(rule, ip_lists, phase):
         )
 
     # Resolve IP lists + screen unmappable condition fields.
-    cond, raw_expr, _parsed, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
+    cond, raw_expr, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
     if nc:
         return nc
 
@@ -521,7 +532,7 @@ def process_cache_rule(rule, ip_lists, phase):
     if "respect_strong_etags" in action_params:
         result["params"]["respect_strong_etags"] = action_params["respect_strong_etags"]
 
-    return _cache_parsed(result, raw_expr, _parsed)
+    return result
 
 
 def process_request_header_transform(rule, ip_lists, phase):
@@ -533,7 +544,7 @@ def process_request_header_transform(rule, ip_lists, phase):
     cond, raw_expr = parse_expression(expr)
 
     # Resolve IP lists + screen unmappable condition fields.
-    cond, raw_expr, _parsed, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
+    cond, raw_expr, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
     if nc:
         return nc
 
@@ -556,8 +567,9 @@ def process_request_header_transform(rule, ip_lists, phase):
         elif expression:
             # Partial convert: if this header's value expression references a
             # field with no CloudFront source, drop THIS header op (record it)
-            # but keep the rest of the rule's headers.
-            unmap = value_expression_unmappable(expression)
+            # but keep the rest of the rule's headers. Request headers are
+            # request-phase (cff).
+            unmap = value_expression_unmappable(expression, "cff")
             if unmap:
                 ops.append(_make_non_convertible(
                     rule, f"request header '{header_name}': {unmap}"))
@@ -568,7 +580,7 @@ def process_request_header_transform(rule, ip_lists, phase):
         elif value:
             op["params"]["value"] = value
 
-        ops.append(_cache_parsed(op, raw_expr, _parsed))
+        ops.append(op)
 
     return ops
 
@@ -582,7 +594,7 @@ def process_response_header_transform(rule, ip_lists, phase):
     cond, raw_expr = parse_expression(expr)
 
     # Resolve IP lists + screen unmappable condition fields.
-    cond, raw_expr, _parsed, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
+    cond, raw_expr, nc = _screen_unmappable(rule, cond, raw_expr, ip_lists)
     if nc:
         return nc
 
@@ -631,7 +643,9 @@ def process_response_header_transform(rule, ip_lists, phase):
             elif expression:
                 # Partial convert: drop this one header if its value expression
                 # references a field with no CloudFront source; keep the rest.
-                unmap = value_expression_unmappable(expression)
+                # Response headers are response-phase, where response.code IS
+                # sourceable — so screen with target="response".
+                unmap = value_expression_unmappable(expression, "response")
                 if unmap:
                     ops.append(_make_non_convertible(
                         rule, f"response header '{header_name}': {unmap}"))
@@ -641,7 +655,7 @@ def process_response_header_transform(rule, ip_lists, phase):
                 op["params"]["value_expression"] = expression
             elif value:
                 op["params"]["value"] = value
-            ops.append(_cache_parsed(op, raw_expr, _parsed))
+            ops.append(op)
 
     return ops
 
@@ -746,8 +760,9 @@ def process_compression_rule(rule, ip_lists, phase):
     enable_gzip = any(a.get("name") == "gzip" for a in algorithms)
     enable_brotli = any(a.get("name") == "brotli" for a in algorithms)
 
-    # ip.src in compression rules → non_convertible
-    if _condition_uses_ip_src(cond):
+    # ip.src in compression rules → non_convertible (raw_expr too: OR defers to
+    # raw text with cond=None)
+    if _uses_ip_src(cond, raw_expr):
         return _make_non_convertible(
             rule,
             "ip.src condition in Compression Rules cannot be converted; "

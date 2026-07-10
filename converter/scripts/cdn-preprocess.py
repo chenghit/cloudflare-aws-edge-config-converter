@@ -521,7 +521,7 @@ def _collect_kvs_ip_entries(ir, condition):
         for p in condition.get("parts", []):
             _collect_kvs_ip_entries(ir, p)
         return
-    if condition.get("op") == "in_kvs":
+    if condition.get("op") in ("in_kvs", "not_in_kvs"):
         list_name = condition["value"]
         ips = condition.pop("kvs_ips", [])
         if not ips:

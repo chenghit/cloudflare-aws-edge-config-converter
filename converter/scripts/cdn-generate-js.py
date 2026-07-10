@@ -626,19 +626,12 @@ def _generate_op_js(op, target="cff", indent="  "):
 
     # Resolve condition
     if raw_expr and not cond:
-        # The processor already parsed this raw_expr during its unmappable-field
-        # screen; reuse that tree instead of parsing the same string again in
-        # this second process (see _cache_parsed in cdn_rule_processors.py).
-        cached = op.get("_parsed_condition")
-        if cached is not None:
-            cond = cached
-        else:
-            try:
-                cond = parse_expression_full(raw_expr)
-            except Exception as e:
-                print(f"  WARN: condition parse failed: {raw_expr[:60]}... ({e})", file=sys.stderr)
-                lines.append(f"{indent}// TODO: could not parse condition: {raw_expr[:80]}")
-                return lines
+        try:
+            cond = parse_expression_full(raw_expr)
+        except Exception as e:
+            print(f"  WARN: condition parse failed: {raw_expr[:60]}... ({e})", file=sys.stderr)
+            lines.append(f"{indent}// TODO: could not parse condition: {raw_expr[:80]}")
+            return lines
 
     cond_js = condition_to_js(cond, target)
 
@@ -806,13 +799,25 @@ def _needs_crypto(ops):
     return False
 
 
-def _has_continent_or_eu(ops):
-    """Check if any op condition references continent or is_eu."""
-    for op in ops:
-        cond = op.get("condition")
-        if cond and _cond_has_field(cond, ("continent", "is_eu")):
-            return True
+def _op_uses_continent_eu(op, which=("continent", "is_eu")):
+    """True if an op references continent/is_eu — in its structured condition OR
+    in a deferred raw_expression (an OR expression defers to raw text, so a
+    structured-only scan would miss it and the preamble would be skipped,
+    leaving `continent`/`isEU` undefined in the emitted JS)."""
+    cond = op.get("condition")
+    if cond and _cond_has_field(cond, which):
+        return True
+    raw = op.get("raw_expression") or ""
+    if "continent" in which and "ip.src.continent" in raw:
+        return True
+    if "is_eu" in which and "ip.src.is_in_european_union" in raw:
+        return True
     return False
+
+
+def _has_continent_or_eu(ops):
+    """Check if any op references continent or is_eu (structured or raw)."""
+    return any(_op_uses_continent_eu(op) for op in ops)
 
 
 def _cond_has_field(cond, fields):
@@ -853,15 +858,8 @@ def _generate_bulk_redirect_block(indent="  "):
 
 def _generate_continent_preamble(ops, indent="  "):
     """Generate KVS lookup preamble for continent/is_eu conditions."""
-    needs_continent = False
-    needs_eu = False
-    for op in ops:
-        cond = op.get("condition")
-        if cond:
-            if _cond_has_field(cond, ("continent",)):
-                needs_continent = True
-            if _cond_has_field(cond, ("is_eu",)):
-                needs_eu = True
+    needs_continent = any(_op_uses_continent_eu(op, ("continent",)) for op in ops)
+    needs_eu = any(_op_uses_continent_eu(op, ("is_eu",)) for op in ops)
     if not needs_continent and not needs_eu:
         return []
     lines = [
@@ -891,10 +889,11 @@ def generate_viewer_request_js(ir, target="cff"):
     if needs_crypto_flag:
         lines.append("import crypto from 'crypto';")
 
-    # KVS init
-    kvs_id = ir.get("metadata", {}).get("kvs_id", "")
+    # KVS init. cf.kvs() takes NO argument — the store is bound to the function
+    # via Terraform `key_value_store_associations` (a function has exactly one
+    # KVS), so the runtime resolves it with no ID in code.
     if needs_kvs_flag:
-        lines.append(f"const kvsHandle = cf.kvs('{kvs_id}');")
+        lines.append("const kvsHandle = cf.kvs();")
 
     lines.append("async function handler(event) {")
     lines.append("  const request = event.request;")
@@ -957,14 +956,14 @@ def generate_viewer_response_js(ir):
 
     lines = []
     needs_kvs = any(
-        _cond_has_field(op.get("condition"), ("continent", "is_eu"))
+        _op_uses_continent_eu(op)
         or op.get("type") == "serve_error_inline"
         for op in all_ops
     )
     if needs_kvs:
         lines.append("import cf from 'cloudfront';")
-        kvs_id = ir.get("metadata", {}).get("kvs_id", "")
-        lines.append(f"const kvsHandle = cf.kvs('{kvs_id}');")
+        # cf.kvs() takes no argument — bound via Terraform key_value_store_associations.
+        lines.append("const kvsHandle = cf.kvs();")
     # crypto import is independent of KVS — a response header value using
     # sha256()/HMAC emits crypto.createHash and would otherwise ReferenceError.
     if _needs_crypto(all_ops):

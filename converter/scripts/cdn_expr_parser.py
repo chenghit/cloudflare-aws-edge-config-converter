@@ -123,19 +123,34 @@ UNMAPPABLE_FIELDS = {
     "subdivision_2",
 }
 
+# Short field names sourceable ONLY in the viewer-response phase. In a
+# request-phase context (redirect/rewrite/query action values, viewer-request
+# conditions) they have no source and are non-convertible.
+RESPONSE_ONLY_FIELDS = {
+    "response_code",  # http.response.code — only available as response.statusCode
+}
 
-def field_convertibility(cf_field):
+
+def field_convertibility(cf_field, target="cff"):
     """Classify a raw Cloudflare field name for CDN (CFF/Lambda) conversion.
 
     Returns (convertible: bool, reason: str). A field is non-convertible when
     Cloudflare exposes it but CloudFront has no way to source it at the edge
     (bot/WAF scores, TLS details, ray id, JWT claims, geo subdivisions, ...).
+
+    ``target`` is the phase the field is used in — "cff"/"lambda" mean
+    viewer-request (or a request-phase action value), "response" means
+    viewer-response. A response-only field (http.response.code) is convertible
+    only when target == "response"; used in a request-phase value it has no
+    source and must be reported, not emitted as a leaked marker.
     """
     short = CF_FIELD_MAP.get(cf_field)
     if short is None:
         return False, f"Cloudflare field '{cf_field}' has no CloudFront equivalent"
     if short in UNMAPPABLE_FIELDS:
         return False, f"Cloudflare field '{cf_field}' has no CloudFront edge source"
+    if short in RESPONSE_ONLY_FIELDS and target != "response":
+        return False, f"Cloudflare field '{cf_field}' is only available in the response phase"
     return True, ""
 
 
@@ -913,18 +928,23 @@ def _dyn_tree_fields(node):
     return out
 
 
-def value_expression_unmappable(expr):
+def value_expression_unmappable(expr, target="cff"):
     """Given a header/redirect/rewrite dynamic action value expression, return
     a reason string if it references any non-convertible Cloudflare field, else
     None. Parse failures are treated as convertible here (the generator has its
     own fallback); this only flags fields with no CloudFront source.
+
+    ``target`` is the phase the value is emitted in so response-only fields
+    (http.response.code) are flagged when used in a request-phase value
+    (redirect target, rewrite path/query) — matching the generator's
+    target-aware _field_is_mappable.
     """
     try:
         tree = parse_dynamic_expression(expr)
     except Exception:
         return None
     for f in _dyn_tree_fields(tree):
-        ok, reason = field_convertibility(f)
+        ok, reason = field_convertibility(f, target)
         if not ok:
             return reason
     return None
