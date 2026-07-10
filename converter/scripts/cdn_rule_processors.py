@@ -8,7 +8,7 @@ import re
 from cdn_expr_parser import (
     parse_expression, parse_expression_full, extract_orp_headers,
     extract_kvs_triggers, extract_host_filter, CF_FIELD_MAP,
-    extract_path_pattern_single,
+    extract_path_pattern_single, iter_condition_children,
     condition_unmappable_fields, value_expression_unmappable,
 )
 
@@ -48,7 +48,7 @@ def _condition_uses_ip_src(condition):
     if condition is None:
         return False
     if "logic" in condition:
-        return any(_condition_uses_ip_src(p) for p in condition.get("parts", []))
+        return any(_condition_uses_ip_src(c) for c in iter_condition_children(condition))
     return condition.get("field") in ("ip.src",)
 
 
@@ -262,7 +262,11 @@ def _extract_path_pattern(condition, expression):
     if condition.get("always"):
         return "*"
     if "logic" in condition:
-        for p in condition["parts"]:
+        # Only positive AND/OR branches yield a usable path prefix. Do NOT descend
+        # a NOT node's "item": a negated path ("not uri.path eq /a") is an
+        # exclusion, and scoping the behavior to /a would be wrong — fall back to
+        # "*". (`.get` also avoids a KeyError on the parts-less NOT node.)
+        for p in condition.get("parts", []):
             pp = extract_path_pattern_single(p)
             if pp and pp != "*":
                 return pp
@@ -702,13 +706,10 @@ def process_custom_error_rule(rule, ip_lists, phase):
     content = action_params.get("content")
     content_type = action_params.get("content_type")
 
-    # Parse expression to check for http.response.code
+    # Parse expression to check for http.response.code (at any depth, incl.
+    # under a NOT node).
     cond, raw_expr = parse_expression(expr)
-    response_code = None
-    if cond and "logic" in cond:
-        for p in cond.get("parts", []):
-            if p.get("field") == "response_code":
-                response_code = p.get("value")
+    response_code = _find_response_code_value(cond)
 
     # Path 4: inline content
     if content:
@@ -864,8 +865,23 @@ def _expression_uses_response_fields(cond, raw_expr):
     if cond.get("field") == "response_code":
         return True
     if "logic" in cond:
-        return any(p.get("field") == "response_code" for p in cond.get("parts", []))
+        # Recurse through every child (parts AND a NOT's item), at any depth.
+        return any(_expression_uses_response_fields(c, None)
+                   for c in iter_condition_children(cond))
     return False
+
+
+def _find_response_code_value(cond):
+    """Return the value of a response_code leaf anywhere in the tree, else None."""
+    if not isinstance(cond, dict):
+        return None
+    if cond.get("field") == "response_code":
+        return cond.get("value")
+    for child in iter_condition_children(cond):
+        v = _find_response_code_value(child)
+        if v is not None:
+            return v
+    return None
 
 
 def _make_non_convertible(rule, reason):

@@ -384,6 +384,12 @@ def parse_expression(expression):
     if expr == "true":
         return {"always": True}, None
 
+    # Strip outer parens FIRST — a fully-wrapped `(A or B)` hides its top-level
+    # OR at depth 1, so an _has_or check before stripping would miss it and fall
+    # through to single-condition parse, silently dropping every branch but the
+    # first. Cloudflare exports routinely wrap expressions in parens.
+    expr = _strip_outer_parens(expr)
+
     # OR (and anything the simple matcher below can't structure) is handled by
     # the full recursive-descent parser, which produces a proper structured
     # {"logic": "or"/"and"/"not", ...} tree. Deferring OR to raw_expression (the
@@ -392,11 +398,8 @@ def parse_expression(expression):
     if _has_or(expr):
         try:
             return parse_expression_full(expr), None
-        except _ParseError:
-            return None, expression  # genuinely unparseable → defer to raw
-
-    # Strip outer parens
-    expr = _strip_outer_parens(expr)
+        except (_ParseError, RecursionError):
+            return None, expression  # unparseable / pathological → defer to raw
 
     # Try dual AND first (before single, to avoid partial matches)
     parts = _split_and(expr)
@@ -416,8 +419,25 @@ def parse_expression(expression):
     # before giving up to raw.
     try:
         return parse_expression_full(expr), None
-    except _ParseError:
+    except (_ParseError, RecursionError):
         return None, expression
+
+
+def iter_condition_children(cond):
+    """Yield the direct child condition nodes of a logic node.
+
+    A condition tree has two logic shapes: AND/OR store children under "parts",
+    NOT stores its single child under "item". Every tree walker MUST descend
+    through both, or it silently skips whatever sits under a NOT — the bug class
+    that surfaced when parse_expression started structuring OR/NOT instead of
+    deferring to raw text. Route all walkers through this so none can forget.
+    """
+    if not isinstance(cond, dict):
+        return
+    for p in cond.get("parts", []):
+        yield p
+    if "item" in cond:
+        yield cond["item"]
 
 
 def extract_orp_headers(condition):
@@ -444,10 +464,8 @@ def extract_orp_headers_from_raw(raw_expression):
 
 def _collect_orp(cond, headers):
     if "logic" in cond:
-        for p in cond.get("parts", []):
-            _collect_orp(p, headers)
-        if "item" in cond:  # NOT node — child is under "item", not "parts"
-            _collect_orp(cond["item"], headers)
+        for child in iter_condition_children(cond):
+            _collect_orp(child, headers)
     elif "field" in cond:
         for h in FIELD_TO_ORP_HEADERS.get(cond["field"], []):
             headers.add(h)
@@ -464,10 +482,8 @@ def extract_kvs_triggers(condition):
 
 def _collect_kvs(cond, triggers):
     if "logic" in cond:
-        for p in cond.get("parts", []):
-            _collect_kvs(p, triggers)
-        if "item" in cond:  # NOT node — child is under "item", not "parts"
-            _collect_kvs(cond["item"], triggers)
+        for child in iter_condition_children(cond):
+            _collect_kvs(child, triggers)
     elif "field" in cond:
         t = FIELD_KVS_TRIGGERS.get(cond["field"])
         if t:
@@ -491,6 +507,12 @@ def extract_host_filter(condition, expression):
 def _scan_host_from_condition(cond):
     """Extract host filter from parsed condition."""
     if "logic" in cond:
+        # Deliberately do NOT descend into a NOT node's "item": a host inside a
+        # negation ("not http.host eq x") is an EXCLUSION, not a positive scope —
+        # returning it as the host filter would scope the rule to exactly the
+        # host it excludes. A negated host condition means "applies globally".
+        if cond.get("logic") == "not":
+            return None
         for p in cond.get("parts", []):
             hosts = _scan_host_from_condition(p)
             if hosts is not None:

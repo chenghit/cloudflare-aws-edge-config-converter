@@ -188,7 +188,12 @@ def _condition_untestable(cond):
     if cond.get("op") == "in_kvs":
         return True
     if "logic" in cond:
-        return any(_condition_untestable(p) for p in cond.get("parts", []))
+        # Descend parts AND a NOT node's item — a negated untestable condition
+        # (e.g. `not ip.src eq x`) is still untestable.
+        children = list(cond.get("parts", []))
+        if "item" in cond:
+            children.append(cond["item"])
+        return any(_condition_untestable(p) for p in children)
     return False
 
 
@@ -209,7 +214,10 @@ def _skip_reason(cond):
     if cond.get("op") == "in_kvs":
         return "Requires request from IP in KVS list"
     if "logic" in cond:
-        for p in cond.get("parts", []):
+        children = list(cond.get("parts", []))
+        if "item" in cond:
+            children.append(cond["item"])
+        for p in children:
             if _condition_untestable(p):
                 return _skip_reason(p)
     return "Complex condition — test manually"

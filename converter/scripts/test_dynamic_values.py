@@ -466,6 +466,50 @@ check("(a) NOT(continent) still triggers KVS provisioning",
       str(_parser.extract_kvs_triggers({"logic": "not", "item": {"field": "continent", "op": "eq", "value": "EU"}})),
       expect_substr="needs_continent")
 
+print("== T1: parenthesized OR is not truncated ==")
+_c, _raw = _parser.parse_expression('(http.host eq "a.com" or http.host eq "b.com")')
+check("(A or B) -> structured OR", str(_c), expect_substr="'logic': 'or'")
+check("(A or B) keeps both branches", str(_c), expect_substr="b.com")
+
+print("== T13: NOT-node walkers (iter_condition_children) — no skip, no crash ==")
+# ip.src cache guard sees ip.src under NOT
+check("ip.src under NOT trips cache guard",
+      (lambda r: (r if isinstance(r, dict) else r[0]).get("type"))(
+          _proc.process_cache_rule({"id": "r", "expression": 'not (ip.src eq "1.2.3.4")',
+                                     "action_parameters": {"cache": False}}, {}, "http_request_cache_settings")),
+      expect_substr="non_convertible")
+# KVS trigger under NOT
+check("continent under NOT triggers KVS",
+      str(_parser.extract_kvs_triggers({"logic": "not", "item": {"field": "continent", "op": "eq", "value": "EU"}})),
+      expect_substr="needs_continent")
+# response_code found under nested NOT
+check("response_code found under nested NOT",
+      str(_proc._find_response_code_value({"logic": "and", "parts": [
+          {"field": "host", "op": "eq", "value": "x"},
+          {"logic": "not", "item": {"field": "response_code", "op": "eq", "value": 404}}]})),
+      expect_substr="404")
+# path extraction on a NOT node doesn't crash and stays global
+check("path pattern on NOT node -> * (no crash)",
+      _proc._extract_path_pattern({"logic": "not", "item": {"field": "uri.path", "op": "eq", "value": "/a"}}, ""),
+      expect_substr="*")
+# host filter under NOT is global, not scoped to the excluded host
+check("host under NOT -> global (None)",
+      str(_parser.extract_host_filter({"logic": "not", "item": {"field": "host", "op": "eq", "value": "x.com"}}, "")),
+      expect_substr="None")
+# iter_condition_children yields both parts and item
+check("iter_condition_children yields item",
+      str([c.get("field") for c in _parser.iter_condition_children(
+          {"logic": "not", "item": {"field": "ip.src", "op": "eq", "value": "1"}})]),
+      expect_substr="ip.src")
+
+print("== T12: pathological deep-nested OR falls back to raw (no RecursionError) ==")
+_deep = "(" * 3000 + 'http.host eq "x"' + ")" * 3000 + ' or http.host eq "y"'
+try:
+    _c, _raw = _parser.parse_expression(_deep)
+    check("deep OR -> no crash", "ok", forbid_substr="__never__")
+except RecursionError:
+    check("deep OR -> no crash", "RecursionError", forbid_substr="RecursionError")
+
 # ── classifier alignment: every CF_FIELD_MAP value must be handled somewhere ──
 print("== invariant: every mapped field is classifiable (no silent drift) ==")
 _PREAMBLE = _gen._PREAMBLE_FIELDS

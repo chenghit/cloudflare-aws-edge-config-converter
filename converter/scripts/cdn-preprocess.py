@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdn_expr_parser import (
     parse_expression, extract_orp_headers, extract_orp_headers_from_raw,
     extract_kvs_triggers, extract_host_filter, extract_path_pattern_single,
-    split_or,
+    split_or, iter_condition_children,
 )
 from cdn_rule_processors import (
     process_redirect_rule, process_rewrite_rule, process_config_rule,
@@ -460,28 +460,18 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
             _add_conditional_cache_rule(ir, result)
             return
         path = _extract_path_from_result(result, cond, expr)
-        # For extension-based cache rules with multiple extensions,
-        # create individual behaviors per extension
+        # For extension-based cache rules with multiple extensions, create an
+        # individual behavior per extension. _extract_extensions_from_condition
+        # finds the extension list at any positive depth (and correctly ignores
+        # a NOT node, where the extensions are an exclusion, not a fan-out set).
         result_cond = result.get("condition") or cond
-        if result_cond and "logic" in result_cond:
-            for p in result_cond.get("parts", []):
-                if (p.get("field") == "uri.path.extension" and
-                        p.get("op") == "in" and isinstance(p.get("value"), list) and
-                        len(p["value"]) > 1):
-                    for ext in p["value"]:
-                        ext_path = f"*.{ext}"
-                        beh = find_or_create_behavior(ir, ext_path, domain_config, origin_content)
-                        _apply_cache_setting(beh, result)
-                    return
-        elif result_cond and result_cond.get("field") == "uri.path.extension":
-            if (result_cond.get("op") == "in" and
-                    isinstance(result_cond.get("value"), list) and
-                    len(result_cond["value"]) > 1):
-                for ext in result_cond["value"]:
-                    ext_path = f"*.{ext}"
-                    beh = find_or_create_behavior(ir, ext_path, domain_config, origin_content)
-                    _apply_cache_setting(beh, result)
-                return
+        exts = _extract_extensions_from_condition(result_cond)
+        if len(exts) > 1:
+            for ext in exts:
+                ext_path = f"*.{ext}"
+                beh = find_or_create_behavior(ir, ext_path, domain_config, origin_content)
+                _apply_cache_setting(beh, result)
+            return
         beh = find_or_create_behavior(ir, path, domain_config, origin_content)
         _apply_cache_setting(beh, result)
         return
@@ -522,8 +512,8 @@ def _collect_kvs_ip_entries(ir, condition):
     if condition is None:
         return
     if "logic" in condition:
-        for p in condition.get("parts", []):
-            _collect_kvs_ip_entries(ir, p)
+        for child in iter_condition_children(condition):
+            _collect_kvs_ip_entries(ir, child)
         return
     if condition.get("op") in ("in_kvs", "not_in_kvs"):
         list_name = condition["value"]
@@ -571,7 +561,10 @@ def _extract_path_from_result(result, cond, expr):
     if c.get("always"):
         return "*"
     if "logic" in c:
-        for p in c["parts"]:
+        # Only positive AND/OR branches yield a path prefix; a NOT node has no
+        # "parts" (would KeyError) and a negated path is an exclusion, not a
+        # scope — fall back to "*".
+        for p in c.get("parts", []):
             pp = extract_path_pattern_single(p)
             if pp and pp != "*":
                 return pp
