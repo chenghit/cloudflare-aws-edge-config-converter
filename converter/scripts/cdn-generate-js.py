@@ -24,7 +24,8 @@ from pathlib import Path
 
 # Add scripts dir to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
-from cdn_expr_parser import parse_expression_full, parse_dynamic_expression, CF_FIELD_MAP
+from cdn_expr_parser import (parse_expression_full, parse_dynamic_expression,
+                             CF_FIELD_MAP, iter_condition_children)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -277,31 +278,36 @@ def _condition_to_js(cond, target="cff", indent=2):
 
     if "logic" in cond:
         logic = cond["logic"]
-        # Three-valued boolean algebra over {None=always, _NEVER=never, str}:
-        #   AND: any _NEVER → _NEVER; drop None (identity); none left → None
-        #   OR:  any None → None (absorbing); drop _NEVER; none left → _NEVER
-        #   NOT: not(None)=_NEVER, not(_NEVER)=_NEVER (an absorbing value negates
-        #        to "never" for fail-closed purposes), else !(inner)
-        if logic == "and":
+        # _NEVER means "un-evaluable at the edge" — NOT boolean false. Its correct
+        # behavior depends on polarity (how many NOTs are above it), so it cannot
+        # be soundly dropped from an OR and then negated: `not(A or NEVER)` must
+        # NOT become `!(A)` (that fires when the un-evaluable branch would have
+        # matched — fail OPEN). The only polarity-sound rule is: _NEVER is
+        # CONTAGIOUS — any logic node containing it fails the whole condition
+        # closed. (OR branches that are merely unmappable are already pruned
+        # upstream by the processor's _prune_unmappable; here _NEVER is a
+        # defense-in-depth backstop for what slipped through, e.g. continent in
+        # a Lambda@Edge target.)
+        #   None = "always true" is the identity for AND / absorbing for OR.
+        if logic in ("and", "or"):
             parts = [_condition_to_js(p, target, indent) for p in cond.get("parts", [])]
             if any(p is _NEVER for p in parts):
                 return _NEVER
-            live = [p for p in parts if p is not None]
-            if not live:
-                return None
-            return " && ".join(f"({p})" if " || " in p else p for p in live)
-        if logic == "or":
-            parts = [_condition_to_js(p, target, indent) for p in cond.get("parts", [])]
+            if logic == "and":
+                live = [p for p in parts if p is not None]
+                if not live:
+                    return None  # all unconditional → unconditional
+                return " && ".join(f"({p})" if " || " in p else p for p in live)
+            # or
             if any(p is None for p in parts):
+                return None  # an always-true branch makes the OR unconditional
+            if not parts:
                 return None
-            live = [p for p in parts if p is not _NEVER]
-            if not live:
-                return _NEVER
-            return " || ".join(f"({p})" if " && " in p else p for p in live)
+            return " || ".join(f"({p})" if " && " in p else p for p in parts)
         if logic == "not":
             inner = _condition_to_js(cond.get("item"), target, indent)
             if inner is None or inner is _NEVER:
-                return _NEVER
+                return _NEVER  # not(always)=never; not(un-evaluable)=un-evaluable
             return f"!({inner})"
         # Unknown logic operator → fail closed rather than KeyError.
         print(f"  WARN: unknown logic operator, emitting false: {logic}", file=sys.stderr)
@@ -831,9 +837,22 @@ def _generate_op_js(op, target="cff", indent="  "):
 
 
 def _needs_kvs(ir):
-    """Check if any behavior needs KVS."""
+    """Check if the DOMAIN needs a KVS at all (drives resource provisioning)."""
     kvs = ir.get("metadata", {}).get("kvs_requirements", {})
     return any(kvs.values())
+
+
+def _ops_need_kvs(ops):
+    """Check if a specific handler's op list needs a cf.kvs() handle at runtime.
+
+    Used per-handler so a response-only KVS need (continent in a viewer-response
+    rule) doesn't leak `cf.kvs()` into the viewer-request handler that never uses
+    it. bulk_redirect and serve_error_inline read KVS via their templates;
+    _op_uses_kvs covers continent/is_eu preamble and in_kvs/not_in_kvs."""
+    return any(
+        op.get("type") in ("bulk_redirect", "serve_error_inline") or _op_uses_kvs(op)
+        for op in ops
+    )
 
 
 def _needs_qs_helper(all_ops):
@@ -884,12 +903,7 @@ def _cond_has_op(cond, ops):
         return False
     if cond.get("op") in ops:
         return True
-    for p in cond.get("parts", []):
-        if _cond_has_op(p, ops):
-            return True
-    if "item" in cond:
-        return _cond_has_op(cond["item"], ops)
-    return False
+    return any(_cond_has_op(c, ops) for c in iter_condition_children(cond))
 
 
 def _op_uses_kvs(op):
@@ -912,12 +926,7 @@ def _cond_has_field(cond, fields):
         return False
     if cond.get("field") in fields:
         return True
-    for p in cond.get("parts", []):
-        if _cond_has_field(p, fields):
-            return True
-    if "item" in cond:
-        return _cond_has_field(cond["item"], fields)
-    return False
+    return any(_cond_has_field(c, fields) for c in iter_condition_children(cond))
 
 
 def _generate_bulk_redirect_block(indent="  "):
@@ -967,9 +976,11 @@ def _generate_continent_preamble(ops, indent="  "):
 def generate_viewer_request_js(ir, target="cff"):
     """Generate complete viewer_request.js content."""
     lines = []
-    needs_kvs_flag = _needs_kvs(ir)
     request_ops = [op for beh in ir.get("cache_behaviors", [])
                    for op in beh.get("viewer_request_ops", [])]
+    # Compute KVS need from THIS handler's ops (not the domain-wide flag) so a
+    # response-only KVS need doesn't emit an unused cf.kvs() here (finding #5).
+    needs_kvs_flag = _ops_need_kvs(request_ops)
     needs_crypto_flag = _needs_crypto(request_ops)
 
     # Imports

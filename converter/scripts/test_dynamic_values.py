@@ -416,20 +416,30 @@ for _e in ['ip.src in $allow or not (http.host eq "z.com" and ip.src in $deny)',
     except Exception as _ex:
         check(f"no crash: {_e[:32]}", f"CRASH {type(_ex).__name__}", forbid_substr="CRASH")
 
-print("== S2: boolean algebra over false-sentinel (no fail-open / positional bug) ==")
-check("false || X drops the sentinel",
+print("== S2: _NEVER is contagious (polarity-sound, no fail-open) ==")
+# The generator's _NEVER backstop fails the WHOLE condition closed — it does NOT
+# drop an un-evaluable OR branch (dropping-then-negating is fail-open under NOT;
+# see the enumerative property test below). OR-branch pruning of merely-unmappable
+# fields is the processor's job (_prune_unmappable), done before codegen.
+check("OR with un-evaluable branch fails closed (contagious)",
       _gen.condition_to_js({"logic": "or", "parts": [
           {"field": "subdivision_2", "op": "eq", "value": "x"},
           {"field": "uri.path", "op": "eq", "value": "/a"}]}, "cff"),
-      expect_substr="request.uri === '/a'", forbid_substr="false")
-check("X && false collapses to false",
+      expect_substr="false")
+check("X && un-evaluable collapses to false",
       _gen.condition_to_js({"logic": "and", "parts": [
           {"field": "uri.path", "op": "eq", "value": "/a"},
           {"field": "subdivision_2", "op": "eq", "value": "x"}]}, "cff"),
       expect_substr="false")
-check("not(sentinel) stays false (no fail-open)",
+check("not(un-evaluable) stays false (no fail-open)",
       _gen.condition_to_js({"logic": "not", "item": {"logic": "or", "parts": [
           {"field": "subdivision_2", "op": "eq", "value": "x"}]}}, "cff"),
+      expect_substr="false", forbid_substr="!(")
+# The exact #1 fail-open: not(A or un-evaluable) must be false, NOT !(A).
+check("not(A or un-evaluable) fails closed (finding #1)",
+      _gen.condition_to_js({"logic": "not", "item": {"logic": "or", "parts": [
+          {"field": "uri.path", "op": "eq", "value": "/a"},
+          {"field": "continent", "op": "eq", "value": "EU"}]}}, "lambda"),
       expect_substr="false", forbid_substr="!(")
 # #6: a real OR whose rendered form starts with a `/*` regex and ends in
 # `=== false` must NOT be misread as a never-match sentinel and collapsed.
@@ -492,12 +502,18 @@ check("ip.src under NOT trips cache guard",
 check("continent under NOT triggers KVS",
       str(_parser.extract_kvs_triggers({"logic": "not", "item": {"field": "continent", "op": "eq", "value": "EU"}})),
       expect_substr="needs_continent")
-# response_code found under nested NOT
-check("response_code found under nested NOT",
+# positive response_code found under nested logic
+check("positive response_code found under AND",
+      str(_proc._find_response_code_value({"logic": "and", "parts": [
+          {"field": "host", "op": "eq", "value": "x"},
+          {"field": "response_code", "op": "eq", "value": 502}]})),
+      expect_substr="502")
+# a response_code under a NOT is an EXCLUSION — must NOT be extracted (finding #3)
+check("response_code under NOT is not extracted",
       str(_proc._find_response_code_value({"logic": "and", "parts": [
           {"field": "host", "op": "eq", "value": "x"},
           {"logic": "not", "item": {"field": "response_code", "op": "eq", "value": 404}}]})),
-      expect_substr="404")
+      expect_substr="None")
 # path extraction on a NOT node doesn't crash and stays global
 check("path pattern on NOT node -> * (no crash)",
       _proc._extract_path_pattern({"logic": "not", "item": {"field": "uri.path", "op": "eq", "value": "/a"}}, ""),
@@ -576,6 +592,70 @@ for short in sorted(set(_parser.CF_FIELD_MAP.values())):
         unclassified.append(short)
 check("no CF_FIELD_MAP value is unclassified", str(unclassified),
       expect_substr="[]", forbid_substr="'")
+
+# ── PROPERTY TEST: no fail-open across ALL small condition trees ─────────────
+# Enumerate every condition tree (depth ≤ 2) over three leaves — two mappable
+# (a, b) and one un-evaluable in the lambda target (u = continent). Render each
+# to JS, evaluate it, and assert the core invariant: whenever the generated
+# expression E is TRUE, the ORIGINAL condition is true under BOTH interpretations
+# of the un-evaluable leaf (i.e. the guarded op never fires when it shouldn't —
+# NO FAIL-OPEN). This proves the whole class rather than spot-checking examples;
+# it is what mechanically catches the NOT-over-OR polarity bug (finding #1).
+print("== property test: condition rendering is never fail-open ==")
+_LEAVES = {
+    "a": {"field": "uri.path", "op": "eq", "value": "/a"},
+    "b": {"field": "host", "op": "eq", "value": "/b"},
+    "u": {"field": "continent", "op": "eq", "value": "EU"},  # un-evaluable in lambda
+}
+
+def _trees(depth):
+    for s in _LEAVES:
+        yield ("leaf", s)
+    if depth == 0:
+        return
+    subs = list(_trees(depth - 1))
+    for sub in subs:
+        yield ("not", sub)
+    for x in subs:
+        for y in subs:
+            yield ("and", x, y)
+            yield ("or", x, y)
+
+def _to_cond(t):
+    if t[0] == "leaf":
+        return dict(_LEAVES[t[1]])
+    if t[0] == "not":
+        return {"logic": "not", "item": _to_cond(t[1])}
+    return {"logic": t[0], "parts": [_to_cond(t[1]), _to_cond(t[2])]}
+
+def _sym(t, va, vb, vu):
+    if t[0] == "leaf":
+        return {"a": va, "b": vb, "u": vu}[t[1]]
+    if t[0] == "not":
+        return not _sym(t[1], va, vb, vu)
+    l, r = _sym(t[1], va, vb, vu), _sym(t[2], va, vb, vu)
+    return (l and r) if t[0] == "and" else (l or r)
+
+def _js_fires(E, va, vb):
+    if E is None:
+        return True
+    if E == "false":
+        return False
+    py = (E.replace("request.uri === '/a'", "va")
+           .replace("request.headers.host[0].value === '/b'", "vb")
+           .replace("!", "not ").replace("&&", " and ").replace("||", " or ")
+           .replace("=== ", "== "))
+    return bool(eval(py, {}, {"va": va, "vb": vb}))
+
+_viol = 0
+for _t in _trees(2):
+    _E = _gen.condition_to_js(_to_cond(_t), "lambda")
+    for _va in (False, True):
+        for _vb in (False, True):
+            if _js_fires(_E, _va, _vb) and not (
+                    _sym(_t, _va, _vb, True) and _sym(_t, _va, _vb, False)):
+                _viol += 1
+check("no fail-open over all depth-2 condition trees", str(_viol), expect_substr="0")
 
 print()
 if FAILURES:

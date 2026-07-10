@@ -158,7 +158,7 @@ def _prune_unmappable(condition, target="cff"):
     # the rest. If every branch is dropped, the whole condition is unmappable.
     if "logic" in condition and condition["logic"] == "or":
         kept, first_bad = [], None
-        for p in condition["parts"]:
+        for p in condition.get("parts", []):
             bad = condition_unmappable_fields(p, target)
             if bad:
                 first_bad = first_bad or bad[0][1]
@@ -871,25 +871,32 @@ def _expression_uses_response_fields(cond, raw_expr):
     return False
 
 
-def _find_response_code_value(cond):
-    """Return the value of a POSITIVE response_code leaf anywhere in the tree.
+def _find_response_code_value(cond, negated=False):
+    """Return the code named by a POSITIVE `response_code eq N` leaf, else None.
 
-    A negated leaf (`not (http.response.code eq 404)`, op `not_eq`/`not_*`) means
-    "exclude 404", NOT "the code is 404" — using its value would install a custom
-    error response for exactly the code the rule excludes. Skip negated leaves.
-    Returns None if there is no positive response_code equality.
+    "Positive" means: op `eq` AND an even number of negations above it. A code
+    reached through a negation — either the `not_eq` op prefix OR a `logic:not`
+    wrapper anywhere above (`not (code eq 500 and …)`) — is an EXCLUSION, not the
+    code to serve; returning it would install a custom error for exactly the
+    code the rule excludes. `negated` tracks the running polarity.
     """
     if not isinstance(cond, dict):
         return None
+    if "logic" in cond:
+        # A NOT flips polarity for everything beneath it.
+        child_negated = negated ^ (cond.get("logic") == "not")
+        for child in iter_condition_children(cond):
+            v = _find_response_code_value(child, child_negated)
+            if v is not None:
+                return v
+        return None
     if cond.get("field") == "response_code":
         op = cond.get("op", "eq")
-        if op == "eq":  # only a positive equality names the code
+        base_op = op[4:] if op.startswith("not_") else op
+        leaf_negated = negated ^ op.startswith("not_")
+        if base_op == "eq" and not leaf_negated:
             return cond.get("value")
         return None
-    for child in iter_condition_children(cond):
-        v = _find_response_code_value(child)
-        if v is not None:
-            return v
     return None
 
 

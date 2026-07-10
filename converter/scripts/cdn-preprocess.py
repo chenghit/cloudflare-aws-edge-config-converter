@@ -478,6 +478,15 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
                 beh = find_or_create_behavior(ir, ext_path, domain_config, origin_content)
                 _apply_cache_setting(beh, result)
             return
+        # A cache setting is applied to a specific behavior (not via the shared
+        # CFF), so its condition MUST be representable as that behavior's single
+        # path pattern. A compound scope (host AND path, host AND ext, 3+ AND,
+        # …) can't be — placing it on `_extract_path_from_result`'s best-effort
+        # path (often `*`) would apply the setting site-wide. Route those to
+        # Lambda@Edge conditional-cache, which evaluates the full expr at runtime.
+        if not _cache_cond_is_single_path(result_cond):
+            _add_conditional_cache_rule(ir, result, expr)
+            return
         beh = find_or_create_behavior(ir, path, domain_config, origin_content)
         _apply_cache_setting(beh, result)
         return
@@ -572,9 +581,14 @@ def _extract_path_from_result(result, cond, expr):
     if c.get("always"):
         return "*"
     if "logic" in c:
-        # Only positive AND/OR branches yield a path prefix; a NOT node has no
-        # "parts" (would KeyError) and a negated path is an exclusion, not a
-        # scope — fall back to "*".
+        # A top-level OR spans multiple paths — no single pattern represents it,
+        # and picking the first branch would create a behavior at only one path
+        # (a phantom scope). The shared CFF runs on the default behavior and
+        # evaluates the full condition anyway, so use `*`. For AND, a path branch
+        # IS the real scope (host eq x AND uri.path eq /a → /a), so keep the
+        # first specific path. NOT has no "parts" (→ `*`).
+        if c.get("logic") == "or":
+            return "*"
         for p in c.get("parts", []):
             pp = extract_path_pattern_single(p)
             if pp and pp != "*":
@@ -702,8 +716,19 @@ def _add_conditional_cache_rule(ir, result, expr=None):
     structured, so a non-splittable OR has raw_expression=None but a valid expr.
     """
     params = result.get("params", {})
+    # Use the deferred raw expr, else the original expression text. Do NOT fall
+    # back to "true" (match-all) on an empty expr — that would apply the cache
+    # setting to every request (fail open). A genuinely unconditional cache rule
+    # already arrives with expr == "true" from the processor, so a missing expr
+    # here means something is wrong: skip it rather than cache everything.
+    rule_expr = result.get("raw_expression") or expr
+    if not rule_expr:
+        print(f"  WARN: conditional cache rule has no expression; skipping "
+              f"(rule {result.get('cf_source_rule','?')}) rather than caching all",
+              file=sys.stderr)
+        return
     entry = {
-        "raw_expression": result.get("raw_expression") or expr or "true",
+        "raw_expression": rule_expr,
         "cf_source_rule": result.get("cf_source_rule", ""),
         "description": result.get("description", ""),
     }
@@ -838,6 +863,22 @@ def _extract_extensions_from_condition(condition):
         if condition.get("op") == "eq" and isinstance(condition.get("value"), str):
             return [condition["value"]]
     return []
+
+
+def _cache_cond_is_single_path(condition):
+    """True if a cache-rule condition can be represented by ONE CloudFront path
+    pattern (so applying the setting to one behavior is faithful).
+
+    That means: unconditional (→ `*`), or a single leaf on uri.path / uri /
+    uri.path.extension. Anything compound (a logic node — AND/OR/NOT — or a leaf
+    on some other field like host) is NOT single-path and must be handled by
+    Lambda@Edge instead of mis-placed on a best-effort behavior.
+    """
+    if condition is None or condition.get("always"):
+        return True
+    if "logic" in condition:
+        return False
+    return condition.get("field") in ("uri.path", "uri", "uri.path.extension")
 
 
 def _condition_is_pure_extension(condition):
