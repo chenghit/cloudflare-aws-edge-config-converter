@@ -293,11 +293,14 @@ def main():
             manifest = json.load(f)
 
     results = []
+    s3_hosts = []  # hosts with an S3 origin — need a manual bucket-policy step
     for ir_file in ir_files:
         with open(ir_file) as f:
             ir = json.load(f)
         report = validate_domain(ir, output_dir, manifest)
         hostname = report["hostname"]
+        if any(b.get("origin", {}).get("s3_origin") for b in ir.get("cache_behaviors", [])):
+            s3_hosts.append(hostname)
         # Write per-domain report
         report_path = os.path.join(val_dir, f"{hostname}-v3.json")
         with open(report_path, "w") as f:
@@ -308,9 +311,28 @@ def main():
     pass_count = sum(1 for r in results if r["overall_status"] == "PASS")
     fail_count = sum(1 for r in results if r["overall_status"] == "FAIL")
 
+    # A CloudFront OAC is only half of S3 access — the user MUST also add an S3
+    # bucket policy allowing the distribution, or every request 403s. The
+    # converter can't do it (the bucket may be in another account, and the
+    # distribution ARN isn't known until apply). Surface it so the agent tells
+    # the user and doesn't report "done" on an S3 domain that will 403.
+    # One POST_ACTION value, multi-step (2-space-indented continuation lines per
+    # SCRIPT_STANDARDS / SKILL.md) — a second `POST_ACTION:` key would break parsing.
+    s3_step = ""
+    if s3_hosts:
+        s3_step = (
+            f"\n  MANDATORY MANUAL STEP for {len(s3_hosts)} S3-origin domain(s) "
+            f"({', '.join(s3_hosts)}): the generated OAC is only the CloudFront side. "
+            f"After `terraform apply`, the user MUST add an S3 bucket policy allowing "
+            f"cloudfront.amazonaws.com with the distribution ARN (AWS:SourceArn), or S3 "
+            f"returns 403 for every request. Exact policy JSON is in conversion_report.md "
+            f"('Post-Deployment: S3 Bucket Policy'). Tell the user this is required. "
+            f"(S3 website-endpoint origins instead need public read access — no OAC.)")
+
     if fail_count == 0:
         print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nDOMAINS: {len(results)}\nPASSED: {pass_count}\n"
-              f"POST_ACTION: If user language is not English, translate conversion_report.md to user language and save as conversion_report_{{lang}}.md")
+              f"POST_ACTION: If user language is not English, translate conversion_report.md to user language and save as conversion_report_{{lang}}.md"
+              f"{s3_step}")
     else:
         failed_items = "\n".join(
             f"  {r['hostname']}: {', '.join(c['name'] + '=' + c['status'] for c in r['checks'] if c['status'] == 'FAIL')}"

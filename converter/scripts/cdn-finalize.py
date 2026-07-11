@@ -207,7 +207,15 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     """Generate conversion_report.md content."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     total_behaviors = sum(len(ir["cache_behaviors"]) for ir in all_irs)
-    has_s3 = any(ir["metadata"].get("origin_type") == "s3" for ir in all_irs)
+    # Detect S3 the SAME way the scaffold decides to generate an OAC: any
+    # behavior whose origin is S3 (origin['s3_origin']). Keying on the
+    # domain-level origin_type=='s3' alone would miss a Cloud-Connector→S3
+    # origin (set per-behavior), leaving that OAC without the bucket-policy
+    # guidance below.
+    has_s3 = any(
+        b.get("origin", {}).get("s3_origin")
+        for ir in all_irs for b in ir.get("cache_behaviors", [])
+    )
 
     lines = [
         "# Cloudflare → CloudFront Conversion Report",
