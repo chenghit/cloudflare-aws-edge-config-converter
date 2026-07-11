@@ -10,6 +10,7 @@ from cdn_expr_parser import (
     extract_kvs_triggers, extract_host_filter, CF_FIELD_MAP,
     extract_path_pattern_single, iter_condition_children,
     condition_unmappable_fields, value_expression_unmappable,
+    host_leaf_is_routing,
 )
 
 # ── Supported CloudFront custom error response status codes ──────────────────
@@ -76,9 +77,22 @@ def _uses_ip_src(condition, raw_expr=None):
     """
     if _condition_uses_ip_src(condition):
         return True
-    if raw_expr and _RE_RAW_IP_SRC.search(raw_expr):
+    # Strip quoted string literals first so an `ip.src`-looking token INSIDE a
+    # literal (e.g. `uri contains "ip.src eq 1.2.3.4"`) can't false-match and
+    # spuriously mark the rule non-convertible. (Only reachable on the rare
+    # raw-fallback path, and it already fails safe, but this removes the false
+    # positive entirely.)
+    if raw_expr and _RE_RAW_IP_SRC.search(_strip_string_literals(raw_expr)):
         return True
     return False
+
+
+def _strip_string_literals(expr):
+    """Blank out "..." and '...' string-literal contents in a raw expression, so
+    a field-name scan can't match a token that only appears inside a literal."""
+    expr = re.sub(r'"[^"]*"', '""', expr)
+    expr = re.sub(r"'[^']*'", "''", expr)
+    return expr
 
 
 def _check_ip_list(list_name, ip_lists):
@@ -898,12 +912,15 @@ def _find_response_code_value(cond, negated=False):
         (returning the first would silently drop the rest); a negated code is
         an EXCLUSION, not the code to serve.
       - an AND is allowed ONLY when it reduces to exactly one `code eq N` leaf
-        after dropping redundant per-host routing conjuncts (`host eq x`). The
-        pipeline routes one distribution per host, so `code eq 500 and host eq
-        x` is really just `code eq 500` on this host's distribution — refusing
-        it (as a blanket "logic node → None" did) made a convertible rule
-        non-convertible. A non-host, non-code conjunct (e.g. `uri.path eq /api`)
-        still can't scope a per-distribution custom error → None.
+        after dropping redundant per-host ROUTING conjuncts (`host eq/in/ne`).
+        The pipeline routes one distribution per host, so `code eq 500 and host
+        eq x` is really just `code eq 500` on this host's distribution. But only
+        a ROUTING host leaf is redundant — a LIVE host predicate (`host contains
+        "internal"`, `len(host) gt 5`) is a real scope the custom error can't
+        express per-distribution, so it must block extraction (→ None →
+        non-convertible), NOT be silently erased (which would intercept the code
+        on every request site-wide). A non-host, non-code conjunct (uri.path,
+        geo) likewise → None.
     Returns an int (coerced from a quoted "404") or None.
     """
     if not isinstance(cond, dict):
@@ -915,8 +932,10 @@ def _find_response_code_value(cond, negated=False):
         for part in cond.get("parts", []):
             if not isinstance(part, dict) or "logic" in part:
                 return None  # nested logic → can't reduce to one clean code
+            if host_leaf_is_routing(part):
+                continue  # redundant per-host ROUTING conjunct — drop it
             if part.get("field") == "host":
-                continue  # redundant per-host routing conjunct — drop it
+                return None  # LIVE host predicate (contains/len/…) — real scope
             if part.get("field") == "response_code":
                 c = _find_response_code_value(part)
                 if c is None or code is not None:

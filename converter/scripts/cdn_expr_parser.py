@@ -253,186 +253,216 @@ def _collect_kvs(cond, triggers):
 
 
 def extract_host_filter(condition, expression):
-    """Determine which hostnames a rule applies to (i.e. which distributions).
+    """Determine which distributions a rule applies to, as a HOST FILTER that
+    ``host_filter_applies(filter, hostname)`` evaluates against a CONCRETE
+    distribution hostname (one per proxied CNAME, from DNS).
 
-    Returns a HOST FILTER, one of:
-      - None                 -> global (applies to every distribution)
-      - {"include": [hosts]} -> applies only to these hosts
-      - {"exclude": [hosts]} -> applies to every host EXCEPT these
-        (from a negated host test: `not (http.host eq x)` / `http.host ne x`,
-        which in Cloudflare means "all hosts except x")
-    rule_applies_to_domain() interprets this per distribution.
+    Returns one of:
+      - None                          -> global (applies to every distribution)
+      - {"tree": <host-condition>}    -> evaluate the (host-only) condition tree
+                                         against each concrete hostname
+
+    Why a tree, not an include/exclude set: host values can carry a zone
+    wildcard (``*.example.com`` from a full_uri pattern or ``host in {*.x}``),
+    and abstract set intersect/union over wildcards is unsound — that produced
+    fail-opens and silent drops. Evaluating the tree against the REAL
+    distribution hostnames (via hostname_matches, which already handles
+    wildcards) sidesteps set algebra entirely: ``*.example.com`` simply matches
+    every real subdomain in the zone. The tree keeps ONLY host / full_uri leaves
+    (a non-host leaf like uri.path is dropped to "unconstrained"), so what
+    survives is purely the host scope. OR is expected to have been split into
+    independent rules upstream, but the evaluator handles it correctly anyway.
     """
     if condition is None:
         # raw_expression -- scan the original expression for http.host
         hosts = _scan_host_from_expression(expression)
-        return {"include": hosts} if hosts else None
+        return {"tree": _hosts_to_tree(hosts)} if hosts else None
     if condition.get("always"):
         return None  # global
-    return _scan_host_from_condition(condition)
+    tree = _host_scope_tree(condition)
+    return None if tree is None else {"tree": tree}
 
 
-# ── Host-filter set algebra ──────────────────────────────────────────────────
-# A host filter is the set of hostnames H for which the condition is SATISFIABLE
-# by some request to H: None = all hosts (global), {"include":[...]} = exactly
-# those, {"exclude":[...]} = all except those. `None` is the SAFE fallback — a
-# rule left global still carries its full condition, which gates per-request in
-# the CFF, so returning global never fires a rule where the condition is false.
-# include/exclude are provable narrowings that let a distribution be skipped
-# entirely; they must be EXACT, so any composition that can't be represented
-# exactly falls back to None rather than guessing (which is how the round-10
-# rework produced fail-opens and silent drops). Wildcards in host values (e.g.
-# `*.example.com` from a full_uri host_pattern) make literal set-minus unsound,
-# so the combinators only do exact same-kind ops and otherwise return None.
+# ── Host-scope tree ──────────────────────────────────────────────────────────
+# A pruned copy of the condition holding only the host-constraining parts
+# (host leaves, full_uri leaves — which bind host AND path atomically — and the
+# logic nodes joining them). Non-host leaves become None ("this branch imposes
+# no host constraint"). host_filter_applies() walks it against a concrete
+# hostname. None anywhere means "no host constraint from here" (global for that
+# subtree), combined per the surrounding logic.
 
 
-def _hf_negate(hf):
-    """Complement of a host filter. Sound ONLY for a filter that fully pins the
-    host (a pure-host leaf) — the caller guarantees that. include <-> exclude."""
-    if hf is None:
+def _host_scope_tree(cond, negate=False):
+    """Build the host-scope tree from a condition, or None if it imposes no host
+    constraint (a rule with no host test applies to every distribution).
+
+    INVARIANT: the pruned tree must never be MORE restrictive than the real
+    condition's host-satisfiability — it may say "applies" where the truth is
+    "no" (the rule runs on an extra distribution and the full condition gates it
+    out at request time: wasteful but correct), but must NEVER say "doesn't
+    apply" where the truth is "yes" (that silently drops the rule).
+
+    Dropping a non-host leaf must therefore always WIDEN the matched-host set.
+    That holds under positive (AND) polarity but NOT under negation: dropping B
+    from `not(A and B)` turns the real `not A or not B` (fires on host-of-A when
+    B is false) into `not A` (never fires there) — strictly narrower, a silent
+    drop. So `negate` is tracked; a non-host leaf reached under ODD negation
+    can't be dropped safely, and its enclosing negated subtree collapses to
+    "no host constraint" (None → applies everywhere, the safe/permissive side).
+    """
+    if not isinstance(cond, dict):
         return None
-    if "include" in hf:
-        return {"exclude": list(hf["include"])}
-    return {"include": list(hf["exclude"])}
-
-
-def _hf_and(a, b):
-    """Intersection of two host filters (AND narrows the satisfiable set)."""
-    if a is None:
-        return b
-    if b is None:
-        return a
-    ai, bi = "include" in a, "include" in b
-    if ai and bi:
-        # include ∩ include: hosts that match BOTH. With possible wildcards,
-        # keep a host if it's matched by the other side too.
-        keep = [h for h in a["include"] if _any_matches(b["include"], h)] + \
-               [h for h in b["include"] if h not in a["include"] and _any_matches(a["include"], h)]
-        return {"include": keep}  # possibly empty -> applies nowhere (correct)
-    if (not ai) and (not bi):
-        # exclude ∩ exclude: excluded by EITHER -> union of exclusions.
-        return {"exclude": _dedup(a["exclude"] + b["exclude"])}
-    # include ∩ exclude: the include set minus anything the exclude rules out.
-    inc = a["include"] if ai else b["include"]
-    exc = b["exclude"] if ai else a["exclude"]
-    keep = [h for h in inc if not _any_matches(exc, h)]
-    return {"include": keep}
-
-
-def _hf_or(a, b):
-    """Union of two host filters (OR widens the satisfiable set)."""
-    if a is None or b is None:
-        return None  # a global branch makes the whole disjunction global
-    ai, bi = "include" in a, "include" in b
-    if ai and bi:
-        return {"include": _dedup(a["include"] + b["include"])}
-    if (not ai) and (not bi):
-        # exclude ∪ exclude: a host is excluded only if BOTH exclude it, i.e.
-        # excluded set = intersection of the two exclusion sets. Under wildcards
-        # an exact intersection isn't generally representable; only the literal
-        # overlap is safe, and dropping a host from the exclusion widens the set
-        # (safe: more distributions get the rule, condition still gates).
-        inter = [h for h in a["exclude"] if _any_matches(b["exclude"], h)
-                 or h in b["exclude"]]
-        return {"exclude": _dedup(inter)}
-    # include ∪ exclude: everything except (exclude-set minus include-set). A
-    # host in `inc` is covered by the include branch; all others except the
-    # remaining excludes are covered by the exclude branch.
-    inc = a["include"] if ai else b["include"]
-    exc = b["exclude"] if ai else a["exclude"]
-    remaining = [h for h in exc if h not in inc and not _any_matches(inc, h)]
-    return {"exclude": remaining} if remaining else None
-
-
-def _any_matches(patterns, host):
-    """True if `host` equals or is wildcard-matched by any pattern in the list."""
-    for p in patterns:
-        if p == host:
-            return True
-        if p.startswith("*.") and (host.endswith(p[1:]) or host == p[2:]):
-            return True
-        if host.startswith("*.") and (p.endswith(host[1:]) or p == host[2:]):
-            return True
-    return False
-
-
-def _dedup(items):
-    out = []
-    for x in items:
-        if x not in out:
-            out.append(x)
-    return out
-
-
-def _scan_host_from_condition(cond, negate=False):
-    """Extract a host filter from a parsed condition (see the algebra note above).
-
-    `negate` carries NOT polarity DOWN the tree (De Morgan) instead of
-    complementing a composite result — complement is only sound at a pure-host
-    leaf. Under negation, AND<->OR swap and each leaf is complemented. A
-    non-host leaf (or a negated full_uri, where host is not pinned) contributes
-    no host constraint -> None (global, the safe fallback)."""
     if "logic" in cond:
-        logic = cond.get("logic")
+        logic = cond["logic"]
         if logic == "not":
-            return _scan_host_from_condition(cond.get("item"), not negate)
-        parts = cond.get("parts", [])
-        child_hfs = [_scan_host_from_condition(p, negate) for p in parts]
-        if not child_hfs:
+            inner = _host_scope_tree(cond.get("item"), not negate)
+            return None if inner is None else {"logic": "not", "item": inner}
+        kids_raw = cond.get("parts", [])
+        kids = [_host_scope_tree(p, negate) for p in kids_raw]
+        # A conjunct/disjunct dropped to None *because it held a non-host leaf*
+        # is the unsafe case — record it. (A branch that was None purely because
+        # it had no host test is a safe drop.)
+        dropped_nonhost = any(
+            k is None and _has_nonhost_leaf(p) for k, p in zip(kids, kids_raw))
+        # Under negation, AND/OR swap roles (De Morgan) for the DROP-SAFETY test
+        # only — the emitted node keeps the REAL operator so the evaluator (which
+        # applies the enclosing NOT itself) negates the true structure. Applying
+        # De Morgan to the output too would double-negate.
+        effective = ("or" if logic == "and" else "and") if negate else logic
+        if effective == "and":
+            # Effective-AND: dropping a non-host conjunct WIDENS the host set →
+            # safe. Keep the host-constraining children under the REAL operator.
+            kept = [k for k in kids if k is not None]
+            if not kept:
+                return None
+            if len(kept) == 1 and len(kids_raw) == 1:
+                return kept[0]
+            return {"logic": logic, "parts": kept}
+        # Effective-OR: if any branch imposes no host constraint (None), or a
+        # branch was dropped only because it contained a non-host leaf under this
+        # polarity, the disjunction can fire on any host → None (permissive-safe).
+        if not kids or any(k is None for k in kids) or dropped_nonhost:
             return None
-        # AND intersects, OR unions; under negation the two swap (De Morgan).
-        # Fold from the FIRST child, not a None seed: None means "all hosts",
-        # which is the AND identity but NOT the OR identity (that is the empty
-        # set). Seeding OR with None would let _hf_or read the seed as a global
-        # branch and collapse a representable exclude to global.
-        combine_is_and = (logic == "and") != negate
-        combine = _hf_and if combine_is_and else _hf_or
-        result = child_hfs[0]
-        for hf in child_hfs[1:]:
-            result = combine(result, hf)
-        return result
+        return {"logic": logic, "parts": kids}
     field = cond.get("field", "")
+    op = cond.get("op", "")
+    if field == "full_uri":
+        # full_uri binds host AND path atomically: it matches iff host~host_pattern
+        # AND path~path_pattern. As a HOST-scope constraint that only holds under
+        # POSITIVE polarity (host must match). Negated — `not(host~hp AND path~pp)`
+        # — it fires on hp too (whenever path≠pp), so it imposes NO sound host
+        # exclusion; drop to None (unconstrained → applies everywhere; the path
+        # exclusion is realized at behavior placement, not as a host filter).
+        # `op` already carries any inline `not_` (a flattened single leaf); an
+        # enclosing NOT node is captured by `negate`.
+        negated_here = negate ^ op.startswith("not_")
+        if negated_here:
+            return None
+        leaf = dict(cond)
+        if op.startswith("not_"):  # normalize to the positive op for the evaluator
+            leaf["op"] = op[len("not_"):]
+        return leaf
     if field == "host":
-        hf = _host_leaf_filter(cond)
-    elif field == "full_uri":
-        hf = _full_uri_leaf_filter(cond)
-    else:
-        hf = None  # non-host leaf: no host constraint
-    if hf is None:
-        return None
-    return _hf_negate(hf) if negate else hf
+        # A host leaf constrains the host; keep as-is (the evaluator honors its op
+        # and the surrounding NOT nodes).
+        return dict(cond)
+    return None  # non-host leaf: no host constraint
 
 
-def _host_leaf_filter(cond):
-    """Host filter for a single `host` leaf, honoring the op. Returns None
-    (global) for ops we can't pin to a host set (in_list — a named list with no
-    CloudFront equivalent; the processor rejects it separately)."""
-    op = cond.get("op", "")
-    val = cond.get("value")
-    if op == "eq" and isinstance(val, str):
-        return {"include": [val]}
-    if op == "in" and isinstance(val, list):
-        return {"include": list(val)}
-    if op in ("not_eq", "ne") and isinstance(val, str):
-        return {"exclude": [val]}
-    if op == "not_in" and isinstance(val, list):
-        return {"exclude": list(val)}
-    if op == "not_ne" and isinstance(val, str):
-        return {"include": [val]}  # double negation: not(host ne x) == host eq x
-    return None  # in_list / unknown op -> global (safe; processor may reject)
+def _has_nonhost_leaf(cond):
+    """True if the condition subtree contains any non-host, non-full_uri leaf —
+    i.e. a leaf whose removal from the host-scope tree could change semantics."""
+    if not isinstance(cond, dict):
+        return False
+    if "logic" in cond:
+        return any(_has_nonhost_leaf(c) for c in iter_condition_children(cond))
+    return cond.get("field") not in ("host", "full_uri")
 
 
-def _full_uri_leaf_filter(cond):
-    """Host filter for a full_uri leaf. Only a POSITIVE match pins the host to
-    the pattern; a negated full_uri (not_wildcard) does NOT — a request to any
-    other host also satisfies it -> global."""
-    op = cond.get("op", "")
-    if op.startswith("not_"):
-        return None
-    hp = cond.get("host_pattern")
-    if hp:
-        return {"include": [hp]}  # may contain wildcard
-    return None
+def _hosts_to_tree(hosts):
+    """Wrap a flat host list (from the raw-expression scan) as an OR of host-eq
+    leaves, so host_filter_applies can evaluate it uniformly."""
+    leaves = [{"field": "host", "op": "eq", "value": h} for h in hosts]
+    if len(leaves) == 1:
+        return leaves[0]
+    return {"logic": "or", "parts": leaves}
+
+
+def host_filter_applies(host_filter, hostname, host_matches):
+    """Evaluate a host filter (from extract_host_filter) against a concrete
+    distribution hostname. ``host_matches(hostname, pattern)`` is the caller's
+    wildcard-aware matcher (cdn-preprocess.hostname_matches). None filter =
+    global = applies. See rule_applies_to_domain for the wrapper used in-tree."""
+    if host_filter is None:
+        return True
+    return _eval_host_tree(host_filter["tree"], hostname, host_matches)
+
+
+def _eval_host_tree(node, hostname, host_matches):
+    """Boolean-evaluate a host-scope tree node against one concrete hostname."""
+    if "logic" in node:
+        logic = node["logic"]
+        if logic == "not":
+            return not _eval_host_tree(node["item"], hostname, host_matches)
+        if logic == "and":
+            return all(_eval_host_tree(p, hostname, host_matches) for p in node["parts"])
+        return any(_eval_host_tree(p, hostname, host_matches) for p in node["parts"])
+    field = node.get("field", "")
+    op = node.get("op", "")
+    if field == "full_uri":
+        # Only POSITIVE full_uri leaves reach the tree (_host_scope_tree drops a
+        # negated full_uri to None, since negating host∧path imposes no sound
+        # host exclusion). For the host-scope decision, test only the host part
+        # (host_pattern); the path part is applied at behavior placement.
+        hp = node.get("host_pattern")
+        if not hp:
+            return True  # no host pinned -> unconstrained
+        return host_matches(hostname, hp)
+    if field == "host":
+        return _eval_host_leaf(op, node.get("value"), hostname, host_matches)
+    return True  # non-host leaf: no host constraint -> matches
+
+
+def _eval_host_leaf(op, val, hostname, host_matches):
+    """Evaluate a single host leaf against a concrete hostname."""
+    if op == "eq":
+        return isinstance(val, str) and host_matches(hostname, val)
+    if op == "in":
+        return isinstance(val, list) and any(host_matches(hostname, v) for v in val)
+    if op in ("ne", "not_eq"):
+        return not (isinstance(val, str) and host_matches(hostname, val))
+    if op == "not_in":
+        return not (isinstance(val, list) and any(host_matches(hostname, v) for v in val))
+    if op == "not_ne":  # double negation: not(host ne x) == host eq x
+        return isinstance(val, str) and host_matches(hostname, val)
+    if op in ("wildcard", "strict_wildcard"):
+        return isinstance(val, str) and host_matches(hostname, val)
+    if op in ("not_wildcard",):
+        return not (isinstance(val, str) and host_matches(hostname, val))
+    # in_list / contains / unknown: can't pin to a host set -> no constraint
+    # (the processor rejects a named $list separately). Applies (global-ish).
+    return True
+
+
+# Host-leaf ops the ROUTER consumes to scope a rule to distributions. A leaf
+# with one of these is redundant once the rule is placed on a matched
+# distribution and may be stripped; any OTHER op on `host` (contains, matches,
+# gt via size_check/len, …) is a LIVE predicate that does NOT route and must be
+# kept and gated at request time. Single source of truth for both the
+# host-strip in cdn-preprocess and the custom-error code gate.
+_HOST_ROUTING_OPS = frozenset({
+    "eq", "in", "ne", "not_eq", "not_in", "not_ne",
+    "wildcard", "strict_wildcard", "not_wildcard",
+})
+
+
+def host_leaf_is_routing(cond):
+    """True if `cond` is a `host` leaf whose op the router consumes for
+    distribution scoping (see _HOST_ROUTING_OPS). A full_uri leaf is NOT a plain
+    host leaf (its path part matters) and returns False here."""
+    return (isinstance(cond, dict) and cond.get("field") == "host"
+            and not cond.get("size_check")
+            and cond.get("op") in _HOST_ROUTING_OPS)
 
 
 def _scan_host_from_expression(expr):

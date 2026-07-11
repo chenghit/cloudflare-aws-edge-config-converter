@@ -345,8 +345,11 @@ def _condition_to_js(cond, target="cff", indent=2):
     # literal (`len(x) eq "5"`), so the parser hands us the string "5"; rendered
     # as `x.length === '5'` that is Number===String → always false (eq/ne don't
     # coerce; gt/lt would, but normalize uniformly). Coerce a digit-string value
-    # to int so the comparison is numeric.
-    if cond.get("size_check") and isinstance(value, str) and value.lstrip("-").isdigit():
+    # to int so the comparison is numeric. Use a STRICT integer match (^-?\d+$)
+    # — value.lstrip("-").isdigit() accepts "--5" (lstrip removes BOTH dashes),
+    # and int("--5") then raises; leave a non-integer literal untouched so it
+    # can't crash codegen.
+    if cond.get("size_check") and isinstance(value, str) and re.fullmatch(r"-?\d+", value):
         value = int(value)
 
     # Handle not_ prefix

@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdn_expr_parser import (
     parse_expression, extract_orp_headers, extract_orp_headers_from_raw,
     extract_kvs_triggers, extract_host_filter, extract_path_pattern_single,
-    iter_condition_children,
+    iter_condition_children, host_filter_applies, host_leaf_is_routing,
 )
 from cdn_rule_processors import (
     process_redirect_rule, process_rewrite_rule, process_config_rule,
@@ -165,37 +165,25 @@ def hostname_matches(hostname, pattern):
 def rule_applies_to_domain(host_filter, hostname, apex_domain):
     """Check if a rule with the given host filter applies to this domain.
 
-    host_filter is None (global), {"include": [...]}, or {"exclude": [...]}
-    (see extract_host_filter). An exclude filter is how `not (host eq x)` is
-    represented — the rule applies to every distribution EXCEPT x's.
+    The host filter is None (global) or a host-condition tree; it is evaluated
+    against this CONCRETE distribution hostname via hostname_matches (which
+    handles zone wildcards). See extract_host_filter / host_filter_applies —
+    evaluating against real hostnames avoids the unsound wildcard set algebra
+    the previous include/exclude representation used.
     """
-    if host_filter is None:
-        return True  # global rule → every distribution
-    if "include" in host_filter:
-        return any(hostname_matches(hostname, h) for h in host_filter["include"])
-    if "exclude" in host_filter:
-        # Applies everywhere except the excluded hosts.
-        return not any(hostname_matches(hostname, h) for h in host_filter["exclude"])
-    return True
+    return host_filter_applies(host_filter, hostname, hostname_matches)
 
 
 def _host_leaf_consumed_for_routing(cond):
-    """True if this leaf is a host test the host-router ALREADY consumed for
-    distribution routing — i.e. extract_host_filter turns it into an
-    include/exclude (host eq/in and their negations ne/not_in). Such a leaf is
-    redundant on the distribution the rule was routed to and can be stripped.
-
-    A `host` leaf the classifier does NOT consume is a LIVE predicate that keeps
-    the rule global and must be kept + rendered, NOT dropped:
-      - `len(http.host) gt 5`     (op gt, size_check)  -> None -> keep
-      - `len(http.host) eq 5`     (eq with an int val) -> None -> keep
-      - `http.host contains "x"`  (op contains)        -> None -> keep
-    (extract_host_filter's own str/list value checks draw this line, so reuse
-    it rather than re-listing ops here and drifting.) full_uri leaves carry a
-    host_pattern the classifier consumes too, but their PATH part still matters,
-    so they are excluded here (guarded by field == "host") and never stripped.
-    """
-    return cond.get("field") == "host" and extract_host_filter(cond, "") is not None
+    """True if this leaf is a host test the router consumed for distribution
+    scoping (host eq/in/ne/not_in/wildcard) and is therefore redundant on the
+    distribution the rule was routed to — safe to strip. A `host` leaf the
+    router does NOT consume is a LIVE predicate that must be KEPT and rendered,
+    not dropped: `len(http.host) gt 5` (size_check), `http.host contains "x"`.
+    full_uri leaves carry a host_pattern but their PATH part still matters, so
+    they are never stripped (host_leaf_is_routing guards on field == "host").
+    Single source of truth: cdn_expr_parser.host_leaf_is_routing."""
+    return host_leaf_is_routing(cond)
 
 
 def _strip_host_condition(cond):

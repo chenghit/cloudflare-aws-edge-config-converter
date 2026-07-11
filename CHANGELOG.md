@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-07-12
+
+### CDN: host filter evaluates concrete hostnames (no set algebra); full_uri atomicity; custom-error live-predicate; crash/regex fixes
+
+A review of the same-day host-filter set algebra found it still guessed at wildcard host values and mis-handled `full_uri` under negation — silent drops and fail-opens in exactly the corners the previous property test didn't reach. This round replaces the abstract set algebra entirely and fixes the remaining confirmed findings. All verified by executing the real modules plus a new brute-force oracle (21,795 (host, condition-tree) pairs over host / path / full_uri leaves × concrete hostnames × path values, asserting the host filter is never more restrictive than the true satisfiability), the full example pipeline (54 domains, all stages green), `node --check`, and `terraform validate`.
+
+**Host filter — evaluate the condition tree against real hostnames.** `extract_host_filter` now returns the host-scope condition tree (or `None` = global), and `rule_applies_to_domain` evaluates it against each **concrete proxied hostname** (from DNS) with the wildcard-aware `hostname_matches`. This dissolves the whole wildcard-set-algebra bug class the review flagged: `*.example.com` simply matches every real subdomain in the zone — there is no more `_hf_and`/`_hf_or`/`_any_matches` to get wrong. Fixes:
+- `host eq foo AND full_uri wildcard *.example.com/x` — the abstract intersect kept the broad wildcard and fired on `bar.example.com` (fail-open). Now the concrete host pins it to `foo`.
+- `full_uri *.example.com/x AND host ne foo` — the abstract intersect emptied the include and dropped the rule everywhere (silent). Now it fires on every host but `foo`.
+- `host ne a or host ne b` (a tautology) and the argument-order-dependent exclude∪exclude cases — no longer computed by set ops at all.
+
+**full_uri is atomic (host∧path bound together).** A `full_uri` leaf is never split into separate host/path booleans. Under negation this matters: `not(full_uri wildcard "https://a.com/admin/*")` is `not(host==a AND path~/admin/*)`, which still fires on `a.com` for non-`/admin` paths — so a negated full_uri imposes **no** host exclusion (the path exclusion is a behavior-placement concern, handled where the mechanism attaches, not a host filter). The invariant that made this safe: the host-scope tree may over-apply (the full condition still gates at request time) but must never under-apply; dropping a non-host conjunct widens under AND but not under a NOT, so negation polarity is tracked and a non-host leaf under odd negation collapses its subtree to "unconstrained".
+
+**Custom-error live host predicate (F3).** `_find_response_code_value` dropped **every** `host` conjunct, but only a ROUTING host leaf (`host eq/in/ne/not_in`) is redundant per-distribution. A live host predicate (`host contains "internal"`, `len(host) gt 5`) is a real scope a per-distribution custom error can't express — erasing it silently would intercept the status code on every request site-wide. It now blocks extraction → non-convertible. `host_leaf_is_routing()` is the single source of truth shared with the host-strip.
+
+**Crash / false-positive fixes.**
+- `len(x) eq "--5"` (a malformed quoted length) crashed codegen: `value.lstrip("-").isdigit()` accepted `--5` (lstrip removes both dashes) and `int("--5")` raised. Now a strict `^-?\d+$` check, so a non-integer literal is left untouched (fails closed) instead of raising.
+- The raw-fallback `ip.src` guard over-matched `ip.src` inside a string literal (e.g. `uri contains "ip.src eq …"`) → spurious non-convertible. Quoted literals are now blanked before the scan.
+
+**Not done this round (deferred, confirmed safe):** materializing a path behavior to represent a negated full_uri **cache** rule's exclusion — negated full_uri on CFF-mechanism rules (redirect/header/rewrite) is already correct (the negation is preserved in the generated JS and gates per-request); only cache-mechanism negated full_uri is affected, and it currently records non-convertible (fail-safe, in the report). Cookie/query and Host-header origin-forwarding fidelity is a separate ORP rework tracked for its own round.
+
 ## 2026-07-11 (later)
 
 ### CDN: sound host-filter set algebra + fixes for regressions from the same-day host-filter rework
