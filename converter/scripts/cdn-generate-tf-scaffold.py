@@ -52,6 +52,31 @@ def has_viewer_response_ops(ir):
     return any(len(b.get("viewer_response_ops", [])) > 0 for b in ir["cache_behaviors"])
 
 
+def _default_beh(ir):
+    return next(b for b in ir["cache_behaviors"] if b["path_pattern"] == "*")
+
+
+def _has_zonewide_op(ir, ops_key):
+    """True if the DEFAULT behavior carries a scope='all' op — a zone-wide rule
+    (no path field) that must run on EVERY behavior, since CloudFront behaviors
+    don't inherit function associations. A scope='default_only' op (had a path
+    that couldn't reduce to a pattern) does NOT count — it belongs to the
+    default behavior alone."""
+    return any(op.get("scope") == "all" for op in _default_beh(ir).get(ops_key, []))
+
+
+def _behavior_needs_cff(ir, beh, ops_key):
+    """Whether a behavior needs the shared viewer CFF for a given event
+    (viewer_request_ops / viewer_response_ops). This is the #123 automation:
+    stop attaching the shared CFF to behaviors that would only ever run it as a
+    no-op. A behavior needs the CFF iff it has its OWN ops for that event, OR the
+    default behavior has a zone-wide (scope='all') op that must run everywhere.
+    The default behavior itself needs it iff it has ANY op for that event."""
+    if beh["path_pattern"] == "*":
+        return len(beh.get(ops_key, [])) > 0
+    return len(beh.get(ops_key, [])) > 0 or _has_zonewide_op(ir, ops_key)
+
+
 def collect_orp_headers(ir):
     """Collect all required_orp_headers across all behaviors, deduplicated."""
     headers = set()
@@ -143,8 +168,6 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
     ordered_behs = [b for b in behaviors if b["path_pattern"] != "*"]
     ds = default_beh["distribution_settings"]
     has_s3 = any(o["s3_origin"] for o in origins)
-    has_vr = True  # viewer_request.js always exists
-    has_vresp = has_viewer_response_ops(ir)
     orp_headers = collect_orp_headers(ir)
     le = meta.get("lambda_edge", {})
     has_le_origin_resp = le.get("origin_response") is not None
@@ -322,11 +345,14 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
         w(f'  default_response_headers_policy_id = data.aws_cloudfront_response_headers_policy.{hcl_id(rhp_id)}.id')
     w('')
 
-    # Default function associations (use locals defined in functions.tf for dedup compatibility)
+    # Default function associations (use locals defined in functions.tf for dedup
+    # compatibility). Attach a viewer CFF only if the default behavior actually
+    # needs it — a domain whose only ops are path-specific (on ordered behaviors)
+    # leaves the default behavior with a no-op passthrough CFF, which we now omit.
     func_assocs = []
-    if has_vr:
+    if _behavior_needs_cff(ir, default_beh, "viewer_request_ops"):
         func_assocs.append(f'    {{ event_type = "viewer-request", function_arn = local.viewer_request_arn }}')
-    if has_vresp:
+    if _behavior_needs_cff(ir, default_beh, "viewer_response_ops"):
         func_assocs.append(f'    {{ event_type = "viewer-response", function_arn = local.viewer_response_arn }}')
     if func_assocs:
         w('  default_function_associations = [')
@@ -374,12 +400,16 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
             b_rhp = b.get("response_headers_policy_id")
             if b_rhp:
                 w(f'      response_headers_policy_id = data.aws_cloudfront_response_headers_policy.{hcl_id(b_rhp)}.id')
-            # Share the domain's CFF with all behaviors — CloudFront requires
-            # explicit function_associations per behavior (no inheritance)
+            # Attach the domain's shared CFF only to behaviors that need it —
+            # CloudFront requires explicit function_associations per behavior (no
+            # inheritance). This ordered behavior needs it iff it has its own ops
+            # OR the default behavior has a zone-wide (scope='all') op that must
+            # run everywhere. A behavior created only for a TTL/cache-key setting,
+            # with no ops and no zone-wide default op, gets no CFF.
             b_func = []
-            if has_vr:
+            if _behavior_needs_cff(ir, b, "viewer_request_ops"):
                 b_func.append(f'{{ event_type = "viewer-request", function_arn = local.viewer_request_arn }}')
-            if has_vresp:
+            if _behavior_needs_cff(ir, b, "viewer_response_ops"):
                 b_func.append(f'{{ event_type = "viewer-response", function_arn = local.viewer_response_arn }}')
             if b_func:
                 w('      function_associations = [')

@@ -13,7 +13,7 @@ from cdn_expr_parser import (
     parse_expression, extract_orp_headers, extract_orp_headers_from_raw,
     extract_kvs_triggers, extract_host_filter, extract_path_pattern_single,
     iter_condition_children, host_filter_applies, host_leaf_is_routing,
-    CACHE_BYPASS_HEADER,
+    condition_has_path_field, CACHE_BYPASS_HEADER,
 )
 from cdn_rule_processors import (
     process_redirect_rule, process_rewrite_rule, process_config_rule,
@@ -658,6 +658,7 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         "condition": result.get("condition"),
         "raw_expression": result.get("raw_expression"),
         "params": result.get("params", {}),
+        "scope": _op_scope(path, result, cond),
     }
 
     # Generate KVS entries for in_kvs conditions (IP list lookup)
@@ -744,6 +745,28 @@ def _extract_path_from_result(result, cond, expr):
     return extract_path_pattern_single(c)
 
 
+def _op_scope(path, result, cond):
+    """Classify how far a viewer op's effect reaches, so the scaffold can attach
+    the shared CFF only to the behaviors that need it (a Cloudflare rule's scope
+    = distribution × cache-behavior, decided BEFORE the mechanism). Returns:
+      'behavior'     — landed on a specific ordered behavior (path→pattern
+                       worked); runs only there.
+      'default_only' — landed on the default behavior AND the condition DID scope
+                       by path, but the path couldn't reduce to a CloudFront
+                       pattern (regex/negated/multi-ext/OR-of-paths). The rule
+                       only ever meant those (default-behavior) requests → attach
+                       to the default behavior only, NOT the ordered ones.
+      'all'          — landed on the default behavior with NO path field at all
+                       (zone-wide: matched host and/or header/cookie/qs). Must
+                       run on EVERY behavior of the distribution, since any path
+                       could match and each behavior has its own function assoc.
+    """
+    if path != "*":
+        return "behavior"
+    c = result.get("condition") or cond
+    return "default_only" if condition_has_path_field(c) else "all"
+
+
 def _apply_cache_setting(beh, result):
     """Apply cache rule settings to a behavior.
 
@@ -825,6 +848,7 @@ def _process_bulk_redirects(ir, hostname, apex, bulk_redirects, domain_config, o
             "condition": {"always": True},
             "raw_expression": None,
             "params": {"entry_count": len(kvs_entries)},
+            "scope": "all",  # unconditional zone-wide → runs on every behavior
         })
 
 
@@ -842,6 +866,7 @@ def _process_managed_transforms(ir, managed_transforms, default_beh):
                 "condition": {"always": True},
                 "raw_expression": None,
                 "params": {"name": "True-Client-IP", "value": "$viewer_ip"},
+                "scope": "all",  # unconditional zone-wide → runs on every behavior
             })
 
     for h in resp_headers:

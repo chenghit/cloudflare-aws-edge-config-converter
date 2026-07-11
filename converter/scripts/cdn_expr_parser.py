@@ -538,6 +538,24 @@ def _scan_host_from_expression(expr):
 
 # ── path pattern extraction ──────────────────────────────────────────────────
 
+_PATH_FIELDS = {"uri", "uri.path", "uri.path.extension", "full_uri"}
+
+
+def condition_has_path_field(cond):
+    """True if the condition references any URI/path field anywhere in the tree
+    (uri, uri.path, uri.path.extension, full_uri) — regardless of operator or
+    negation. Used to tell a genuinely zone-wide rule (no path field → scope
+    'all', runs on every behavior) apart from a rule that DID scope by path but
+    whose path couldn't reduce to a single CloudFront pattern (has a path field
+    → scope 'default_only', runs on the default behavior only). Descends both
+    AND/OR parts and a NOT item via iter_condition_children."""
+    if not isinstance(cond, dict):
+        return False
+    if "logic" in cond:
+        return any(condition_has_path_field(c) for c in iter_condition_children(cond))
+    return cond.get("field") in _PATH_FIELDS
+
+
 def extract_path_pattern_single(cond):
     """Extract a CloudFront path pattern from a single condition."""
     field = cond.get("field", "")

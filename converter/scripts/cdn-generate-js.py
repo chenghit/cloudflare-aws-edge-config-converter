@@ -1725,20 +1725,21 @@ if __name__ == "__main__":
         with open(report_path, "a") as f:
             # Resource architecture explanation
             f.write(f"\n## Resource Architecture\n\n")
-            f.write("Each domain gets one CloudFront distribution. Within a distribution, "
-                    "**all cache behaviors share the same CloudFront Functions** (viewer-request and viewer-response). "
-                    "This is because Cloudflare rules (redirects, rewrites, header transforms, bulk redirects) apply zone-wide — "
-                    "they are not scoped to specific URL paths. To replicate this behavior in CloudFront, "
-                    "the CFF must be associated with every cache behavior.\n\n")
-            f.write("The CFF internally uses path matching (`request.uri`) to apply path-specific logic "
-                    "(e.g., cache rules scoped to certain extensions). Rules without path conditions execute unconditionally.\n\n")
+            f.write("Each domain gets one CloudFront distribution. Within a distribution, the domain shares one "
+                    "viewer-request (and, if needed, one viewer-response) CloudFront Function, but the tool attaches it "
+                    "**only to the cache behaviors that actually need it** — a CloudFront behavior does not inherit function "
+                    "associations, so each is wired explicitly.\n\n")
+            f.write("A behavior gets the CFF when:\n"
+                    "- it has its own path-specific rule (e.g. a cache rule scoped to a URL pattern), or\n"
+                    "- the zone has a **zone-wide** rule (no path condition: redirects, header transforms, bulk redirects, "
+                    "a cookie/header-gated cache bypass) — those must run on every behavior to match Cloudflare's zone scope.\n\n"
+                    "A behavior created only for a TTL / cache-key setting, with no rule logic of its own and no zone-wide rule, "
+                    "is left **without** a CFF association automatically — you no longer need to prune it by hand.\n\n")
             f.write("Lambda@Edge (origin-response), when present, is associated only with the default cache behavior.\n\n")
-            f.write("**Cost note**: Because your Cloudflare zone has zone-wide rules (bulk redirects, request header transforms), "
-                    "the CFF executes on every request to every cache behavior — including static assets that don't need rule processing. "
-                    "This is not a limitation of the conversion tool; it faithfully replicates Cloudflare's zone-wide rule scope. "
-                    "If you want to reduce CFF invocation cost ($0.10/million requests) on specific behaviors after deployment, "
-                    "remove the `function_associations` block from those behaviors in `main.tf`. "
-                    "Be aware that bulk redirects and unconditional header transforms will no longer apply to those paths.\n\n")
+            f.write("**Cost note**: Where your zone has zone-wide rules (bulk redirects, request header transforms), the CFF "
+                    "runs on every request to every behavior — including static assets — because that is what Cloudflare's "
+                    "zone-wide scope means. This faithfully replicates Cloudflare; behaviors that need no rule processing and "
+                    "aren't covered by a zone-wide rule already carry no CFF.\n\n")
 
             # Per-domain resource mapping — grouped to avoid repetition
             f.write("### Per-Domain Resource Mapping\n\n")
@@ -1793,9 +1794,10 @@ if __name__ == "__main__":
                     f.write(f"| Lambda@Edge | {le_type} |\n\n")
 
             f.write(f"\n### Adjusting After Deployment\n\n")
-            f.write("- **Remove CFF from a specific cache behavior**: Edit `main.tf`, delete the `function_associations` "
-                    "block from that behavior. Note: bulk redirects and unconditional header transforms will no longer "
-                    "apply to that path.\n")
+            f.write("- **CFF association is already minimized**: the tool attaches the CFF only to behaviors that need it "
+                    "(their own rule, or a zone-wide rule). You can prune further by deleting a behavior's "
+                    "`function_associations` block in `main.tf`, but note any zone-wide bulk redirects / header transforms "
+                    "will then no longer apply to that path.\n")
             f.write("- **Add path-specific logic to one domain only**: In the shared CFF, wrap the logic in "
                     "`if (event.request.headers.host.value === 'your-domain') { ... }`.\n")
             f.write("- **Move a domain from shared to independent CFF**: Create a new CFF resource in the domain's "

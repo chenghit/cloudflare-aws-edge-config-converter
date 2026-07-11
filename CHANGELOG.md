@@ -2,6 +2,16 @@
 
 ## 2026-07-18
 
+### CDN: attach the shared CFF only to behaviors that need it (auto, by rule scope)
+
+The shared viewer-request/response CloudFront Function used to be attached to **every** cache behavior of a domain, and the report told the user to manually delete the association from behaviors that don't need it. This automates that, driven by each rule's true scope (decided before the mechanism, as scope = distribution × cache-behavior):
+
+- Each viewer op now carries a **scope**, set at placement: `all` (no path condition → zone-wide, runs on every behavior), `default_only` (had a path field but it couldn't reduce to a CloudFront pattern — regex / negated / multi-ext / OR-of-paths — so it belongs to the default behavior alone), or `behavior` (landed on a specific ordered behavior). The `all` vs `default_only` split is the key fix: both land on the default behavior in the IR, but only `all` should propagate to other behaviors. A new `condition_has_path_field` walker distinguishes them.
+- **CFF attachment (per behavior)**: the default behavior attaches iff it has any op; an ordered behavior attaches iff it has its own ops OR the default has an `all`-scope op. So a behavior created only for a TTL / cache-key setting, in a domain with no zone-wide rule, now carries **no** CFF — automatically, no hand-editing.
+- The conversion report's "Resource Architecture" section and the finalize warning are reworded to match (the CFF is minimized automatically; the remaining zone-wide cost note is accurate, not an action item). The manual-removal instruction is now framed as optional further trimming.
+
+Verified: both test suites green (unit checks for `condition_has_path_field`, `_op_scope` all/default_only/behavior, and `_behavior_needs_cff`; three e2e cases driving the real `generate_main_tf` — default-clean → CFF only on the ordered behavior, zone-wide → all behaviors, default_only → default only + TTL-ordered dropped), full 54-domain pipeline green, `terraform validate` + `node --check`.
+
 ### CDN: conditional cache bypass (Cloudflare Cache Rules → CloudFront)
 
 Cloudflare Cache Rules can conditionally "Bypass cache" at request time (e.g. skip cache when a `wordpress_logged_in` cookie is present). CloudFront has no request-time cache-skip toggle — the cache decision is fixed by the cache policy on the behavior, and behaviors are selected only by path. This adds a faithful conversion:

@@ -470,17 +470,23 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
                     f"if your application requires them."
                 )
 
-    # CFF associated with behaviors that have no path-specific ops
+    # Op-less behaviors that STILL carry the CFF because the domain has a
+    # zone-wide op (no path condition) — those must run on every behavior to
+    # match Cloudflare's zone scope, so the tool keeps them. (Op-less behaviors
+    # in a domain with NO zone-wide op are dropped automatically by the scaffold
+    # — inv: _behavior_needs_cff — and are NOT flagged.) This is a cost note, not
+    # an action item; the drop is already automatic where it's safe.
     cff_no_ops = []
     for ir in all_irs:
         hostname = ir["metadata"]["hostname"]
-        has_global_ops = (ir["metadata"].get("kvs_requirements", {}).get("needs_bulk_redirects")
-                         or any(b.get("viewer_request_ops") for b in ir["cache_behaviors"]))
-        if not has_global_ops:
+        has_zonewide = any(op.get("scope") == "all"
+                           for b in ir["cache_behaviors"]
+                           for op in b.get("viewer_request_ops", []) + b.get("viewer_response_ops", []))
+        if not has_zonewide:
             continue
         no_ops_behs = [b["path_pattern"] for b in ir["cache_behaviors"]
                        if not b.get("viewer_request_ops") and not b.get("viewer_response_ops")
-                       and b["path_pattern"] != "default"]
+                       and b["path_pattern"] not in ("default", "*")]
         if no_ops_behs:
             cff_no_ops.append((hostname, no_ops_behs))
     if cff_no_ops:
@@ -491,16 +497,14 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         if len(sample) > 5:
             paths += f" (+{len(sample) - 5} more)"
         all_warnings.append(
-            f"CFF global association ({len(cff_no_ops)} domains): "
-            f"cache behaviors with no path-specific rules (e.g. {paths}) "
-            f"still have CloudFront Functions associated. "
-            f"In Cloudflare, bulk redirects and request header transforms apply zone-wide "
-            f"(all paths). In CloudFront, each cache behavior is independent — CFF must be "
-            f"explicitly associated per behavior to replicate this zone-wide scope. "
-            f"This adds CFF invocation cost ($0.10/million requests) to those behaviors. "
-            f"To remove CFF from a specific behavior, edit main.tf and delete the "
-            f"function_association block — but bulk redirects and unconditional header "
-            f"mutations will no longer apply to that path."
+            f"CFF zone-wide association ({len(cff_no_ops)} domains): these domains have a "
+            f"zone-wide rule (no path condition — bulk redirects / header transforms), so the "
+            f"shared CFF is attached to every behavior, including path behaviors with no rule of "
+            f"their own (e.g. {paths}). This is required to replicate Cloudflare's zone-wide scope "
+            f"and adds CFF invocation cost ($0.10/million requests) on those paths. Behaviors NOT "
+            f"covered by a zone-wide rule already carry no CFF. To trim further, delete a "
+            f"behavior's function_associations block in main.tf — but the zone-wide redirects / "
+            f"header mutations will then no longer apply to that path."
         )
 
     if cff_warning:
