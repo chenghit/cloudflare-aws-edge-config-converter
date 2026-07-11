@@ -84,27 +84,52 @@ def hcl_id(pid):
     return pid.replace("-", "_")
 
 
+# AWS-managed origin request policy IDs (fixed, well-known constants).
+#   AllViewer                — all viewer headers (incl. Host) + all cookies + all
+#                              query strings; NO CloudFront-generated headers.
+#   AllViewerExceptHostHeader — same, but the viewer Host is dropped and CloudFront
+#                              substitutes the origin's own configured domain name.
+_MANAGED_ORP_ALL_VIEWER = "216adef6-5c7f-47e4-b989-5492eafa07d3"
+_MANAGED_ORP_ALL_VIEWER_EXCEPT_HOST = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+
+
+def _behavior_has_host_override(beh):
+    """True if a rule on this behavior overrides the origin Host (Cloudflare
+    Origin Rule host_header). Then the VIEWER Host must NOT be forwarded — the
+    override supplies Host via cf.updateRequestOrigin(hostHeader=…) — so the
+    behavior uses an except-Host ORP as the safe fallback."""
+    for op in beh.get("viewer_request_ops", []):
+        if op.get("type") == "origin_override" and op.get("params", {}).get("host_header"):
+            return True
+    return False
+
+
 def _orp_reference(beh, orp_headers, san):
-    """The ORP resource reference (HCL RHS) for a behavior, or None for no ORP.
-
-    Custom ORP wins: when the domain forwards geo/device headers, the custom
-    ORP (attached to EVERY behavior — CFFs run on all of them and none inherit
-    associations) takes precedence over the behavior's own dedup ORP. Shared by
-    the default and ordered-behavior emitters so their ORP wiring can't diverge.
-
-    Note: custom_orp forwards ONLY the geo/device headers (cookies/query =
-    "none"), so replacing a behavior's own ORP is lossless ONLY while the
-    pipeline never forwards cookies/query-strings to origin — which today it
-    doesn't (origin_request_policy.forward.cookies/query_strings is initialized
-    "none" and never mutated). If a rule ever populates cookie/query forwarding,
-    this must merge those into custom_orp per behavior instead of replacing.
+    """The ORP resource reference (HCL RHS) for a behavior. Cloudflare is a
+    reverse proxy — it forwards the FULL request (all headers incl. Host, all
+    cookies, all query strings) to origin by default — so EVERY behavior gets a
+    forward-all ORP (CloudFront strips everything not in the cache key without
+    one). Selection:
+      - native CloudFront-* headers needed → custom_orp_{san}
+        (header_behavior allViewerAndWhitelistCloudFront + cookie/query all).
+      - a Host override on this behavior → AllViewerExceptHostHeader (drop the
+        viewer Host; the override sets Host via updateRequestOrigin).
+      - otherwise → AllViewer (forward the original viewer Host, matching the
+        Cloudflare default).
+    Shared by the default and ordered-behavior emitters so their ORP wiring
+    can't diverge.
     """
     if orp_headers:
+        # custom_orp forwards all viewer headers (incl. Host) + CloudFront-*
+        # headers + all cookies/query strings. A Host override still works: the
+        # CFF updateRequestOrigin(hostHeader=…) sets the origin Host regardless.
+        # A resource reference (unquoted HCL).
         return f"aws_cloudfront_origin_request_policy.custom_orp_{san}.id"
-    orp_id = beh.get("origin_request_policy_id")
-    if orp_id:
-        return f"data.aws_cloudfront_origin_request_policy.{hcl_id(orp_id)}.id"
-    return None
+    # Managed policies are referenced by their fixed ID as a STRING literal
+    # (quoted) — not a resource/data reference.
+    if _behavior_has_host_override(beh):
+        return f'"{_MANAGED_ORP_ALL_VIEWER_EXCEPT_HOST}"'
+    return f'"{_MANAGED_ORP_ALL_VIEWER}"'
 
 
 # ── main.tf generation ───────────────────────────────────────────────────────
@@ -223,12 +248,20 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
         w('    }')
         w('  }')
         w('')
+        # Cloudflare is a reverse proxy: by default it forwards the FULL request
+        # (all cookies, all query strings) to origin. CloudFront strips anything
+        # not in the cache key unless an ORP forwards it, so forward all to match
+        # Cloudflare. This is independent of the cache KEY (the cache policy,
+        # which controls hit/miss) — forwarding "all" here does not hurt the
+        # cache hit ratio. (A rule that strips query strings from the origin
+        # request is a Cloudflare URL-Rewrite transform, converted separately as
+        # a CFF request.querystring rewrite — not an ORP setting.)
         w('  cookies_config {')
-        w('    cookie_behavior = "none"')
+        w('    cookie_behavior = "all"')
         w('  }')
         w('')
         w('  query_strings_config {')
-        w('    query_string_behavior = "none"')
+        w('    query_string_behavior = "all"')
         w('  }')
         w('}')
         w('')

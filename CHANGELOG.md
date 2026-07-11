@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-07-13
+
+### CDN: origin-forwarding fidelity — cookies/query/Host to origin, and a Host read-only 502 fix
+
+CloudFront and Cloudflare have opposite defaults for what reaches the origin: Cloudflare (a reverse proxy) forwards the full request — all cookies, all query strings, the original Host — while CloudFront strips everything not in the cache key unless an origin request policy (ORP) forwards it. The converter attached a forwarding ORP only to behaviors that needed CloudFront-generated (geo) headers, and even that ORP set cookies/query to `none`, so a faithful conversion silently dropped cookies and query strings the origin depends on. This round makes origin forwarding match Cloudflare, and fixes a latent runtime 502. All facts were verified against AWS docs via two independent AWS-knowledge subagents; verified end to end by the full example pipeline (54 domains, all stages green), a 3-domain synthetic e2e asserting the actual generated ORP wiring, `node --check`, and `terraform validate`.
+
+**Every behavior forwards the full request to origin.** Each cache behavior now gets a forward-all ORP (cookies + query strings + headers), matching Cloudflare's proxy default:
+- Behaviors that need CloudFront geo/device headers use the domain's custom ORP (`allViewerAndWhitelistCloudFront`), now with `cookie_behavior = all` and `query_string_behavior = all` (was `none` — the silent drop).
+- Behaviors with no native-header need previously got no ORP at all (→ CloudFront stripped cookies/query/Host); they now use the AWS-managed `AllViewer` policy, which forwards the original viewer Host + all cookies + all query strings. Forwarding "all" here does not hurt the cache hit ratio — the ORP controls origin forwarding, not the cache key (that stays the cache policy's job).
+
+**Host read-only 502 fix (latent runtime bug).** `Host` is a read-only header in a viewer-request CloudFront Function — assigning `request.headers.host = {…}` there fails CloudFront validation and returns HTTP 502 for every request. The origin-override codegen did exactly that. It now sets the origin Host through the sanctioned `cf.updateRequestOrigin({ domainName, hostHeader })` parameter instead. (The Lambda@Edge origin-request path, where Host is writable, is unchanged.)
+
+**Host-header override → ORP choice.** When a Cloudflare Origin Rule overrides the Host header, the behavior uses the managed `AllViewerExceptHostHeader` policy (the viewer Host is dropped; the override supplies Host via `updateRequestOrigin`) — a safe fallback that sends the origin's own domain rather than leaking the viewer Host. With no override, `AllViewer` forwards the original viewer Host, matching Cloudflare.
+
 ## 2026-07-12
 
 ### CDN: host filter evaluates concrete hostnames (no set algebra); full_uri atomicity; custom-error live-predicate; crash/regex fixes

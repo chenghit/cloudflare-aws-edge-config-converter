@@ -801,25 +801,44 @@ def _generate_op_js(op, target="cff", indent="  "):
 
     elif op_type == "origin_override":
         origin_host = params.get("origin_host", "")
-        host_header = params.get("host_header", origin_host)
+        host_header = params.get("host_header", "")
         port = params.get("origin_port")
         sni = params.get("sni")
         if target == "lambda":
-            body_lines = [f"request.origin.custom.domainName = {js_string(origin_host)};"]
+            # Lambda@Edge origin-request: Host IS writable here. Only touch the
+            # origin domain when the rule actually changes it (a Host-header-only
+            # override leaves origin_host empty — don't blank out the domain).
+            body_lines = []
+            if origin_host:
+                body_lines.append(f"request.origin.custom.domainName = {js_string(origin_host)};")
             if port:
                 body_lines.append(f"request.origin.custom.port = {port};")
                 body_lines.append(f"request.origin.custom.protocol = 'https';")
-            body_lines.append(f"request.headers.host = [{{key: 'Host', value: {js_string(host_header)}}}];")
+            if host_header:
+                body_lines.append(f"request.headers.host = [{{key: 'Host', value: {js_string(host_header)}}}];")
             body = " ".join(body_lines)
         else:
-            uro_parts = [f"domainName: {js_string(origin_host)}"]
+            # CFF viewer-request. `Host` is a READ-ONLY header here — assigning
+            # request.headers.host fails CloudFront validation and returns HTTP
+            # 502 for every request. The sanctioned way to set the origin Host
+            # from a CFF is the updateRequestOrigin() `hostHeader` parameter,
+            # which is applied when CloudFront connects to the origin. Only emit
+            # domainName when the rule changes the origin (a Host-only override
+            # leaves it empty — `domainName: ''` would blank the origin).
+            uro_parts = []
+            if origin_host:
+                uro_parts.append(f"domainName: {js_string(origin_host)}")
             if port:
                 uro_parts.append(f"customOriginConfig: {{port: {port}, protocol: 'https', sslProtocols: ['TLSv1.2']}}")
             if sni:
                 uro_parts.append(f"sni: {js_string(sni)}")
-            body = f"cf.updateRequestOrigin({{{', '.join(uro_parts)}}});"
             if host_header and host_header != origin_host:
-                body += f" request.headers.host = {{value: {js_string(host_header)}}};"
+                uro_parts.append(f"hostHeader: {js_string(host_header)}")
+            if not uro_parts:
+                return lines  # nothing to override
+            body = f"cf.updateRequestOrigin({{{', '.join(uro_parts)}}});"
+        if not body:
+            return lines
         if cond_js:
             lines.append(f"{indent}if ({cond_js}) {{ {body} }}")
         else:
