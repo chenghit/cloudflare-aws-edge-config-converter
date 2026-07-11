@@ -1,5 +1,8 @@
 **/.DS_Store
 /workspace/
+# Development-only regression tests (not shipped to users; the converter is
+# deterministic — users don't run these to verify a conversion).
+/test/
 .kiro/settings/
 __pycache__/
 *.pyc

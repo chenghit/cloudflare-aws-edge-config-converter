@@ -14,9 +14,8 @@ override.
 
 This file is the *why* (direction). The **code and its comments are the source
 of truth for the *how*** — when a detail here and the code disagree, the code
-wins and this file is what's stale. See the code map and the "Changing the
-pipeline" section at the end for where each decision lives and how to verify a
-change.
+wins and this file is what's stale. See the code map at the end for where each
+decision lives.
 
 ## 1. One proxied CNAME → one CloudFront distribution
 
@@ -113,23 +112,3 @@ model decision instead of guessing; grep within the file for the specifics.
 | Shared cache/ORP/response-header policies | `cdn-generate-shared-policies.py` |
 | IR structural checks (incl. ORP-header consistency) | `cdn-validate-chunk.py` / `cdn-validate-final.py` |
 | Generated-JS checks (forbidden syntax, IR coverage, KVS, size) | `cdn-validate-js.py` |
-
-## Changing the pipeline — how to verify (read before editing)
-
-The recurring lesson from this pipeline's history: **a green unit suite does not
-mean the conversion is correct.** Fixes that passed in isolation broke the full
-pipeline, and the bugs that mattered were silent (a rule that "converted" but did
-nothing, fired always, or dropped config). Match that bar:
-
-- `test_dynamic_values.py` — unit + an **enumerative property test** asserting no
-  condition tree renders fail-open. Run it, but don't stop there.
-- `test_round10_e2e.py` — builds a synthetic backup, runs the **whole pipeline**,
-  and asserts behavior in the *real generated Terraform + JS*. This is the level
-  that catches placement/scoping regressions unit tests miss; add cases here when
-  you touch routing, ORP, or codegen.
-- Run the full pipeline on `examples/cloudflare-configs/` end to end; for JS
-  changes, `node --check` the output; for Terraform changes, `terraform validate`.
-
-When in doubt, fail **closed and visible** (non-convertible in the report), never
-open (silent drop / site-wide widening). A negated or un-evaluable condition must
-never widen into "matches everything."

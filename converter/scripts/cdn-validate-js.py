@@ -235,8 +235,7 @@ def _broken_output_signatures(*js_sources):
     for` leak marker emitted by _dyn_field_to_js / _resolve_expression_value.
     The leak marker is a stable contract shared with the generator; the two
     empty-value signatures track the redirect/rewrite emit format — if that
-    format changes, update these. test_dynamic_values.py exercises the
-    generator output directly to catch drift.
+    format changes, update these.
     """
     issues = []
     combined = "\n".join(js_sources)

@@ -22,8 +22,6 @@ Follow-up round on the per-host conversion model. These are the last of the OR-s
 
 **Cleanup**: removed the dead `conditional_cache` branch from validate-chunk Check15 (no producer emits that type); the validator now reuses the parser's `extract_orp_headers` walk instead of a duplicate; tightened `_RE_RAW_IP_SRC` to require an operator so it can't false-match `ip.src` inside a string literal; refreshed stale "OR ⇒ raw_expression" comments (OR is structured now).
 
-**Tests** (`converter/scripts/`): `test_dynamic_values.py` now 138 checks (added a round-10 `W` section: host include/exclude, host-strip live-predicate keep, len/lower/upper, custom-error code sourcing, full_uri cache). New `test_round10_e2e.py` builds a synthetic 2-domain backup and runs the entire CDN pipeline, asserting the round-10 behaviors in the real generated artifacts — the level of test that caught the host-strip fail-open the unit suite missed.
-
 ## 2026-07-10
 
 ### CDN: fix the OR-structuring fallout — fail-open conditions, dead cache sink, per-host scoping
