@@ -54,10 +54,15 @@ def _condition_uses_ip_src(condition):
 
 # `ip.src` as a direct-IP FIELD reference: the token `ip.src`, not followed by
 # `.<subfield>` (a geo field like ip.src.country), AND immediately followed by a
-# comparison operator (`ip.src in {...}` / `ip.src eq "..."`). Requiring the
-# operator avoids a false match on `ip.src` sitting inside a string literal
-# (e.g. `http.request.uri contains "ip.src"`), which would wrongly reject the rule.
-_RE_RAW_IP_SRC = re.compile(r"\bip\.src\b(?!\.)\s+(?:in|eq|ne)\b")
+# comparison operator. Requiring an operator avoids a false match on `ip.src`
+# inside a string literal (e.g. `http.request.uri contains "ip.src"`), which
+# would wrongly reject the rule. The operator set must cover the ALLOWLIST forms
+# too — `ip.src not in {...}` (Wireshark-style) and `!=` — or a negated IP
+# restriction slips past the cache/compression guard and is silently dropped.
+# `not in` / `not eq` / `not ne` are matched via an optional `not` prefix;
+# longer C-like operators (`==`, `!=`) as alternatives.
+_RE_RAW_IP_SRC = re.compile(
+    r"\bip\.src\b(?!\.)\s+(?:(?:not\s+)?(?:in|eq|ne)\b|==|!=)")
 
 
 def _uses_ip_src(condition, raw_expr=None):
@@ -889,18 +894,37 @@ def _find_response_code_value(cond, negated=False):
 
     A CloudFront custom_error_response maps exactly ONE error code to one
     response, so only an unambiguous single code is convertible:
-      - a logic node (AND/OR/NOT) → None. An OR of codes can't map to one
-        response (returning the first would silently drop the rest); an
-        AND-scoped code (`code eq 500 and uri.path eq /api`) can't be scoped by
-        path (custom errors are per-distribution) — both must fall through to
-        the caller's Path-5 non_convertible.
-      - a negated leaf (`not_eq`) is an EXCLUSION, not the code to serve.
+      - an OR / NOT node → None. An OR of codes can't map to one response
+        (returning the first would silently drop the rest); a negated code is
+        an EXCLUSION, not the code to serve.
+      - an AND is allowed ONLY when it reduces to exactly one `code eq N` leaf
+        after dropping redundant per-host routing conjuncts (`host eq x`). The
+        pipeline routes one distribution per host, so `code eq 500 and host eq
+        x` is really just `code eq 500` on this host's distribution — refusing
+        it (as a blanket "logic node → None" did) made a convertible rule
+        non-convertible. A non-host, non-code conjunct (e.g. `uri.path eq /api`)
+        still can't scope a per-distribution custom error → None.
     Returns an int (coerced from a quoted "404") or None.
     """
     if not isinstance(cond, dict):
         return None
     if "logic" in cond:
-        return None
+        if cond["logic"] != "and":
+            return None  # OR / NOT can't name a single served code
+        code = None
+        for part in cond.get("parts", []):
+            if not isinstance(part, dict) or "logic" in part:
+                return None  # nested logic → can't reduce to one clean code
+            if part.get("field") == "host":
+                continue  # redundant per-host routing conjunct — drop it
+            if part.get("field") == "response_code":
+                c = _find_response_code_value(part)
+                if c is None or code is not None:
+                    return None  # unusable code, or more than one code leaf
+                code = c
+                continue
+            return None  # some other scope (path, geo…) → not representable
+        return code
     if cond.get("field") == "response_code":
         op = cond.get("op", "eq")
         if op != "eq":  # not_eq / ne / ranges don't name a single served code

@@ -890,17 +890,23 @@ def _process_default_cache_behavior(ir, hostname, domain_config, origin_content,
 
 
 def _extract_extensions_from_condition(condition):
-    """Extract file extensions from a parsed condition if it's extension-based.
+    """Extract the file extensions a rule POSITIVELY matches, if extension-based.
 
-    Collects extensions from ALL branches, not just the first — an
-    `ext in {pdf} or ext in {jpg}` rule covers BOTH pdf and jpg, so returning
-    only the first branch's `[pdf]` would drop jpg from the custom-TTL map.
+    Collects from ALL positive branches — an `ext in {pdf} or ext in {jpg}` rule
+    covers BOTH pdf and jpg, so returning only the first branch's `[pdf]` would
+    drop jpg from the custom-TTL map. But a NEGATED set (`not (ext in {pdf})`,
+    `ext not_in {pdf}`) matches everything EXCEPT those, so its extensions must
+    NOT be collected — doing so would apply the TTL/bypass to exactly the
+    extensions the rule excludes (a full inversion). So descend AND/OR `parts`
+    only; do NOT descend a NOT node's `item`, and skip negated leaf ops.
     """
     if condition is None:
         return []
     if "logic" in condition:
+        if condition["logic"] == "not":
+            return []  # negated: matched set is the complement, not these exts
         exts = []
-        for child in iter_condition_children(condition):
+        for child in condition.get("parts", []):
             for e in _extract_extensions_from_condition(child):
                 if e not in exts:
                     exts.append(e)

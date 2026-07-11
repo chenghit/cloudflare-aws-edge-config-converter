@@ -84,6 +84,29 @@ def hcl_id(pid):
     return pid.replace("-", "_")
 
 
+def _orp_reference(beh, orp_headers, san):
+    """The ORP resource reference (HCL RHS) for a behavior, or None for no ORP.
+
+    Custom ORP wins: when the domain forwards geo/device headers, the custom
+    ORP (attached to EVERY behavior — CFFs run on all of them and none inherit
+    associations) takes precedence over the behavior's own dedup ORP. Shared by
+    the default and ordered-behavior emitters so their ORP wiring can't diverge.
+
+    Note: custom_orp forwards ONLY the geo/device headers (cookies/query =
+    "none"), so replacing a behavior's own ORP is lossless ONLY while the
+    pipeline never forwards cookies/query-strings to origin — which today it
+    doesn't (origin_request_policy.forward.cookies/query_strings is initialized
+    "none" and never mutated). If a rule ever populates cookie/query forwarding,
+    this must merge those into custom_orp per behavior instead of replacing.
+    """
+    if orp_headers:
+        return f"aws_cloudfront_origin_request_policy.custom_orp_{san}.id"
+    orp_id = beh.get("origin_request_policy_id")
+    if orp_id:
+        return f"data.aws_cloudfront_origin_request_policy.{hcl_id(orp_id)}.id"
+    return None
+
+
 # ── main.tf generation ───────────────────────────────────────────────────────
 
 def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
@@ -255,13 +278,10 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
     if cp_id:
         w(f'  default_cache_policy_id = data.aws_cloudfront_cache_policy.{hcl_id(cp_id)}.id')
 
-    # ORP: custom ORP takes precedence over shared
-    if orp_headers:
-        w(f'  default_origin_request_policy_id = aws_cloudfront_origin_request_policy.custom_orp_{san}.id')
-    else:
-        orp_id = default_beh.get("origin_request_policy_id")
-        if orp_id:
-            w(f'  default_origin_request_policy_id = data.aws_cloudfront_origin_request_policy.{hcl_id(orp_id)}.id')
+    # ORP: custom ORP takes precedence over shared (see _orp_reference)
+    default_orp = _orp_reference(default_beh, orp_headers, san)
+    if default_orp:
+        w(f'  default_origin_request_policy_id = {default_orp}')
 
     rhp_id = default_beh.get("response_headers_policy_id")
     if rhp_id:
@@ -306,19 +326,15 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
             b_cp = b.get("cache_policy_id")
             if b_cp:
                 w(f'      cache_policy_id = data.aws_cloudfront_cache_policy.{hcl_id(b_cp)}.id')
-            # ORP: the custom geo ORP (custom_orp_{san}) forwards the
-            # CloudFront-Viewer-* headers the shared CFF reads. Since the CFF
-            # runs on EVERY behavior (they don't inherit associations), every
-            # behavior must forward those headers too — otherwise a geo rule
-            # landing on this path behavior reads an undefined header. Custom ORP
-            # takes precedence over the behavior's own dedup ORP, mirroring the
-            # default behavior.
-            if orp_headers:
-                w(f'      origin_request_policy_id = aws_cloudfront_origin_request_policy.custom_orp_{san}.id')
-            else:
-                b_orp = b.get("origin_request_policy_id")
-                if b_orp:
-                    w(f'      origin_request_policy_id = data.aws_cloudfront_origin_request_policy.{hcl_id(b_orp)}.id')
+            # ORP: the custom geo ORP forwards the CloudFront-Viewer-* headers
+            # the shared CFF reads. Since the CFF runs on EVERY behavior (they
+            # don't inherit associations), every behavior must forward those
+            # headers too — else a geo rule landing on this path behavior reads
+            # an undefined header. Same decision as the default behavior, via the
+            # shared _orp_reference helper (so the two can't diverge).
+            b_orp_ref = _orp_reference(b, orp_headers, san)
+            if b_orp_ref:
+                w(f'      origin_request_policy_id = {b_orp_ref}')
             b_rhp = b.get("response_headers_policy_id")
             if b_rhp:
                 w(f'      response_headers_policy_id = data.aws_cloudfront_response_headers_policy.{hcl_id(b_rhp)}.id')

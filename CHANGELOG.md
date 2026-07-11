@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-07-11 (later)
+
+### CDN: sound host-filter set algebra + fixes for regressions from the same-day host-filter rework
+
+A review of the earlier same-day host-filter work found that the include/exclude representation didn't compose: AND/OR/NOT of host tests produced fail-opens (a rule firing where it must not) and silent drops (a rule vanishing where it must fire). None were caught by the passing suite — every one lived in a condition shape the suite didn't exercise. All were reproduced by executing the real modules, and the fixes are verified by the full pipeline on the example config (54 domains, all stages green), an end-to-end test that asserts the worst case in the actual generated artifacts, `node --check`, `terraform validate`, and a new host-filter property test that checks the algebra against brute-force truth over all small host-condition trees.
+
+**Host-filter algebra (the core fix)**. Reworked `_scan_host_from_condition` from ad-hoc include/exclude labels into a satisfiability-set algebra — the set of hosts for which the condition can fire: **AND intersects, OR unions, NOT is De Morgan pushdown** (polarity carried down the tree; set-complement taken only at a pure-host leaf, where it's sound). `None` (global) is the safe fallback: a rule left global still carries its condition, which gates per-request. This fixes:
+- `host ne b and host eq a` — was `exclude[b]` (applied to every host but b, then stripped to always-true → fired unconditionally on the wrong distributions). Now `include[a]`: only a.
+- `host ne a or host ne b` (a tautology) — was `exclude[a,b]` (dropped from both a and b). Now global.
+- `not (host eq a and uri.path eq /x)` — was `exclude[a]` (dropped from a, where it must fire for other paths). Now global (De Morgan: the AND isn't a pure host scope).
+- `not (full_uri wildcard "https://a.com/admin/*")` — was `include[a]` (dropped from every other host). Now global (a negated full_uri doesn't pin the host).
+
+**Host leaf ops**: recognize `host in $namedlist` (not host-pinnable → global; the processor still rejects it as non-convertible) and the `not_ne` double-negation; a negated full_uri leaf no longer contributes a positive host include.
+
+**Fresh regressions from the same-day round, reverted to the narrow behavior**:
+- `_extract_extensions_from_condition` had started descending NOT nodes, so `not (ext in {pdf})` cached exactly the extensions the rule *excludes* (a full inversion). It no longer descends NOT.
+- The tightened `ip.src` raw-fallback regex had stopped matching `ip.src not in {…}` (the standard allowlist form) and C-like `==`/`!=`, silently dropping the IP restriction in cache/compression rules. The operator set now covers them while still requiring an operator (so it can't match `ip.src` inside a string literal).
+
+**Other correctness**:
+- `extract_path_pattern_single` returned a concrete path even for a negated leaf (`not (full_uri wildcard …/admin/*)`), placing the rule on exactly the path it must NOT scope to; negated ops now yield `*` (default behavior).
+- `condition_to_js`'s `len()`/`lower()`/`upper()` modifier block ran after the `full_uri` early-returns, so those modifiers were ignored for `full_uri` (the exact string-vs-number / case-sensitivity bug, relocated). Moved into a shared helper applied to every leaf accessor, `full_uri` included.
+- `len(x) eq "5"` (a quoted length) rendered `x.length === '5'` (Number === String → always false); a digit-string length value is now coerced to a number.
+- A custom-error rule's code was read from the un-stripped condition, so `code eq 500 and host eq x` (host is a redundant per-host routing conjunct) was rejected as non-convertible; the code finder now drops redundant host conjuncts and yields a clean `code eq 500`. A real non-host scope (e.g. `uri.path`) still can't map → non-convertible.
+- The JS validator's "declares `cf.kvs()` but never uses the handle" check was dead — it stripped only the `cf.kvs(` token, leaving the `kvsHandle` identifier in the declaration, so the handle always looked used. It now strips the whole declaration before checking.
+
+**Cleanup**: the scaffold's custom-ORP precedence if/else (default + ordered behavior) is now a shared helper so the two can't diverge; the test generator's NOT-descent walkers route through `iter_condition_children`; documented that whole-domain custom ORP replacing a behavior's own ORP is lossless only while the pipeline never forwards cookies/query to origin (which it currently never does).
+
 ## 2026-07-11
 
 ### CDN: per-host distribution model — negated-host scope, geo headers on path behaviors, len/lower conditions, custom-error codes

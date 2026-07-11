@@ -13,6 +13,9 @@ Exit codes: 0 = OK, 1 = error.
 """
 import json, sys, os, glob as globmod
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cdn_expr_parser import iter_condition_children
+
 
 # Max bulk redirect tests (first N + last 1)
 MAX_BULK_REDIRECT_TESTS = 10
@@ -192,12 +195,9 @@ def _condition_untestable(cond):
     if cond.get("op") in ("in_kvs", "not_in_kvs"):
         return True
     if "logic" in cond:
-        # Descend parts AND a NOT node's item — a negated untestable condition
-        # (e.g. `not ip.src eq x`) is still untestable.
-        children = list(cond.get("parts", []))
-        if "item" in cond:
-            children.append(cond["item"])
-        return any(_condition_untestable(p) for p in children)
+        # Descend parts AND a NOT node's item (via the shared walker) — a negated
+        # untestable condition (e.g. `not ip.src eq x`) is still untestable.
+        return any(_condition_untestable(p) for p in iter_condition_children(cond))
     return False
 
 
@@ -222,10 +222,7 @@ def _skip_reason(cond):
     if cond.get("op") in ("in_kvs", "not_in_kvs"):
         return "Requires request from IP in KVS list"
     if "logic" in cond:
-        children = list(cond.get("parts", []))
-        if "item" in cond:
-            children.append(cond["item"])
-        for p in children:
+        for p in iter_condition_children(cond):
             if _condition_untestable(p):
                 return _skip_reason(p)
     return "Complex condition — test manually"

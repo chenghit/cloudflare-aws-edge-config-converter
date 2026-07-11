@@ -164,7 +164,14 @@ def validate_domain(ir, output_dir, manifest=None):
         if not js:
             continue
         declares = "cf.kvs(" in js
-        uses = "kvsHandle" in js.replace("cf.kvs(", "")
+        # "uses" = kvsHandle referenced OUTSIDE its own declaration. The handle
+        # is emitted as `const kvsHandle = cf.kvs();`, and that line itself
+        # contains the token "kvsHandle" — so strip the whole declaration before
+        # looking, not just the `cf.kvs(` call (stripping only the call leaves
+        # `const kvsHandle = )`, whose "kvsHandle" made `uses` always True and
+        # the declared-but-unused arm dead).
+        without_decl = re.sub(r"const\s+kvsHandle\s*=\s*cf\.kvs\([^)]*\)\s*;?", "", js)
+        uses = "kvsHandle" in without_decl
         if uses and not declares:
             kvs_issues.append(f"{label}: uses kvsHandle without cf.kvs() (ReferenceError)")
         if declares and not uses:

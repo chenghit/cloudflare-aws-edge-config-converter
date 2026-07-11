@@ -253,6 +253,26 @@ def _needs_check(field):
 _NEVER = object()
 
 
+def _apply_leaf_modifiers(val_expr, cond):
+    """Apply the leaf modifiers the parser records so the op runs on the right
+    value:
+      size_check (len(x))       → compare x.length (value is numeric)
+      transform lowercase/upper → .toLowerCase() / .toUpperCase()
+    Without this, `len(uri.path) gt 10` renders `request.uri > 10` (string vs
+    number → never true) and `lower(host) eq "x"` is silently case-sensitive.
+    Applied to EVERY leaf accessor, including full_uri — the full_uri branch
+    reconstructs its own accessor and must run this too, or len()/lower() on
+    full_uri are silently ignored."""
+    if cond.get("size_check"):
+        val_expr = f"{val_expr}.length"
+    transform = cond.get("transform")
+    if transform == "lowercase":
+        val_expr = f"{val_expr}.toLowerCase()"
+    elif transform == "uppercase":
+        val_expr = f"{val_expr}.toUpperCase()"
+    return val_expr
+
+
 def condition_to_js(cond, target="cff", indent=2):
     """Convert a CDN condition tree to a JS expression string.
 
@@ -321,6 +341,14 @@ def _condition_to_js(cond, target="cff", indent=2):
     op = cond.get("op", "eq")
     value = cond.get("value")
 
+    # A size_check (len(x)) compares against a NUMBER. Cloudflare may quote the
+    # literal (`len(x) eq "5"`), so the parser hands us the string "5"; rendered
+    # as `x.length === '5'` that is Number===String → always false (eq/ne don't
+    # coerce; gt/lt would, but normalize uniformly). Coerce a digit-string value
+    # to int so the comparison is numeric.
+    if cond.get("size_check") and isinstance(value, str) and value.lstrip("-").isdigit():
+        value = int(value)
+
     # Handle not_ prefix
     negated = False
     base_op = op
@@ -342,7 +370,7 @@ def _condition_to_js(cond, target="cff", indent=2):
     # Special: full_uri without a host/path split (contains, eq, matches, or a
     # scheme-less wildcard) — reconstruct the absolute URL and match against it.
     if field == "full_uri":
-        uri_acc = _full_uri_accessor(target)
+        uri_acc = _apply_leaf_modifiers(_full_uri_accessor(target), cond)
         js_cond = _op_to_js(uri_acc, base_op, value, field)
         if js_cond is _NEVER:
             return _NEVER
@@ -373,18 +401,7 @@ def _condition_to_js(cond, target="cff", indent=2):
     else:
         check_expr, val_expr = None, acc
 
-    # Apply leaf modifiers the parser records so the op runs on the right value:
-    #   size_check (len(x))       → compare x.length (value is numeric)
-    #   transform lowercase/upper → case-insensitive match via .toLowerCase()/…
-    # Without this, `len(uri.path) gt 10` renders `request.uri > 10` (string vs
-    # number → never true) and `lower(host) eq "x"` is silently case-sensitive.
-    if cond.get("size_check"):
-        val_expr = f"{val_expr}.length"
-    transform = cond.get("transform")
-    if transform == "lowercase":
-        val_expr = f"{val_expr}.toLowerCase()"
-    elif transform == "uppercase":
-        val_expr = f"{val_expr}.toUpperCase()"
+    val_expr = _apply_leaf_modifiers(val_expr, cond)
 
     js_cond = _op_to_js(val_expr, base_op, value, field)
 

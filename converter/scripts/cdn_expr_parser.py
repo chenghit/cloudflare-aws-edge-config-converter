@@ -272,59 +272,166 @@ def extract_host_filter(condition, expression):
     return _scan_host_from_condition(condition)
 
 
-def _scan_host_from_condition(cond):
-    """Extract a host filter (see extract_host_filter) from a parsed condition."""
-    if "logic" in cond:
-        if cond.get("logic") == "not":
-            # not(<positive host scope>) inverts include <-> exclude, e.g.
-            # not (http.host eq "a" or http.host eq "b") -> exclude [a, b].
-            inner = _scan_host_from_condition(cond.get("item"))
-            if inner is None:
-                return None
-            if "include" in inner:
-                return {"exclude": inner["include"]}
-            return {"include": inner["exclude"]}
-        parts = cond.get("parts", [])
-        if cond.get("logic") == "or":
-            # Fires if ANY branch matches. Host-scoped ONLY if EVERY branch pins
-            # a host (scope = union); a hostless branch -> global. Mixing include
-            # and exclude across branches is not representable -> global.
-            union, kind = [], None
-            for p in parts:
-                h = _scan_host_from_condition(p)
-                if h is None:
-                    return None
-                k = "include" if "include" in h else "exclude"
-                if kind is None:
-                    kind = k
-                elif kind != k:
-                    return None  # can't union include with exclude
-                union.extend(h[k])
-            return {kind: union} if union else None
-        # AND: any host-constraining conjunct scopes the whole rule (a stricter
-        # scope only narrows -- safe). Take the first host filter found.
-        for p in parts:
-            h = _scan_host_from_condition(p)
-            if h is not None:
-                return h
+# ── Host-filter set algebra ──────────────────────────────────────────────────
+# A host filter is the set of hostnames H for which the condition is SATISFIABLE
+# by some request to H: None = all hosts (global), {"include":[...]} = exactly
+# those, {"exclude":[...]} = all except those. `None` is the SAFE fallback — a
+# rule left global still carries its full condition, which gates per-request in
+# the CFF, so returning global never fires a rule where the condition is false.
+# include/exclude are provable narrowings that let a distribution be skipped
+# entirely; they must be EXACT, so any composition that can't be represented
+# exactly falls back to None rather than guessing (which is how the round-10
+# rework produced fail-opens and silent drops). Wildcards in host values (e.g.
+# `*.example.com` from a full_uri host_pattern) make literal set-minus unsound,
+# so the combinators only do exact same-kind ops and otherwise return None.
+
+
+def _hf_negate(hf):
+    """Complement of a host filter. Sound ONLY for a filter that fully pins the
+    host (a pure-host leaf) — the caller guarantees that. include <-> exclude."""
+    if hf is None:
         return None
+    if "include" in hf:
+        return {"exclude": list(hf["include"])}
+    return {"include": list(hf["exclude"])}
+
+
+def _hf_and(a, b):
+    """Intersection of two host filters (AND narrows the satisfiable set)."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    ai, bi = "include" in a, "include" in b
+    if ai and bi:
+        # include ∩ include: hosts that match BOTH. With possible wildcards,
+        # keep a host if it's matched by the other side too.
+        keep = [h for h in a["include"] if _any_matches(b["include"], h)] + \
+               [h for h in b["include"] if h not in a["include"] and _any_matches(a["include"], h)]
+        return {"include": keep}  # possibly empty -> applies nowhere (correct)
+    if (not ai) and (not bi):
+        # exclude ∩ exclude: excluded by EITHER -> union of exclusions.
+        return {"exclude": _dedup(a["exclude"] + b["exclude"])}
+    # include ∩ exclude: the include set minus anything the exclude rules out.
+    inc = a["include"] if ai else b["include"]
+    exc = b["exclude"] if ai else a["exclude"]
+    keep = [h for h in inc if not _any_matches(exc, h)]
+    return {"include": keep}
+
+
+def _hf_or(a, b):
+    """Union of two host filters (OR widens the satisfiable set)."""
+    if a is None or b is None:
+        return None  # a global branch makes the whole disjunction global
+    ai, bi = "include" in a, "include" in b
+    if ai and bi:
+        return {"include": _dedup(a["include"] + b["include"])}
+    if (not ai) and (not bi):
+        # exclude ∪ exclude: a host is excluded only if BOTH exclude it, i.e.
+        # excluded set = intersection of the two exclusion sets. Under wildcards
+        # an exact intersection isn't generally representable; only the literal
+        # overlap is safe, and dropping a host from the exclusion widens the set
+        # (safe: more distributions get the rule, condition still gates).
+        inter = [h for h in a["exclude"] if _any_matches(b["exclude"], h)
+                 or h in b["exclude"]]
+        return {"exclude": _dedup(inter)}
+    # include ∪ exclude: everything except (exclude-set minus include-set). A
+    # host in `inc` is covered by the include branch; all others except the
+    # remaining excludes are covered by the exclude branch.
+    inc = a["include"] if ai else b["include"]
+    exc = b["exclude"] if ai else a["exclude"]
+    remaining = [h for h in exc if h not in inc and not _any_matches(inc, h)]
+    return {"exclude": remaining} if remaining else None
+
+
+def _any_matches(patterns, host):
+    """True if `host` equals or is wildcard-matched by any pattern in the list."""
+    for p in patterns:
+        if p == host:
+            return True
+        if p.startswith("*.") and (host.endswith(p[1:]) or host == p[2:]):
+            return True
+        if host.startswith("*.") and (p.endswith(host[1:]) or p == host[2:]):
+            return True
+    return False
+
+
+def _dedup(items):
+    out = []
+    for x in items:
+        if x not in out:
+            out.append(x)
+    return out
+
+
+def _scan_host_from_condition(cond, negate=False):
+    """Extract a host filter from a parsed condition (see the algebra note above).
+
+    `negate` carries NOT polarity DOWN the tree (De Morgan) instead of
+    complementing a composite result — complement is only sound at a pure-host
+    leaf. Under negation, AND<->OR swap and each leaf is complemented. A
+    non-host leaf (or a negated full_uri, where host is not pinned) contributes
+    no host constraint -> None (global, the safe fallback)."""
+    if "logic" in cond:
+        logic = cond.get("logic")
+        if logic == "not":
+            return _scan_host_from_condition(cond.get("item"), not negate)
+        parts = cond.get("parts", [])
+        child_hfs = [_scan_host_from_condition(p, negate) for p in parts]
+        if not child_hfs:
+            return None
+        # AND intersects, OR unions; under negation the two swap (De Morgan).
+        # Fold from the FIRST child, not a None seed: None means "all hosts",
+        # which is the AND identity but NOT the OR identity (that is the empty
+        # set). Seeding OR with None would let _hf_or read the seed as a global
+        # branch and collapse a representable exclude to global.
+        combine_is_and = (logic == "and") != negate
+        combine = _hf_and if combine_is_and else _hf_or
+        result = child_hfs[0]
+        for hf in child_hfs[1:]:
+            result = combine(result, hf)
+        return result
     field = cond.get("field", "")
     if field == "host":
-        op = cond.get("op", "")
-        val = cond.get("value")
-        if op == "eq" and isinstance(val, str):
-            return {"include": [val]}
-        if op == "in" and isinstance(val, list):
-            return {"include": list(val)}
-        # negated host -> EXCLUDE (rule applies to all hosts except these)
-        if op in ("not_eq", "ne") and isinstance(val, str):
-            return {"exclude": [val]}
-        if op == "not_in" and isinstance(val, list):
-            return {"exclude": list(val)}
-    if field == "full_uri":
-        hp = cond.get("host_pattern")
-        if hp:
-            return {"include": [hp]}  # may contain wildcard
+        hf = _host_leaf_filter(cond)
+    elif field == "full_uri":
+        hf = _full_uri_leaf_filter(cond)
+    else:
+        hf = None  # non-host leaf: no host constraint
+    if hf is None:
+        return None
+    return _hf_negate(hf) if negate else hf
+
+
+def _host_leaf_filter(cond):
+    """Host filter for a single `host` leaf, honoring the op. Returns None
+    (global) for ops we can't pin to a host set (in_list — a named list with no
+    CloudFront equivalent; the processor rejects it separately)."""
+    op = cond.get("op", "")
+    val = cond.get("value")
+    if op == "eq" and isinstance(val, str):
+        return {"include": [val]}
+    if op == "in" and isinstance(val, list):
+        return {"include": list(val)}
+    if op in ("not_eq", "ne") and isinstance(val, str):
+        return {"exclude": [val]}
+    if op == "not_in" and isinstance(val, list):
+        return {"exclude": list(val)}
+    if op == "not_ne" and isinstance(val, str):
+        return {"include": [val]}  # double negation: not(host ne x) == host eq x
+    return None  # in_list / unknown op -> global (safe; processor may reject)
+
+
+def _full_uri_leaf_filter(cond):
+    """Host filter for a full_uri leaf. Only a POSITIVE match pins the host to
+    the pattern; a negated full_uri (not_wildcard) does NOT — a request to any
+    other host also satisfies it -> global."""
+    op = cond.get("op", "")
+    if op.startswith("not_"):
+        return None
+    hp = cond.get("host_pattern")
+    if hp:
+        return {"include": [hp]}  # may contain wildcard
     return None
 
 
@@ -356,6 +463,14 @@ def extract_path_pattern_single(cond):
     field = cond.get("field", "")
     op = cond.get("op", "")
     val = cond.get("value", "")
+    # A NEGATED path/full_uri leaf ("path is anything BUT /x", "full_uri does
+    # not match .../admin/*") is not expressible as a single CloudFront path
+    # pattern — the matching set is the complement. Return "*" (default behavior)
+    # rather than the pattern being excluded, which would place the rule on
+    # exactly the path it must NOT scope to. (The full_uri branch below reads
+    # path_pattern regardless of op, so this guard is what stops that leak.)
+    if op.startswith("not_"):
+        return "*"
     if field in ("uri.path", "uri"):
         if op == "wildcard":
             return val
