@@ -65,7 +65,12 @@ def gen_cache_policy(pid, config):
         w(f'      cookies {{ items = {hcl_list(cookies)} }}')
     w(f'    }}')
 
-    # Headers
+    # Headers. These come from a Cloudflare cache-key custom_key.header.include
+    # list (real request headers the user named) — NOT from geo/viewer fields.
+    # That matters because CloudFront-Viewer-Address / -ASN and the TLS/JA3/JA4
+    # headers are ORP-ONLY (they cannot appear in a cache policy); geo fields are
+    # forwarded via the origin request policy, never here, so this list can't
+    # contain them.
     headers = ck.get("headers", [])
     header_beh = "whitelist" if headers else "none"
     w(f'    headers_config {{')

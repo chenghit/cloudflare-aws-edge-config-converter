@@ -153,14 +153,22 @@ def validate_domain(ir, output_dir, manifest=None):
     # need puts cf.kvs() in viewer_response.js, not viewer_request.js), so check
     # BOTH handlers — testing only vr_js would spuriously FAIL a response-only
     # KVS domain and abort the pipeline.
-    kvs_req = ir.get("metadata", {}).get("kvs_requirements", {})
-    needs_kvs = any(kvs_req.values())
-    has_kvs = "cf.kvs(" in vr_js or "cf.kvs(" in vresp_js
+    # Validate each handler is SELF-consistent: it declares `cf.kvs()` iff it
+    # actually reads `kvsHandle`. This is drift-proof — it doesn't compare
+    # against the domain-wide kvs_requirements flag (which is per-domain, while
+    # emission is per-handler, so a response-only need would false-FAIL a
+    # vr_js-only check). A handle declared-but-unused, or used-but-undeclared
+    # (ReferenceError), is the real defect to catch.
     kvs_issues = []
-    if needs_kvs and not has_kvs:
-        kvs_issues.append("IR requires KVS but cf.kvs() not found in JS")
-    if not needs_kvs and has_kvs:
-        kvs_issues.append("JS has cf.kvs() but IR has no KVS requirements")
+    for label, js in (("viewer_request", vr_js), ("viewer_response", vresp_js)):
+        if not js:
+            continue
+        declares = "cf.kvs(" in js
+        uses = "kvsHandle" in js.replace("cf.kvs(", "")
+        if uses and not declares:
+            kvs_issues.append(f"{label}: uses kvsHandle without cf.kvs() (ReferenceError)")
+        if declares and not uses:
+            kvs_issues.append(f"{label}: declares cf.kvs() but never uses kvsHandle")
     checks.append({
         "name": "kvs_consistency",
         "status": "FAIL" if kvs_issues else "PASS",

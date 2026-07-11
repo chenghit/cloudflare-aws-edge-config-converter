@@ -533,10 +533,12 @@ check("quoted response_code coerced to int",
 check("path pattern on NOT node -> * (no crash)",
       _proc._extract_path_pattern({"logic": "not", "item": {"field": "uri.path", "op": "eq", "value": "/a"}}, ""),
       expect_substr="*")
-# host filter under NOT is global, not scoped to the excluded host
-check("host under NOT -> global (None)",
-      str(_parser.extract_host_filter({"logic": "not", "item": {"field": "host", "op": "eq", "value": "x.com"}}, "")),
-      expect_substr="None")
+# negated host -> EXCLUDE filter (applies to every host except x), NOT global.
+# (Old behavior returned None=global -> the rule then landed on x's own
+# distribution and, after host-strip, fired on x. Fail-open.)
+check("not(host eq x) -> exclude filter",
+      str(_parser.extract_host_filter({"field": "host", "op": "not_eq", "value": "x.com"}, "")),
+      expect_substr="'exclude': ['x.com']")
 # iter_condition_children yields both parts and item
 check("iter_condition_children yields item",
       str([c.get("field") for c in _parser.iter_condition_children(
@@ -638,6 +640,82 @@ check("empty AND -> unconditional (None)",
 # G: dead code removed
 check("_needs_kvs removed", str(hasattr(_gen, "_needs_kvs")), expect_substr="False")
 check("_parse_single_condition removed", str(hasattr(_parser, "_parse_single_condition")), expect_substr="False")
+
+print("== W (round 10): host-strip, len/lower, custom-error, full_uri cache ==")
+# H1: negated host is an EXCLUDE filter (all dists except x), not global.
+check("W-H1 not_eq host -> exclude",
+      str(_parser.extract_host_filter({"field": "host", "op": "not_eq", "value": "x.com"}, "")),
+      expect_substr="'exclude': ['x.com']")
+check("W-H1 not(host in set) -> exclude both (De Morgan)",
+      str(_parser.extract_host_filter(_parser.parse_expression_full(
+          'not (http.host in {"a.com" "b.com"})'), "")),
+      expect_substr="'exclude': ['a.com', 'b.com']")
+check("W-H1 include+exclude mixed in OR -> global (None)",
+      str(_parser.extract_host_filter(_parser.parse_expression_full(
+          'http.host eq "a.com" or http.host ne "b.com"'), "")),
+      expect_substr="None")
+
+# H2: strip ONLY host leaves the ROUTER consumed (eq/in/ne/not_in). A live host
+# PREDICATE (len(host), host contains ...) is NOT consumed -> must be KEPT, or
+# the predicate is silently dropped (fail-open). This is the exact bug the e2e
+# test caught that the old "strip any host leaf" logic introduced.
+check("W-H2 negated identity host strips (router consumed it)",
+      str(_pre._strip_host_condition({"field": "host", "op": "not_eq", "value": "x.com"})),
+      expect_substr="'always': True")
+check("W-H2 len(host) predicate is KEPT (router did NOT consume it)",
+      str(_pre._strip_host_condition({"field": "host", "op": "gt", "value": 5, "size_check": True})),
+      expect_substr="'size_check': True", forbid_substr="always")
+check("W-H2 host contains predicate is KEPT",
+      str(_pre._strip_host_condition({"field": "host", "op": "contains", "value": "x"})),
+      expect_substr="'op': 'contains'", forbid_substr="always")
+check("W-H2 len(host) AND path keeps BOTH (only routing-host conjuncts strip)",
+      str(_pre._strip_host_condition({"logic": "and", "parts": [
+          {"field": "host", "op": "gt", "value": 5, "size_check": True},
+          {"field": "uri.path", "op": "eq", "value": "/p"}]})),
+      expect_substr="'size_check': True")
+
+# C1: len() -> .length, lower()/upper() -> .toLowerCase()/.toUpperCase(), via
+# the real parser (size_check / transform leaf modifiers) into condition_to_js.
+check("W-C1 len(host) gt 5 renders .length",
+      _gen.condition_to_js(_parser.parse_expression_full("len(http.host) gt 5"), "cff"),
+      expect_substr=".length > 5")
+check("W-C1 lower(host) eq renders .toLowerCase()",
+      _gen.condition_to_js(_parser.parse_expression_full('lower(http.host) eq "x.com"'), "cff"),
+      expect_substr=".toLowerCase() === 'x.com'")
+check("W-C1 upper(uri.path) eq renders .toUpperCase()",
+      _gen.condition_to_js(_parser.parse_expression_full('upper(http.request.uri.path) eq "/A"'), "cff"),
+      expect_substr=".toUpperCase() === '/A'")
+
+# C2: custom error — intercepted code from the CONDITION, returned code from the
+# action. Compound/OR/no-code conditions can't map -> non_convertible.
+def _err(expr, status=None):
+    ap = {} if status is None else {"status_code": status}
+    return _proc.process_custom_error_rule(
+        {"id": "e1", "description": "d", "expression": expr, "action_parameters": ap},
+        {}, "http_custom_errors")
+_r = _err("http.response.code eq 500", 404)
+check("W-C2 error_code from condition (500)", str(_r.get("params", {}).get("error_code")), expect_substr="500")
+check("W-C2 response_code from action (404)", str(_r.get("params", {}).get("response_code")), expect_substr="404")
+check("W-C2 compound condition -> non_convertible",
+      _err('http.response.code eq 500 and http.host eq "x.com"', 404).get("type"),
+      expect_substr="non_convertible")
+check("W-C2 OR-of-codes -> non_convertible",
+      _err("http.response.code eq 500 or http.response.code eq 502").get("type"),
+      expect_substr="non_convertible")
+check("W-C2 unsupported code (418) -> non_convertible",
+      _err("http.response.code eq 418").get("type"), expect_substr="non_convertible")
+
+# P1: full_uri wildcard cache leaf reduces to its concrete path pattern and IS a
+# single-path scope (a real ordered behavior), not swallowed site-wide.
+_fu = _parser.parse_expression_full('http.request.full_uri wildcard "https://x.com/files/*"')
+check("W-P1 full_uri wildcard -> concrete path /files/*",
+      _parser.extract_path_pattern_single(_fu), expect_substr="/files/*")
+check("W-P1 full_uri wildcard IS single-path",
+      str(_pre._cache_cond_is_single_path(_fu)), expect_substr="True")
+check("W-P1 full_uri contains (no concrete path) is NOT single-path",
+      str(_pre._cache_cond_is_single_path(
+          _parser.parse_expression_full('http.request.full_uri contains "/files"'))),
+      expect_substr="False")
 
 # ── PROPERTY TEST: no fail-open across ALL small condition trees ─────────────
 # Enumerate every condition tree (depth ≤ 2) over three leaves — two mappable

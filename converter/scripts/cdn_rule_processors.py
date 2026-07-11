@@ -52,18 +52,22 @@ def _condition_uses_ip_src(condition):
     return condition.get("field") in ("ip.src",)
 
 
-# `ip.src` as a direct-IP field: the token `ip.src` NOT followed by another
-# `.<subfield>` (which would be a geo field like ip.src.country / .continent).
-_RE_RAW_IP_SRC = re.compile(r"\bip\.src\b(?!\.)")
+# `ip.src` as a direct-IP FIELD reference: the token `ip.src`, not followed by
+# `.<subfield>` (a geo field like ip.src.country), AND immediately followed by a
+# comparison operator (`ip.src in {...}` / `ip.src eq "..."`). Requiring the
+# operator avoids a false match on `ip.src` sitting inside a string literal
+# (e.g. `http.request.uri contains "ip.src"`), which would wrongly reject the rule.
+_RE_RAW_IP_SRC = re.compile(r"\bip\.src\b(?!\.)\s+(?:in|eq|ne)\b")
 
 
 def _uses_ip_src(condition, raw_expr=None):
     """Direct-IP (ip.src) check that also covers a deferred raw expression.
 
-    An OR expression is deferred as raw text (condition is None), so a
-    structured-only check would let `ip.src eq "..." or ip.src eq "..."` slip
-    past the cache/compression ip.src guard and silently drop the IP
-    restriction. Scan the raw text too.
+    parse_expression now structures OR/AND/NOT, so `condition` is the normal
+    case. It only falls back to raw text (condition is None) when the parser
+    genuinely can't parse the expression. A structured-only check would then let
+    an unparseable `ip.src`-bearing expression slip past the cache/compression
+    ip.src guard and silently drop the IP restriction, so scan the raw text too.
     """
     if _condition_uses_ip_src(condition):
         return True
@@ -747,33 +751,42 @@ def process_custom_error_rule(rule, ip_lists, phase):
             },
         }
 
+    # The ERROR code (which origin status CloudFront intercepts) comes from the
+    # rule's CONDITION (http.response.code eq N), NOT the action's status_code
+    # (that is the code RETURNED to the viewer — response_page's response_code).
+    # Conflating them made `code eq 500 and host x` + action 404 intercept
+    # origin 404s. If the condition doesn't yield a single clean code
+    # (compound/OR/negated → response_code is None), we can't know which status
+    # to intercept → non-convertible.
+    error_code = response_code
+    if error_code is None:
+        return _make_non_convertible(
+            rule,
+            "Custom error rule's intercepted status is not a single "
+            "http.response.code equality (compound/negated condition), so it "
+            "can't map to a CloudFront custom error response. Handle at origin."
+        )
+
     # Path 3: unsupported status code
-    effective_code = response_code or status_code
-    if effective_code and effective_code not in SUPPORTED_ERROR_CODES:
+    if error_code not in SUPPORTED_ERROR_CODES:
         return _make_non_convertible(
             rule,
             f"CloudFront custom error response only supports status codes: "
             f"{', '.join(str(c) for c in sorted(SUPPORTED_ERROR_CODES))}; "
-            f"got {effective_code}"
+            f"got {error_code}"
         )
 
-    # Path 1/2: supported code, no inline content
-    if effective_code:
-        return {
-            "type": "custom_error_response",
-            "cf_source_rule": rule.get("id", ""),
-            "description": rule.get("description", ""),
-            "params": {
-                "error_code": effective_code,
-                "response_code": status_code,
-            },
-        }
-
-    # Path 5: no clear status code
-    return _make_non_convertible(
-        rule,
-        "Custom error rule without a clear status code cannot be automatically converted"
-    )
+    # Path 1/2: supported error code, no inline content. response_code (returned
+    # to the viewer) is the action's status_code, if any.
+    return {
+        "type": "custom_error_response",
+        "cf_source_rule": rule.get("id", ""),
+        "description": rule.get("description", ""),
+        "params": {
+            "error_code": error_code,
+            "response_code": status_code,
+        },
+    }
 
 
 def process_compression_rule(rule, ip_lists, phase):

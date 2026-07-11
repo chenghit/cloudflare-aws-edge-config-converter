@@ -11,7 +11,7 @@ Exit 0 = all PASS, 1 = any FAIL, 2 = fatal error.
 import json, sys, os, re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdn_expr_parser import FIELD_TO_ORP_HEADERS
+from cdn_expr_parser import FIELD_TO_ORP_HEADERS, extract_orp_headers
 
 # All valid CloudFront-Viewer-* headers that can appear in required_orp_headers
 VALID_ORP_HEADERS = set()
@@ -149,12 +149,14 @@ def validate_domain(ir, filename):
         for h in orp_headers:
             if h not in VALID_ORP_HEADERS:
                 errors.append(f"Check12: cache_behaviors[{i}].required_orp_headers contains unknown header '{h}'")
-        # 12b: conditions using geo fields must have corresponding ORP headers
+        # 12b: conditions using geo fields must have corresponding ORP headers.
+        # Reuse the parser's extract_orp_headers (same iter_condition_children
+        # walk, incl. NOT items) so this validator can't drift from the producer.
         needed = set()
         for op in b.get("viewer_request_ops", []) + b.get("viewer_response_ops", []):
             cond = op.get("condition")
             if cond:
-                _collect_needed_orp(cond, needed)
+                needed.update(extract_orp_headers(cond))
         missing = needed - orp_headers
         if missing:
             warnings.append(
@@ -202,42 +204,18 @@ def validate_domain(ir, filename):
         if not isinstance(origin_resp, dict):
             errors.append("Check15: lambda_edge.origin_response is not an object")
         else:
+            # Only "default_cache" is produced now (the conditional_cache /
+            # conditional_cache_rules path was removed — no generator consumed it).
             resp_type = origin_resp.get("type")
             if resp_type == "default_cache":
                 if "custom_ttl_map" not in origin_resp:
                     errors.append("Check15: lambda_edge.origin_response missing custom_ttl_map")
                 elif not isinstance(origin_resp.get("custom_ttl_map"), dict):
                     errors.append("Check15: lambda_edge.origin_response.custom_ttl_map is not an object")
-            elif resp_type == "conditional_cache":
-                ccr = origin_resp.get("conditional_cache_rules")
-                if not isinstance(ccr, list) or len(ccr) == 0:
-                    errors.append("Check15: conditional_cache type but conditional_cache_rules is empty or not a list")
-            elif resp_type not in ("default_cache", "conditional_cache"):
-                errors.append(f"Check15: lambda_edge.origin_response.type is '{resp_type}', expected 'default_cache' or 'conditional_cache'")
             else:
-                errors.append("Check15: lambda_edge.origin_response missing type")
-            # Validate conditional_cache_rules entries if present
-            for i, rule in enumerate(origin_resp.get("conditional_cache_rules", [])):
-                if not rule.get("raw_expression"):
-                    errors.append(f"Check15: conditional_cache_rules[{i}] missing raw_expression")
+                errors.append(f"Check15: lambda_edge.origin_response.type is '{resp_type}', expected 'default_cache'")
 
     return errors, warnings
-
-
-def _collect_needed_orp(cond, needed):
-    """Recursively collect ORP headers needed by a condition. Descends BOTH a
-    logic node's `parts` and a NOT node's `item` — a geo field under a NOT (e.g.
-    `not (ip.src.continent eq "EU")`) still needs its ORP header, and skipping
-    `item` would miss it (the NOT-blind walker bug this validator shared)."""
-    if "logic" in cond:
-        for p in cond.get("parts", []):
-            _collect_needed_orp(p, needed)
-        if "item" in cond:
-            _collect_needed_orp(cond["item"], needed)
-    elif "field" in cond:
-        field = cond["field"]
-        for h in FIELD_TO_ORP_HEADERS.get(field, []):
-            needed.add(h)
 
 
 def main():

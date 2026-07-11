@@ -306,9 +306,19 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
             b_cp = b.get("cache_policy_id")
             if b_cp:
                 w(f'      cache_policy_id = data.aws_cloudfront_cache_policy.{hcl_id(b_cp)}.id')
-            b_orp = b.get("origin_request_policy_id")
-            if b_orp:
-                w(f'      origin_request_policy_id = data.aws_cloudfront_origin_request_policy.{hcl_id(b_orp)}.id')
+            # ORP: the custom geo ORP (custom_orp_{san}) forwards the
+            # CloudFront-Viewer-* headers the shared CFF reads. Since the CFF
+            # runs on EVERY behavior (they don't inherit associations), every
+            # behavior must forward those headers too — otherwise a geo rule
+            # landing on this path behavior reads an undefined header. Custom ORP
+            # takes precedence over the behavior's own dedup ORP, mirroring the
+            # default behavior.
+            if orp_headers:
+                w(f'      origin_request_policy_id = aws_cloudfront_origin_request_policy.custom_orp_{san}.id')
+            else:
+                b_orp = b.get("origin_request_policy_id")
+                if b_orp:
+                    w(f'      origin_request_policy_id = data.aws_cloudfront_origin_request_policy.{hcl_id(b_orp)}.id')
             b_rhp = b.get("response_headers_policy_id")
             if b_rhp:
                 w(f'      response_headers_policy_id = data.aws_cloudfront_response_headers_policy.{hcl_id(b_rhp)}.id')

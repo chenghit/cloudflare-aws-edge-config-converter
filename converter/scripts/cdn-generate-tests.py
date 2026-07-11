@@ -181,11 +181,15 @@ def _condition_untestable(cond):
     if cond.get("always"):
         return False
     field = cond.get("field", "")
-    if field in ("ip.src", "ip.src.country", "ip.src.continent",
-                 "ip.src.is_in_european_union", "ip.src.asnum",
-                 "ip.src.city", "ip.src.region"):
+    # The condition tree stores SHORT field names (post CF_FIELD_MAP), not the
+    # raw dotted Cloudflare names — matching on `ip.src.country` etc. never fired
+    # for geo leaves (stored as `country`, `continent`, …), so geo-gated rules
+    # were emitted as tests that can't pass without a request from that geo.
+    if field in ("ip.src", "country", "continent", "is_eu", "asnum",
+                 "city", "region", "region_code", "subdivision_1",
+                 "latitude", "longitude", "postal_code", "metro_code", "timezone"):
         return True
-    if cond.get("op") == "in_kvs":
+    if cond.get("op") in ("in_kvs", "not_in_kvs"):
         return True
     if "logic" in cond:
         # Descend parts AND a NOT node's item — a negated untestable condition
@@ -201,17 +205,21 @@ def _skip_reason(cond):
     if cond is None:
         return "Complex expression"
     field = cond.get("field", "")
+    # Short field names (post CF_FIELD_MAP), matching _condition_untestable.
     if field == "ip.src":
         return "Requires request from specific IP address"
-    if field == "ip.src.country":
+    if field == "country":
         return f"Requires request from country {cond.get('value', '?')}"
-    if field == "ip.src.continent":
+    if field == "continent":
         return "Requires request from specific continent"
-    if field == "ip.src.is_in_european_union":
+    if field == "is_eu":
         return "Requires request from EU country"
-    if field == "ip.src.asnum":
+    if field == "asnum":
         return f"Requires request from ASN {cond.get('value', '?')}"
-    if cond.get("op") == "in_kvs":
+    if field in ("city", "region", "region_code", "subdivision_1",
+                 "latitude", "longitude", "postal_code", "metro_code", "timezone"):
+        return f"Requires request from a specific geo ({field})"
+    if cond.get("op") in ("in_kvs", "not_in_kvs"):
         return "Requires request from IP in KVS list"
     if "logic" in cond:
         children = list(cond.get("parts", []))

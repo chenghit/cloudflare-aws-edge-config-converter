@@ -1,5 +1,61 @@
 # Changelog
 
+## 2026-07-11
+
+### CDN: per-host distribution model — negated-host scope, geo headers on path behaviors, len/lower conditions, custom-error codes
+
+Follow-up round on the per-host conversion model. These are the last of the OR-structuring / per-host consequences, plus one fail-open I introduced in the previous round's host-strip and caught here with a new end-to-end test. All fixes are verified by the full pipeline on the example config (54 domains, all stages green), a new synthetic 2-domain end-to-end test that drives every fix through preprocess→generate and asserts the actual Terraform + JS, `node --check` on the generated CFF, and `terraform validate` on both the shared policies and a full domain (custom ORP + ordered behaviors) — both "the configuration is valid".
+
+**Host scope**:
+- A negated host test (`not (http.host eq x)` / `http.host ne x`) now means **"every distribution except x's"** — an EXCLUDE host filter — instead of being treated as global (which put it on x's own distribution, where after host-stripping it fired on x: fail-open). `extract_host_filter` returns `{"include": [...]}` / `{"exclude": [...]}` / `None`; `not (host in {a,b})` excludes both via De Morgan; mixing include+exclude in one OR is not representable → global.
+- **Fail-open fixed (introduced by the previous round's host-strip, caught by the new e2e test):** `_strip_host_condition` was stripping *any* `field=="host"` leaf, but a LIVE host predicate — `len(http.host) gt 5`, `http.host contains "x"` — is not consumed by the host router and keeps the rule global, so stripping it silently dropped the predicate. Now it strips only leaves the router actually consumed for distribution routing (gated on `extract_host_filter(leaf) is not None`), so live predicates are kept and rendered.
+
+**Geo headers reach path-specific behaviors (the headline fix)**:
+- The custom origin-request policy (`custom_orp_{san}`) that forwards `CloudFront-Viewer-*` headers is now attached to **every** cache behavior, not just the default one. A geo-gated rule landing on a path-specific behavior (e.g. a header rule scoped to `/geo` + `ip.src.country`) previously read an **undefined** header there because only the default behavior forwarded it. Verified in the generated `main.tf`: the ORP is on the default behavior and all ordered behaviors (`/promo`, `/geo`, `/files/*`).
+
+**Conditions & cache**:
+- `condition_to_js` now honors the parser's leaf modifiers: `len(x)` (`size_check`) renders `x.length`, and `lower(x)`/`upper(x)` (`transform`) render `.toLowerCase()`/`.toUpperCase()`. `len(http.host) gt 5` was rendering `request.headers.host.value > 5` (string vs number → never true); `lower(host) eq "x"` was silently case-sensitive.
+- A `full_uri wildcard "https://host/files/*"` cache rule now keeps its concrete path pattern (`/files/*`) as its own ordered cache behavior with the rule's TTL, instead of being mis-marked non-convertible.
+
+**Custom error**:
+- A custom-error rule's intercepted status is taken from the CONDITION (`http.response.code eq N`) and the returned status from the action's `status_code` — no longer conflated (which made `code eq 500` + action 404 intercept origin 404s). A compound/OR/negated/absent code condition is non-convertible.
+
+**Cleanup**: removed the dead `conditional_cache` branch from validate-chunk Check15 (no producer emits that type); the validator now reuses the parser's `extract_orp_headers` walk instead of a duplicate; tightened `_RE_RAW_IP_SRC` to require an operator so it can't false-match `ip.src` inside a string literal; refreshed stale "OR ⇒ raw_expression" comments (OR is structured now).
+
+**Tests** (`converter/scripts/`): `test_dynamic_values.py` now 138 checks (added a round-10 `W` section: host include/exclude, host-strip live-predicate keep, len/lower/upper, custom-error code sourcing, full_uri cache). New `test_round10_e2e.py` builds a synthetic 2-domain backup and runs the entire CDN pipeline, asserting the round-10 behaviors in the real generated artifacts — the level of test that caught the host-strip fail-open the unit suite missed.
+
+## 2026-07-10
+
+### CDN: fix the OR-structuring fallout — fail-open conditions, dead cache sink, per-host scoping
+
+Making `parse_expression` return a structured `{"logic": "or"/"and"/"not"}` tree (instead of deferring OR to `raw_expression`) was the right direction, but it broke a hidden contract that several downstream consumers relied on, and it took several review rounds to shake out every consequence. This entry covers that whole series (commits `59feefa`, `27910d0`, `8431f50`, `f0ce0c0`, `ca7ea44`, `b6d38d7`, `545d248`). Most of these were silent — a rule reported as "converted" that then did nothing, fired on every request, or dropped config — and none were caught by the existing suite, which only asserted parser structure. All were reproduced against the real modules; the fixes are verified by the full pipeline on the example config (54 domains, 108→5 CFF dedup, all stages green), `node --check` on generated JS, `terraform validate`, an enumerative property test, and synthetic backups driven through the real preprocess.
+
+**CloudFront API**:
+- `cf.kvs()` takes **no argument** (the KVS is bound to the function via Terraform `key_value_store_associations`); the generator was emitting `cf.kvs('<id>')` with an ID that was never even populated — i.e. `cf.kvs('')`. Verified against AWS docs.
+
+**Fail-open / fail-closed correctness (conditions)**:
+- Reworked how an un-evaluable condition (unmappable field, unresolved list, unknown op) is represented — from a magic `false` string (which collided with real output like `/*x/.test(uri) || m === false`) to a structural `_NEVER` value combined with real three-valued boolean algebra. `_NEVER` is **contagious**: any logic node containing it fails the whole condition closed. This kills a class of fail-opens, most importantly `not (A or <un-evaluable>)`, which previously dropped the un-evaluable branch and negated only `A` (firing when it shouldn't).
+- `not ip.src in $list` (an allow-list) rendered `!( /* TODO */ false )` = `true` → fired on every request; now resolved to a negated KVS lookup.
+- `in_kvs`/`not_in_kvs` and `continent`/`is_eu` fail closed in the Lambda@Edge target (no `cf.kvs()`/preamble there) instead of emitting an undefined-variable ReferenceError.
+- Empty/malformed logic nodes fail closed (an empty OR no longer renders as "fires always").
+
+**Parser correctness**:
+- `A and (B or C)` no longer drops the parenthesized OR branch; `(A or B)` (fully-parenthesized) is no longer truncated to `A`. `parse_expression` now routes everything non-trivial through the full recursive-descent parser and only defers to `raw_expression` when the text is genuinely unparseable.
+- `not (not X)` normalizes to `X` (was `not_not_eq` → unknown op → `false`, so the rule never fired).
+- Every condition-tree walker descends both a logic node's `parts` and a NOT node's `item` (via a shared `iter_condition_children`); NOT-blind walkers previously skipped or `KeyError`-crashed on negated subtrees (ORP-header collection, IP-list resolution, KVS provisioning, cache/compression guards).
+- Multi-host OR (`http.host eq "a" or http.host eq "b"`) scopes to the union of hosts only when every branch pins a host, else global — was scoped to only the first branch's host, silently dropping the rule for the rest.
+
+**Cache-rule placement (per-host distributions)**:
+- The pipeline builds one distribution per proxied host, so a `http.host eq "<this domain>"` condition inside a domain's IR is redundant and is now **stripped** after host-routing. This makes host-scoped cache rules convertible: `host eq x` → default behavior with caching disabled; `host eq x and uri.path eq /api` → a `/api` cache behavior with the rule's TTL. (Mirrors the WAF pipeline's host-condition stripping.)
+- A cache rule whose scope genuinely can't be expressed as a single CloudFront path (e.g. `ip.src.country`, a multi-field AND after stripping) is now recorded **non-convertible in `conversion_report.md`** instead of being routed to `lambda_edge.origin_response.conditional_cache_rules` — a sink that no generator ever consumed, so those rules were silently dropped. `uri.path.extension eq "pdf"` (which yields path `*`, not `*.pdf`) is likewise no longer mis-applied site-wide.
+
+**Custom error / other**:
+- A custom-error rule's response code is extracted only from a single positive `http.response.code eq N` leaf (int-coerced). An OR of codes, an AND-scoped code, or a negated code is now non-convertible instead of silently keeping the first / over-matching per-distribution / rejecting a quoted `"404"`.
+- Response-header rules using `sha256()`/HMAC or `uri.query` now emit the `import crypto` / `_qs` helper they reference in the viewer-response handler.
+- Per-handler KVS: `cf.kvs()` is emitted (and the Terraform association written, and Stage-9 validation checked) per handler, so a response-only KVS need no longer emits an unused handle in the request handler or spuriously fails validation.
+
+**What changed** (all in `converter/scripts/`): `cdn_expr_parser.py`, `cdn_rule_processors.py`, `cdn-preprocess.py`, `cdn-generate-js.py`, `cdn-validate-js.py`, `cdn-validate-chunk.py`, and `test_dynamic_values.py` (now 120 checks, including an enumerative no-fail-open property test over all small condition trees). Removed ~137 lines of an orphaned single-condition parser (`_parse_single_condition` + its regexes) left behind by the full-parser switch, and the dead `conditional_cache_rules` routing.
+
 ## 2026-07-09
 
 ### CDN: fix 15 convertibility / action-value bugs + subdivision classification

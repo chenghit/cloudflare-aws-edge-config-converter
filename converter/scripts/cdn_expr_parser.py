@@ -253,59 +253,78 @@ def _collect_kvs(cond, triggers):
 
 
 def extract_host_filter(condition, expression):
-    """Determine which hostnames this rule applies to.
+    """Determine which hostnames a rule applies to (i.e. which distributions).
 
-    Returns:
-        list of hostnames, or None if global (applies to all).
+    Returns a HOST FILTER, one of:
+      - None                 -> global (applies to every distribution)
+      - {"include": [hosts]} -> applies only to these hosts
+      - {"exclude": [hosts]} -> applies to every host EXCEPT these
+        (from a negated host test: `not (http.host eq x)` / `http.host ne x`,
+        which in Cloudflare means "all hosts except x")
+    rule_applies_to_domain() interprets this per distribution.
     """
     if condition is None:
-        # raw_expression — scan the original expression for http.host
-        return _scan_host_from_expression(expression)
+        # raw_expression -- scan the original expression for http.host
+        hosts = _scan_host_from_expression(expression)
+        return {"include": hosts} if hosts else None
     if condition.get("always"):
         return None  # global
     return _scan_host_from_condition(condition)
 
 
 def _scan_host_from_condition(cond):
-    """Extract host filter from parsed condition (list of hosts, or None=global)."""
+    """Extract a host filter (see extract_host_filter) from a parsed condition."""
     if "logic" in cond:
-        # NOT: a host inside a negation is an EXCLUSION, not a positive scope —
-        # returning it would scope the rule to exactly the host it excludes. A
-        # negated host condition means "applies globally".
         if cond.get("logic") == "not":
-            return None
+            # not(<positive host scope>) inverts include <-> exclude, e.g.
+            # not (http.host eq "a" or http.host eq "b") -> exclude [a, b].
+            inner = _scan_host_from_condition(cond.get("item"))
+            if inner is None:
+                return None
+            if "include" in inner:
+                return {"exclude": inner["include"]}
+            return {"include": inner["exclude"]}
         parts = cond.get("parts", [])
         if cond.get("logic") == "or":
-            # The rule fires if ANY branch matches. It is host-scoped ONLY if
-            # EVERY branch pins a host (then the scope is their union); if any
-            # branch has no host (e.g. a path/geo branch), the rule can fire on
-            # any host → global (None). Returning just the first branch's host
-            # would silently drop the rule for the other branches' hosts.
-            union = []
+            # Fires if ANY branch matches. Host-scoped ONLY if EVERY branch pins
+            # a host (scope = union); a hostless branch -> global. Mixing include
+            # and exclude across branches is not representable -> global.
+            union, kind = [], None
             for p in parts:
                 h = _scan_host_from_condition(p)
                 if h is None:
-                    return None  # a hostless branch → global
-                union.extend(h)
-            return union or None
-        # AND: any host-pinning conjunct legitimately scopes the whole rule.
+                    return None
+                k = "include" if "include" in h else "exclude"
+                if kind is None:
+                    kind = k
+                elif kind != k:
+                    return None  # can't union include with exclude
+                union.extend(h[k])
+            return {kind: union} if union else None
+        # AND: any host-constraining conjunct scopes the whole rule (a stricter
+        # scope only narrows -- safe). Take the first host filter found.
         for p in parts:
-            hosts = _scan_host_from_condition(p)
-            if hosts is not None:
-                return hosts
+            h = _scan_host_from_condition(p)
+            if h is not None:
+                return h
         return None
     field = cond.get("field", "")
     if field == "host":
         op = cond.get("op", "")
         val = cond.get("value")
         if op == "eq" and isinstance(val, str):
-            return [val]
+            return {"include": [val]}
         if op == "in" and isinstance(val, list):
-            return val
+            return {"include": list(val)}
+        # negated host -> EXCLUDE (rule applies to all hosts except these)
+        if op in ("not_eq", "ne") and isinstance(val, str):
+            return {"exclude": [val]}
+        if op == "not_in" and isinstance(val, list):
+            return {"exclude": list(val)}
     if field == "full_uri":
         hp = cond.get("host_pattern")
         if hp:
-            return [hp]  # may contain wildcard
+            return {"include": [hp]}  # may contain wildcard
     return None
 
 

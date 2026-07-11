@@ -373,6 +373,19 @@ def _condition_to_js(cond, target="cff", indent=2):
     else:
         check_expr, val_expr = None, acc
 
+    # Apply leaf modifiers the parser records so the op runs on the right value:
+    #   size_check (len(x))       → compare x.length (value is numeric)
+    #   transform lowercase/upper → case-insensitive match via .toLowerCase()/…
+    # Without this, `len(uri.path) gt 10` renders `request.uri > 10` (string vs
+    # number → never true) and `lower(host) eq "x"` is silently case-sensitive.
+    if cond.get("size_check"):
+        val_expr = f"{val_expr}.length"
+    transform = cond.get("transform")
+    if transform == "lowercase":
+        val_expr = f"{val_expr}.toLowerCase()"
+    elif transform == "uppercase":
+        val_expr = f"{val_expr}.toUpperCase()"
+
     js_cond = _op_to_js(val_expr, base_op, value, field)
 
     # An un-evaluable op (unresolved in_list, unknown op) is never-match — do NOT
@@ -709,8 +722,14 @@ def _generate_op_js(op, target="cff", indent="  "):
         try:
             cond = parse_expression_full(raw_expr)
         except Exception as e:
-            print(f"  WARN: condition parse failed: {raw_expr[:60]}... ({e})", file=sys.stderr)
-            lines.append(f"{indent}// TODO: could not parse condition: {raw_expr[:80]}")
+            # Genuinely unparseable condition — DROP the op (fail closed: never
+            # emit its action unconditionally, which would fire on every
+            # request). Loudly flagged so it surfaces; the op's action is not
+            # applied. (This is rare: the processor defers to raw only when the
+            # full parser can't structure the text.)
+            print(f"  WARN: NON_CONVERTIBLE op '{op_type}' — condition unparseable, "
+                  f"op dropped: {raw_expr[:80]} ({e})", file=sys.stderr)
+            lines.append(f"{indent}// NON_CONVERTIBLE: unparseable condition, op dropped: {raw_expr[:80]}")
             return lines
 
     cond_js = condition_to_js(cond, target)

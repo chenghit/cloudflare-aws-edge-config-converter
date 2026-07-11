@@ -162,51 +162,74 @@ def hostname_matches(hostname, pattern):
     return False
 
 
-def rule_applies_to_domain(hosts, hostname, apex_domain):
-    """Check if a rule with given host filter applies to this domain."""
-    if hosts is None:
-        return True  # global rule
-    for h in hosts:
-        if hostname_matches(hostname, h):
-            return True
-    return False
+def rule_applies_to_domain(host_filter, hostname, apex_domain):
+    """Check if a rule with the given host filter applies to this domain.
+
+    host_filter is None (global), {"include": [...]}, or {"exclude": [...]}
+    (see extract_host_filter). An exclude filter is how `not (host eq x)` is
+    represented — the rule applies to every distribution EXCEPT x's.
+    """
+    if host_filter is None:
+        return True  # global rule → every distribution
+    if "include" in host_filter:
+        return any(hostname_matches(hostname, h) for h in host_filter["include"])
+    if "exclude" in host_filter:
+        # Applies everywhere except the excluded hosts.
+        return not any(hostname_matches(hostname, h) for h in host_filter["exclude"])
+    return True
+
+
+def _host_leaf_consumed_for_routing(cond):
+    """True if this leaf is a host test the host-router ALREADY consumed for
+    distribution routing — i.e. extract_host_filter turns it into an
+    include/exclude (host eq/in and their negations ne/not_in). Such a leaf is
+    redundant on the distribution the rule was routed to and can be stripped.
+
+    A `host` leaf the classifier does NOT consume is a LIVE predicate that keeps
+    the rule global and must be kept + rendered, NOT dropped:
+      - `len(http.host) gt 5`     (op gt, size_check)  -> None -> keep
+      - `len(http.host) eq 5`     (eq with an int val) -> None -> keep
+      - `http.host contains "x"`  (op contains)        -> None -> keep
+    (extract_host_filter's own str/list value checks draw this line, so reuse
+    it rather than re-listing ops here and drifting.) full_uri leaves carry a
+    host_pattern the classifier consumes too, but their PATH part still matters,
+    so they are excluded here (guarded by field == "host") and never stripped.
+    """
+    return cond.get("field") == "host" and extract_host_filter(cond, "") is not None
 
 
 def _strip_host_condition(cond):
-    """Remove the now-redundant host test from a condition once the rule has been
-    routed to a single host's distribution.
+    """Remove the now-redundant host test once the rule is routed to a single
+    host's distribution.
 
-    The CDN pipeline builds one CloudFront distribution per proxied host, so a
-    `http.host eq "<this domain>"` leaf inside that domain's IR is always true —
-    keeping it makes an otherwise-convertible rule look "compound / non-single
-    path" (e.g. `host eq x AND uri.path eq /api` would not reduce to the `/api`
-    behavior). Mirrors WAF's _strip_host_from_and. Removes `host` leaves and a
-    `full_uri` leaf carrying a host_pattern (host-scoped) from AND nodes; a
-    bare host leaf becomes unconditional ({"always": True}, NOT None, so the
-    op still carries a condition for validate-chunk Check11). OR/NOT stay — a host
-    inside an OR/NOT is not a plain positive scope and rule_applies_to_domain
-    already decided membership.
+    The CDN pipeline builds one CloudFront distribution per proxied host, and
+    rule_applies_to_domain() has ALREADY decided this rule belongs to this
+    distribution (honoring include/exclude host filters). A host leaf the router
+    consumed is redundant and always-true for this distribution — a positive
+    `host eq x` (we ARE x) and, crucially, a negated `host ne x` / `not_eq x`
+    too (an exclude-x rule only reaches a non-x distribution, where `host != x`
+    holds). Strip ONLY those (see _host_leaf_consumed_for_routing); a live host
+    predicate like `len(host) gt 5` is kept. If stripping empties the condition,
+    return {"always": True} (NOT None — the op must keep a condition for
+    validate-chunk Check11). Non-host leaves and OR/NOT (whose membership the
+    classifier already resolved) are left as-is.
     """
     if cond is None:
         return None
     if "logic" not in cond:
-        # bare leaf
-        if cond.get("field") == "host":
-            return {"always": True}  # unconditional (see note: NOT None)
-        # full_uri with host_pattern: the path part still matters, so keep it.
+        if _host_leaf_consumed_for_routing(cond):
+            return {"always": True}  # router consumed it -> redundant here
+        # Non-host leaf, live host predicate, or full_uri (path still matters).
         return cond
     if cond["logic"] == "and":
-        kept = []
-        for p in cond.get("parts", []):
-            if p.get("field") == "host":
-                continue  # redundant host conjunct
-            kept.append(p)
+        kept = [p for p in cond.get("parts", [])
+                if not _host_leaf_consumed_for_routing(p)]
         if not kept:
-            return {"always": True}  # was only host conjuncts -> unconditional
+            return {"always": True}  # was only routing-host conjuncts -> unconditional
         if len(kept) == 1:
             return kept[0]
         return {**cond, "parts": kept}
-    # OR / NOT: leave as-is (host here isn't a plain positive scope).
+    # OR / NOT: leave as-is (the classifier already resolved membership).
     return cond
 
 
@@ -854,37 +877,37 @@ def _process_default_cache_behavior(ir, hostname, domain_config, origin_content,
             beh["cache_policy"]["ttl"]["default"] = ttl
 
         # L@E with empty map — handles remaining ~70 extensions at default 7200s
-        existing_ccr = (ir["metadata"]["lambda_edge"].get("origin_response") or {}).get("conditional_cache_rules", [])
         ir["metadata"]["lambda_edge"]["origin_response"] = {
             "type": "default_cache",
             "custom_ttl_map": {},
         }
-        if existing_ccr:
-            ir["metadata"]["lambda_edge"]["origin_response"]["conditional_cache_rules"] = existing_ccr
     else:
         # Path 3 (>20 custom): consolidate into L@E custom_ttl_map
-        existing_ccr = (ir["metadata"]["lambda_edge"].get("origin_response") or {}).get("conditional_cache_rules", [])
         ir["metadata"]["lambda_edge"]["origin_response"] = {
             "type": "default_cache",
             "custom_ttl_map": custom_ttl_map,
         }
-        if existing_ccr:
-            ir["metadata"]["lambda_edge"]["origin_response"]["conditional_cache_rules"] = existing_ccr
 
 
 def _extract_extensions_from_condition(condition):
-    """Extract file extensions from a parsed condition if it's extension-based."""
+    """Extract file extensions from a parsed condition if it's extension-based.
+
+    Collects extensions from ALL branches, not just the first — an
+    `ext in {pdf} or ext in {jpg}` rule covers BOTH pdf and jpg, so returning
+    only the first branch's `[pdf]` would drop jpg from the custom-TTL map.
+    """
     if condition is None:
         return []
     if "logic" in condition:
-        for p in condition.get("parts", []):
-            exts = _extract_extensions_from_condition(p)
-            if exts:
-                return exts
-        return []
+        exts = []
+        for child in iter_condition_children(condition):
+            for e in _extract_extensions_from_condition(child):
+                if e not in exts:
+                    exts.append(e)
+        return exts
     if condition.get("field") == "uri.path.extension":
         if condition.get("op") == "in":
-            return condition.get("value", [])
+            return list(condition.get("value", []))
         if condition.get("op") == "eq" and isinstance(condition.get("value"), str):
             return [condition["value"]]
     return []
@@ -906,7 +929,10 @@ def _cache_cond_is_single_path(condition):
         return True
     if "logic" in condition:
         return False
-    if condition.get("field") not in ("uri.path", "uri", "uri.path.extension"):
+    # full_uri is included: a `full_uri wildcard "https://host/files/*"` leaf
+    # reduces to the path pattern /files/* (extract_path_pattern_single reads its
+    # path_pattern), so it IS a single-path scope for this host's distribution.
+    if condition.get("field") not in ("uri.path", "uri", "uri.path.extension", "full_uri"):
         return False
     return extract_path_pattern_single(condition) != "*"
 
