@@ -84,43 +84,16 @@ def hcl_id(pid):
     return pid.replace("-", "_")
 
 
-# AWS-managed origin request policy IDs (fixed, well-known constants).
-#   AllViewer                — all viewer headers (incl. Host) + all cookies + all
-#                              query strings; NO CloudFront-generated headers.
-#   AllViewerExceptHostHeader — same, but the viewer Host is dropped and CloudFront
-#                              substitutes the origin's own configured domain name.
+# AWS-managed origin request policy ID (fixed, well-known constant).
+#   AllViewer — all viewer headers (incl. Host) + all cookies + all query
+#               strings; NO CloudFront-generated headers. Forwarding the viewer
+#               Host is always safe even when a behavior overrides the origin
+#               Host: the CFF's cf.updateRequestOrigin({hostHeader}) takes
+#               precedence over the ORP-forwarded Host (documented fallback
+#               chain — an explicit hostHeader outranks the viewer Host —
+#               verified live on a real distribution), so AllViewer never leaks
+#               the wrong Host to the origin.
 _MANAGED_ORP_ALL_VIEWER = "216adef6-5c7f-47e4-b989-5492eafa07d3"
-_MANAGED_ORP_ALL_VIEWER_EXCEPT_HOST = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
-
-
-def _behavior_replaces_host_unconditionally(beh):
-    """True only if this behavior has an UNCONDITIONAL origin_override that
-    replaces the origin Host for EVERY request (Cloudflare Origin Rule
-    host_header, no match condition, and the host actually differs from the
-    origin domain — same test the CFF uses to emit `hostHeader`).
-
-    Only then is it safe to use the AllViewerExceptHostHeader ORP (which drops
-    the viewer Host from ALL requests): the CFF's updateRequestOrigin(hostHeader)
-    supplies the replacement for every request. A CONDITIONAL host override must
-    NOT trigger it — the CFF sets hostHeader only on matching requests, so
-    dropping the viewer Host for the non-matching ones would leave them with the
-    origin's own domain as Host and no replacement. Those keep AllViewer (the
-    conditional updateRequestOrigin still wins for matching requests, since
-    hostHeader overrides the ORP-forwarded Host). Single source of truth for the
-    "whole-behavior host replacement" decision, shared with the codegen's emit
-    rule (host_header and host_header != origin_host)."""
-    for op in beh.get("viewer_request_ops", []):
-        if op.get("type") != "origin_override":
-            continue
-        cond = op.get("condition")
-        # Unconditional == no condition, or an explicit always-true.
-        if cond is not None and not cond.get("always"):
-            continue
-        params = op.get("params", {})
-        hh = params.get("host_header")
-        if hh and hh != params.get("origin_host"):
-            return True
-    return False
 
 
 def _orp_reference(beh, orp_headers, san):
@@ -135,10 +108,13 @@ def _orp_reference(beh, orp_headers, san):
         Host/cookies/query, and CloudFront sets Host to the bucket domain itself.
       - native CloudFront-* headers needed → custom_orp_{san}
         (header_behavior allViewerAndWhitelistCloudFront + cookie/query all).
-      - a Host override on this behavior → AllViewerExceptHostHeader (drop the
-        viewer Host; the override sets Host via updateRequestOrigin).
       - otherwise → AllViewer (forward the original viewer Host, matching the
-        Cloudflare default).
+        Cloudflare default). A Host override — conditional OR unconditional —
+        also uses AllViewer: the CFF's updateRequestOrigin({hostHeader}) wins
+        over the forwarded Host for matching requests, and non-matching requests
+        correctly keep the viewer Host. (No AllViewerExceptHostHeader — it would
+        strand non-matching requests with no Host replacement, and buys nothing
+        for matching ones since hostHeader already wins — proven live.)
     Shared by the default and ordered-behavior emitters so their ORP wiring
     can't diverge.
     """
@@ -150,10 +126,8 @@ def _orp_reference(beh, orp_headers, san):
         # CFF updateRequestOrigin(hostHeader=…) sets the origin Host regardless.
         # A resource reference (unquoted HCL).
         return f"aws_cloudfront_origin_request_policy.custom_orp_{san}.id"
-    # Managed policies are referenced by their fixed ID as a STRING literal
-    # (quoted) — not a resource/data reference.
-    if _behavior_replaces_host_unconditionally(beh):
-        return f'"{_MANAGED_ORP_ALL_VIEWER_EXCEPT_HOST}"'
+    # Managed policy referenced by its fixed ID as a STRING literal (quoted) —
+    # not a resource/data reference.
     return f'"{_MANAGED_ORP_ALL_VIEWER}"'
 
 

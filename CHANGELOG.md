@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-07-17
+
+### CDN: host-override ORP simplified to always-AllViewer (empirically verified)
+
+The previous round split host-override behaviors between `AllViewer` (conditional) and `AllViewerExceptHostHeader` (unconditional), on the assumption that dropping the viewer Host was "more correct" when the Host is always replaced. A live experiment on a real CloudFront distribution settled the underlying mechanism and showed the split buys nothing:
+
+- **Empirical result.** On a real distribution, a behavior with the managed `AllViewer` ORP (which forwards the viewer Host) plus a viewer-request CloudFront Function calling `cf.updateRequestOrigin({hostHeader: X})` sends the origin `Host: X` — the function's `hostHeader` wins over the ORP-forwarded viewer Host. Conditional function → matching requests get `X`, non-matching keep the viewer Host, same behavior/same ORP. This matches the AWS docs (an explicit `hostHeader` is the top of a documented fallback chain; the ORP-forwarded Host is only the last-resort fallback) and both AWS-knowledge subagents. It **disproves** the "the ORP runs after the function and overwrites it" model.
+- **Consequence: `AllViewerExceptHostHeader` is never needed.** Because `updateRequestOrigin({hostHeader})` wins over `AllViewer` for matching requests, and `AllViewer` correctly keeps the viewer Host for non-matching ones, ExceptHost gives an identical origin Host for unconditional overrides and a strictly worse one for conditional overrides (it strands non-matching requests with no Host replacement). So every non-S3 / non-custom-header behavior — host override or not, conditional or not — now uses `AllViewer`. Removed `_behavior_replaces_host_unconditionally`, the `_MANAGED_ORP_ALL_VIEWER_EXCEPT_HOST` constant, and the ExceptHost branch in `_orp_reference`. This also kills the "scaffold and codegen must apply the same host-replace test or they diverge" maintenance hazard — there's no longer a test to keep in sync.
+
+Verified: both test suites green (the R16-#3 checks now assert AllViewer for conditional *and* unconditional overrides and that the ExceptHost id is emitted nowhere; `hasattr` guards assert the removed symbols are gone), full example pipeline (54 domains) green through every stage, all generated JS `node --check`s, generated HCL parses, and the ExceptHost policy id appears in no generated Terraform.
+
 ## 2026-07-16
 
 ### CDN: origin_override correctness — conditional Host, port/protocol, dead L@E branch, no-op drop
