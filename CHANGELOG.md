@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-07-14
+
+### CDN: viewer events are CloudFront-Functions-only; complete quota evaluation (soft vs hard)
+
+**Viewer events never fall back to Lambda@Edge.** The generator used to escalate a viewer-request CloudFront Function that exceeded the 10 KB limit to Lambda@Edge (moving origin_override ops to an origin-request handler). That's removed: Lambda@Edge on viewer events adds latency and per-request cost and changes the execution model, so this tool keeps all viewer logic on CloudFront Functions by design. When a CFF exceeds the 10 KB limit even after minification, the domain is now reported `SIZE_EXCEEDED` with full guidance — the 10 KB limit is a HARD CloudFront quota (not raisable via Service Quotas / AWS Support), so the options are to simplify/split the Cloudflare rules for that host or drop rules that can't fit; the tool will not hand-migrate viewer logic to Lambda@Edge. `origin_override` therefore always stays in the CFF as `cf.updateRequestOrigin`. (Genuine ORIGIN events — the default-cache / custom-error origin-response — still use Lambda@Edge, scoped to the specific behavior; that's unchanged.) Removed the now-dead escalation code (`process_domain`, `generate_lambda_origin_request_js`, the `LAMBDA_EDGE_PLACEHOLDER` plumbing, an unused `copy` import).
+
+**viewer-response CFF size is now checked.** Previously only viewer-request JS was size-checked; a large viewer-response function could silently exceed 10 KB and fail at deploy. Both handlers are now checked (and minified) independently; if either exceeds the limit the domain is `SIZE_EXCEEDED` (a CFF can't be partially deployed, and request/response are one logical unit).
+
+**Complete CloudFront quota evaluation, labeled soft vs hard.** Quotas that carry "Request a higher quota" in the AWS docs are SOFT (raise via Service Quotas); the rest are HARD (must redesign). Warnings now say which, so a user doesn't file a Support request for an unraisable limit. Added the checks the pipeline could compute but didn't: distributions per account (500, soft — one per proxied host), KeyValueStores per account (50, soft — one per host needing KVS), and per-policy combined query/header/cookie **name length** (1024, HARD). Existing checks (custom policies per account 20, per-policy item counts 10, cache behaviors per distribution 75, CFF count 100, CFF size 10 KB) are re-labeled with the correct soft/hard wording.
+
 ## 2026-07-13
 
 ### CDN: origin-forwarding fidelity — cookies/query/Host to origin, and a Host read-only 502 fix

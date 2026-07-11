@@ -338,7 +338,9 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
     le_assocs = []
     if has_le_origin_resp:
         le_assocs.append(f'    {{ event_type = "origin-response", lambda_arn = aws_lambda_function.{san}_origin_response.qualified_arn, include_body = false }}')
-    # origin-request L@E is determined by tf-domain (CFF size check) — not pre-generated
+    # No viewer-event Lambda@Edge: viewer-request/response are CFF-only (a CFF
+    # over 10 KB is reported SIZE_EXCEEDED for human intervention, never auto-
+    # escalated to L@E). Only origin-response L@E (above) is used.
     if le_assocs:
         w('  default_lambda_function_associations = [')
         for la in le_assocs:
@@ -504,9 +506,6 @@ def generate_functions_tf(ir):
         w(f'  runtime          = "nodejs20.x"')
         w(f'  publish          = true')
         w(f'}}')
-
-    w('')
-    w('# --- LAMBDA_EDGE_PLACEHOLDER ---')
 
     return "\n".join(lines) + "\n"
 

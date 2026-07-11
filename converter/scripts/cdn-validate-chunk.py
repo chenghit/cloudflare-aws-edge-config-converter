@@ -164,16 +164,18 @@ def validate_domain(ir, filename):
                 f"ORP headers {sorted(missing)} but they are not in required_orp_headers"
             )
 
-    # Check 13: required_orp_headers count ≤ 10
+    # Check 13: required_orp_headers count ≤ 10 (SOFT quota — raisable).
     for i, b in enumerate(behaviors):
         orp_count = len(b.get("required_orp_headers", []))
         if orp_count > 10:
             warnings.append(
                 f"Check13: cache_behaviors[{i}] has {orp_count} required_orp_headers "
-                f"(CloudFront default quota is 10; request increase via AWS Support)"
+                f"(default quota 10, SOFT — request a Service Quotas increase before deploying)"
             )
 
-    # Check 14: cache policy headers/cookies/query_strings ≤ 10
+    # Check 14: cache policy headers/cookies/query_strings ≤ 10 (SOFT quota —
+    # raisable via Service Quotas, but the config won't deploy until it's raised,
+    # so flag as an error).
     for i, b in enumerate(behaviors):
         cp = b.get("cache_policy", {})
         ck = cp.get("cache_key", {})
@@ -182,19 +184,19 @@ def validate_domain(ir, filename):
             if isinstance(items, list) and len(items) > 10:
                 errors.append(
                     f"Check14: cache_behaviors[{i}].cache_policy.cache_key.{key} "
-                    f"has {len(items)} items (CloudFront limit: 10)"
+                    f"has {len(items)} items (default quota 10, SOFT — raise via Service Quotas)"
                 )
         qs = ck.get("query_strings")
         if isinstance(qs, list) and len(qs) > 10:
             errors.append(
                 f"Check14: cache_behaviors[{i}].cache_policy.cache_key.query_strings "
-                f"has {len(qs)} items (CloudFront limit: 10)"
+                f"has {len(qs)} items (default quota 10, SOFT — raise via Service Quotas)"
             )
         qs_list = ck.get("query_strings_list", [])
         if isinstance(qs_list, list) and len(qs_list) > 10:
             errors.append(
                 f"Check14: cache_behaviors[{i}].cache_policy.cache_key.query_strings_list "
-                f"has {len(qs_list)} items (CloudFront limit: 10)"
+                f"has {len(qs_list)} items (default quota 10, SOFT — raise via Service Quotas)"
             )
 
     # Check 15: lambda_edge.origin_response structure (if non-null)

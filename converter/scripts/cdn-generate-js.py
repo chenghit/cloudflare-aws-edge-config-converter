@@ -12,7 +12,6 @@ Usage:
     python3 cdn-generate-js.py <output_dir>
     # output_dir is e.g. "cloudflare-to-aws-cdn"
 """
-import copy
 import hashlib
 import json
 import os
@@ -33,6 +32,26 @@ CFF_SIZE_LIMIT = 10240  # 10 KB
 MAX_CFF_NAME = 64       # CloudFront Function name limit
 MAX_CFF_ASSOCIATIONS = 100  # Max distributions per CFF (fixed, not adjustable)
 CFF_PREFIX = "cf-"
+
+# Human-intervention guidance emitted in ---RESULT--- when a viewer CFF exceeds
+# the 10 KB limit. The limit is a HARD CloudFront quota (not adjustable via
+# Service Quotas / AWS Support), and this tool deliberately does NOT fall back
+# to Lambda@Edge for viewer events (L@E adds latency and cost). So the listed
+# domains cannot be deployed as-is and need a human decision.
+_SIZE_EXCEEDED_GUIDANCE = (
+    "CONTEXT: The listed domain(s) have a viewer-request or viewer-response "
+    "CloudFront Function exceeding the 10240-byte (10 KB) limit even after "
+    "minification. This is a HARD CloudFront quota — it CANNOT be raised via "
+    "Service Quotas or AWS Support. These domains are NOT deployable as generated.\n"
+    "GUIDANCE: Tell the user, per listed domain, to either (1) simplify the "
+    "Cloudflare rules for that host (remove/consolidate redirects, header "
+    "transforms, or conditions) so the generated function fits under 10 KB, or "
+    "(2) split the logic across behaviors, or (3) accept that some rules can't "
+    "convert and drop them. Do NOT hand-migrate viewer logic to Lambda@Edge: "
+    "this tool keeps viewer events on CloudFront Functions by design (Lambda@Edge "
+    "adds latency and per-request cost). All OTHER domains generated successfully "
+    "and can be deployed."
+)
 
 
 def cff_name(san, event_type):
@@ -1172,144 +1191,6 @@ def generate_viewer_response_js(ir):
     return "\n".join(lines)
 
 
-def generate_lambda_origin_request_js(ops):
-    """Generate Lambda@Edge origin_request_handler.js for escalated origin_override ops."""
-    lines = [
-        "'use strict';",
-        "",
-        "exports.handler = async (event, context, callback) => {",
-        "  const request = event.Records[0].cf.request;",
-        "  const uri = request.uri;",
-    ]
-    for op in ops:
-        # continent/is_eu depend on a KVS preamble that only the CFF handlers
-        # generate — in the Lambda@Edge target they fail closed to `false`, so an
-        # escalated op guarded by one becomes a dead rule. Surface it rather than
-        # let it silently no-op.
-        if _op_uses_continent_eu(op):
-            print(f"  WARN: origin_override escalated to Lambda@Edge has a "
-                  f"continent/is_eu condition that cannot be evaluated there; "
-                  f"the rule will not fire. Rule: {op.get('cf_source_rule','?')}",
-                  file=sys.stderr)
-        lines.extend(_generate_op_js(op, "lambda", "  "))
-    lines.append("  callback(null, request);")
-    lines.append("};")
-    return "\n".join(lines)
-
-
-# ── Minification ─────────────────────────────────────────────────────────────
-
-def minify_js(js_code):
-    """Minify JS by removing comments, whitespace, and empty lines."""
-    result = []
-    for line in js_code.split("\n"):
-        # Remove single-line comments (but not URLs like https://)
-        stripped = re.sub(r"(?<!:)//[^'\"]*$", "", line)
-        stripped = stripped.strip()
-        if stripped:
-            result.append(stripped)
-    return "\n".join(result)
-
-
-# ── Main: process all domains ────────────────────────────────────────────────
-
-def process_domain(ir, output_dir):
-    """Process a single domain IR → generate JS files. Returns (hostname, status, detail)."""
-    hostname = ir["metadata"]["hostname"]
-    sanitized = ir["metadata"]["sanitized_name"]
-    domain_dir = os.path.join(output_dir, "terraform", "domains", sanitized)
-    functions_dir = os.path.join(domain_dir, "functions")
-    lambda_dir = os.path.join(domain_dir, "lambda")
-    os.makedirs(functions_dir, exist_ok=True)
-
-    # Generate viewer_request.js
-    vr_js = generate_viewer_request_js(ir)
-    vr_size = len(vr_js.encode("utf-8"))
-
-    # Size check + minification + escalation
-    origin_ops = [
-        op for beh in ir.get("cache_behaviors", [])
-        for op in beh.get("viewer_request_ops", [])
-        if op.get("type") == "origin_override"
-    ]
-
-    if vr_size > CFF_SIZE_LIMIT:
-        vr_js = minify_js(vr_js)
-        vr_size = len(vr_js.encode("utf-8"))
-
-    if vr_size > CFF_SIZE_LIMIT and origin_ops:
-        # Escalate: move origin_override to Lambda@Edge
-        # Regenerate CFF without origin_override using a deep copy
-        ir_no_origin = copy.deepcopy(ir)
-        for beh in ir_no_origin.get("cache_behaviors", []):
-            beh["viewer_request_ops"] = [
-                op for op in beh.get("viewer_request_ops", [])
-                if op.get("type") != "origin_override"
-            ]
-        vr_js = generate_viewer_request_js(ir_no_origin)
-        vr_size = len(vr_js.encode("utf-8"))
-        if vr_size > CFF_SIZE_LIMIT:
-            vr_js = minify_js(vr_js)
-            vr_size = len(vr_js.encode("utf-8"))
-
-        if vr_size > CFF_SIZE_LIMIT:
-            return hostname, "SIZE_EXCEEDED", f"{vr_size} bytes after escalation"
-
-        # Write Lambda@Edge origin_request
-        os.makedirs(lambda_dir, exist_ok=True)
-        le_js = generate_lambda_origin_request_js(origin_ops)
-        with open(os.path.join(lambda_dir, "origin_request_handler.js"), "w") as f:
-            f.write(le_js)
-
-        # Update functions.tf
-        ft_path = os.path.join(domain_dir, "functions.tf")
-        if os.path.exists(ft_path):
-            with open(ft_path) as f:
-                ft_content = f.read()
-            lambda_block = (
-                f'\ndata "archive_file" "{sanitized}_origin_request_zip" {{\n'
-                f'  type        = "zip"\n'
-                f'  source_file = "${{path.module}}/lambda/origin_request_handler.js"\n'
-                f'  output_path = "${{path.module}}/lambda/origin_request_handler.js.zip"\n'
-                f'}}\n\n'
-                f'resource "aws_lambda_function" "{sanitized}_origin_request" {{\n'
-                f'  provider         = aws.us_east_1\n'
-                f'  filename         = data.archive_file.{sanitized}_origin_request_zip.output_path\n'
-                f'  source_code_hash = data.archive_file.{sanitized}_origin_request_zip.output_base64sha256\n'
-                f'  function_name    = "cfcdn-{sanitized}-origin-request"\n'
-                f'  role             = aws_iam_role.{sanitized}_lambda_edge.arn\n'
-                f'  handler          = "origin_request_handler.handler"\n'
-                f'  runtime          = "nodejs20.x"\n'
-                f'  publish          = true\n'
-                f'}}\n'
-            )
-            ft_content = ft_content.replace("# LAMBDA_EDGE_PLACEHOLDER", lambda_block)
-            with open(ft_path, "w") as f:
-                f.write(ft_content)
-
-    elif vr_size > CFF_SIZE_LIMIT:
-        return hostname, "SIZE_EXCEEDED", f"{vr_size} bytes, no origin_override to escalate"
-
-    # Write viewer_request.js
-    with open(os.path.join(functions_dir, f"{sanitized}_viewer_request.js"), "w") as f:
-        f.write(vr_js)
-
-    # Generate viewer_response.js
-    vresp_js = generate_viewer_response_js(ir)
-    if vresp_js:
-        with open(os.path.join(functions_dir, f"{sanitized}_viewer_response.js"), "w") as f:
-            f.write(vresp_js)
-
-    # Lambda@Edge origin_response (fixed template)
-    le_or = ir.get("metadata", {}).get("lambda_edge", {}).get("origin_response")
-    if le_or:
-        os.makedirs(lambda_dir, exist_ok=True)
-        # Copy template and fill in custom error mappings
-        template = _generate_origin_response_template(le_or)
-        with open(os.path.join(lambda_dir, "default_cache_origin_response.js"), "w") as f:
-            f.write(template)
-
-    return hostname, "OK", f"{vr_size} bytes"
 
 
 def _generate_origin_response_template(config):
@@ -1366,44 +1247,41 @@ def main():
         sanitized = ir["metadata"]["sanitized_name"]
         all_irs[sanitized] = ir
 
-        # Generate viewer_request
+        # Generate both viewer handlers. VIEWER EVENTS ARE CFF-ONLY: this tool
+        # never falls back to Lambda@Edge for viewer-request/response (L@E adds
+        # latency/cost and changes the execution model). If a handler exceeds the
+        # 10 KB CFF hard limit even after minification, the domain is reported
+        # SIZE_EXCEEDED for human intervention — it is NOT silently escalated to
+        # L@E. (origin_override therefore always stays in the CFF as
+        # cf.updateRequestOrigin; L@E is used only for genuine ORIGIN events like
+        # the default-cache/custom-error origin-response, handled elsewhere.)
         vr_js = generate_viewer_request_js(ir)
         vr_size = len(vr_js.encode("utf-8"))
-
-        # Size check + minification + escalation
-        origin_ops = [
-            op for beh in ir.get("cache_behaviors", [])
-            for op in beh.get("viewer_request_ops", [])
-            if op.get("type") == "origin_override"
-        ]
-
         if vr_size > CFF_SIZE_LIMIT:
             vr_js = minify_js(vr_js)
             vr_size = len(vr_js.encode("utf-8"))
 
-        if vr_size > CFF_SIZE_LIMIT and origin_ops:
-            ir_no_origin = copy.deepcopy(ir)
-            for beh in ir_no_origin.get("cache_behaviors", []):
-                beh["viewer_request_ops"] = [
-                    op for op in beh.get("viewer_request_ops", [])
-                    if op.get("type") != "origin_override"
-                ]
-            vr_js = generate_viewer_request_js(ir_no_origin)
-            vr_size = len(vr_js.encode("utf-8"))
-            if vr_size > CFF_SIZE_LIMIT:
-                vr_js = minify_js(vr_js)
-                vr_size = len(vr_js.encode("utf-8"))
-            if vr_size > CFF_SIZE_LIMIT:
-                failed.append((hostname, "SIZE_EXCEEDED", f"{vr_size} bytes after escalation"))
-                continue
-            ir["_escalated_origin_ops"] = origin_ops
-        elif vr_size > CFF_SIZE_LIMIT:
-            failed.append((hostname, "SIZE_EXCEEDED", f"{vr_size} bytes, no origin_override to escalate"))
+        vresp_js = generate_viewer_response_js(ir)
+        vresp_size = len(vresp_js.encode("utf-8")) if vresp_js else 0
+        if vresp_size > CFF_SIZE_LIMIT:
+            vresp_js = minify_js(vresp_js)
+            vresp_size = len(vresp_js.encode("utf-8"))
+
+        # Either handler over the hard limit fails the whole domain (a CFF can't
+        # be partially deployed, and request/response are one logical unit).
+        over = []
+        if vr_size > CFF_SIZE_LIMIT:
+            over.append(f"viewer-request {vr_size}B")
+        if vresp_size > CFF_SIZE_LIMIT:
+            over.append(f"viewer-response {vresp_size}B")
+        if over:
+            failed.append((hostname, "SIZE_EXCEEDED",
+                           f"{', '.join(over)} > {CFF_SIZE_LIMIT}B hard limit after minify"))
             continue
 
         all_vr[sanitized] = vr_js
-        all_vresp[sanitized] = generate_viewer_response_js(ir)
-        print(f"[JS] {hostname}: generated ({vr_size} bytes)", file=sys.stderr)
+        all_vresp[sanitized] = vresp_js
+        print(f"[JS] {hostname}: generated (vr {vr_size}B, vresp {vresp_size}B)", file=sys.stderr)
 
     if not all_vr:
         print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\nCONTEXT: All domains failed JS generation")
@@ -1641,12 +1519,6 @@ if __name__ == "__main__":
             with open(os.path.join(functions_dir, f"{san}_viewer_response.js"), "w") as f:
                 f.write(all_vresp[san])
 
-        if ir.get("_escalated_origin_ops"):
-            lambda_dir = os.path.join(domain_dir, "lambda")
-            os.makedirs(lambda_dir, exist_ok=True)
-            with open(os.path.join(lambda_dir, "origin_request_handler.js"), "w") as f:
-                f.write(generate_lambda_origin_request_js(ir["_escalated_origin_ops"]))
-
         le_or = ir.get("metadata", {}).get("lambda_edge", {}).get("origin_response")
         if le_or:
             lambda_dir = os.path.join(domain_dir, "lambda")
@@ -1732,13 +1604,12 @@ if __name__ == "__main__":
                 elif os.path.exists(os.path.join(output_dir, "terraform", "domains", san, "kvs.tf")):
                     kvs_label = "independent"
 
-                # For grouping, use event type only (actual names are per-domain)
+                # For grouping, use event type only (actual names are per-domain).
+                # Viewer events are CFF-only; the only L@E here is origin-response.
                 le_type = "—"
-                if ir.get("_escalated_origin_ops"):
-                    le_type = "origin-request"
                 le_or = ir.get("metadata", {}).get("lambda_edge", {}).get("origin_response")
                 if le_or:
-                    le_type = "origin-response" if le_type == "—" else f"{le_type}, origin-response"
+                    le_type = "origin-response"
 
                 key = (vr_label, vresp_label, kvs_label, le_type)
                 profiles.setdefault(key, []).append(hostname)
@@ -1803,11 +1674,13 @@ if __name__ == "__main__":
               f"CFF_TOTAL: {actual_count}\nCFF_SHARED: {len(written_shared)}\n"
               f"CFF_INDEPENDENT: {indep_count}\nCFF_DEDUP_RATIO: {original_count} -> {actual_count}\n"
               f"FAILED_ITEMS:\n{failed_items}\nACTION: FIX\n"
-              f"CONTEXT: {fail_count} domain(s) exceeded 10KB CFF size limit")
+              f"{_SIZE_EXCEEDED_GUIDANCE}")
         sys.exit(3)
     else:
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
-              f"CONTEXT: All {fail_count} domains failed JS generation")
+        failed_items = "\n".join(f"  {h}: {s} — {d}" for h, s, d in failed)
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nFAILED: {fail_count}\n"
+              f"FAILED_ITEMS:\n{failed_items}\nACTION: FIX\n"
+              f"{_SIZE_EXCEEDED_GUIDANCE}")
         sys.exit(2)
 
 
@@ -1834,7 +1707,6 @@ def _write_domain_functions_tf(san, config, ir, domain_dir, kvs_is_shared=False,
     )
     le = ir["metadata"].get("lambda_edge", {})
     has_le_origin_resp = le.get("origin_response") is not None
-    escalated = "_escalated_origin_ops" in ir
 
     lines = []
     w = lines.append
@@ -1905,27 +1777,7 @@ def _write_domain_functions_tf(san, config, ir, domain_dir, kvs_is_shared=False,
         w(f'  viewer_response_arn = {vresp_arn_expr}')
     w('}')
 
-    if escalated:
-        w('')
-        le_name = cff_name(san, "viewer_request").replace("-req", "-le-origin")
-        w(f'data "archive_file" "{san}_origin_request_zip" {{')
-        w(f'  type        = "zip"')
-        w(f'  source_file = "${{path.module}}/lambda/origin_request_handler.js"')
-        w(f'  output_path = "${{path.module}}/lambda/origin_request_handler.js.zip"')
-        w('}')
-        w('')
-        w(f'resource "aws_lambda_function" "{san}_origin_request" {{')
-        w(f'  provider         = aws.us_east_1')
-        w(f'  filename         = data.archive_file.{san}_origin_request_zip.output_path')
-        w(f'  source_code_hash = data.archive_file.{san}_origin_request_zip.output_base64sha256')
-        w(f'  function_name    = "{le_name}"')
-        w(f'  role             = aws_iam_role.{san}_lambda_edge.arn')
-        w(f'  handler          = "origin_request_handler.handler"')
-        w(f'  runtime          = "nodejs20.x"')
-        w(f'  publish          = true')
-        w('}')
-
-    if has_le_origin_resp or escalated:
+    if has_le_origin_resp:
         w('')
         role_name = cff_name(san, "viewer_request").replace("-req", "-le-role")
         w(f'resource "aws_iam_role" "{san}_lambda_edge" {{')
@@ -1965,10 +1817,6 @@ def _write_domain_functions_tf(san, config, ir, domain_dir, kvs_is_shared=False,
         w(f'  publish          = true')
         w('}')
 
-    # Placeholder for origin-request Lambda (filled by escalation logic above)
-    if not escalated:
-        w('')
-        w('# --- LAMBDA_EDGE_PLACEHOLDER ---')
     ft_path = os.path.join(domain_dir, "functions.tf")
     with open(ft_path, "w") as f:
         f.write("\n".join(lines) + "\n")

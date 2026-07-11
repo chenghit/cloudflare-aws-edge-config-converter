@@ -132,10 +132,11 @@ def validate_domain(ir, output_dir, manifest=None):
             if wants_query and "request.querystring =" not in vr_js and "request.querystring=" not in vr_js:
                 coverage_issues.append("rewrite op missing request.querystring assignment")
         elif op_type == "origin_override":
-            # May have been escalated to Lambda@Edge
-            le_path = os.path.join(lambda_dir, "origin_request_handler.js")
-            if "updateRequestOrigin" not in vr_js and not os.path.exists(le_path):
-                coverage_issues.append(f"origin_override missing from both CFF and L@E")
+            # origin_override is always in the viewer-request CFF via
+            # cf.updateRequestOrigin (viewer events are CFF-only — never
+            # escalated to Lambda@Edge).
+            if "updateRequestOrigin" not in vr_js:
+                coverage_issues.append("origin_override missing updateRequestOrigin in CFF")
         elif op_type == "bulk_redirect" and "redirect:" not in vr_js:
             coverage_issues.append(f"bulk_redirect missing KVS lookup")
         elif op_type == "serve_error_inline":
@@ -206,21 +207,23 @@ def validate_domain(ir, output_dir, manifest=None):
             "detail": "; ".join(resp_issues) if resp_issues else None,
         })
 
-    # Validate Lambda@Edge files if exist
-    le_or_path = os.path.join(lambda_dir, "origin_request_handler.js")
-    if os.path.exists(le_or_path):
-        with open(le_or_path) as f:
+    # Validate the Lambda@Edge origin-RESPONSE handler if present (the only L@E
+    # this tool emits — default-cache/custom-error origin-response; viewer events
+    # are CFF-only, so there is no origin-request handler to validate).
+    le_resp_path = os.path.join(lambda_dir, "default_cache_origin_response.js")
+    if os.path.exists(le_resp_path):
+        with open(le_resp_path) as f:
             le_js = f.read()
         le_issues = []
         if "exports.handler" not in le_js:
             le_issues.append("Missing: exports.handler")
-        if "callback(null, request)" not in le_js:
-            le_issues.append("Missing: callback(null, request)")
+        if "callback(null, response)" not in le_js and "callback(null, request)" not in le_js:
+            le_issues.append("Missing: callback(null, ...)")
         le_size = len(le_js.encode("utf-8"))
         if le_size > LAMBDA_SIZE_LIMIT:
             le_issues.append(f"Size {le_size} exceeds Lambda@Edge limit")
         checks.append({
-            "name": "lambda_origin_request",
+            "name": "lambda_origin_response",
             "status": "FAIL" if le_issues else "PASS",
             "detail": "; ".join(le_issues) if le_issues else None,
         })

@@ -10,6 +10,20 @@ import json, sys, os, hashlib, copy, re
 from datetime import datetime, timezone
 
 
+def _combined_name_len(*name_lists):
+    """Total character length of all query-string / header / cookie NAMES in a
+    policy — CloudFront caps this at 1024 (a HARD limit). Each arg is a list of
+    names (str) or, for headers stored as dicts, entries with a 'name'/'key'."""
+    total = 0
+    for names in name_lists:
+        for n in names or []:
+            if isinstance(n, str):
+                total += len(n)
+            elif isinstance(n, dict):
+                total += len(n.get("name") or n.get("key") or "")
+    return total
+
+
 def specificity_score(pattern):
     """Compute specificity score for a CloudFront path pattern."""
     if pattern == "*":
@@ -329,46 +343,84 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
                 f"(limit 5 MB). Approaching limit — monitor after deployment."
             )
 
-    # CloudFront quota checks
+    # ── CloudFront quota checks (soft vs hard) ────────────────────────────────
+    # SOFT quotas carry "Request a higher quota" in the AWS docs — the user can
+    # raise them via Service Quotas. HARD quotas cannot be raised, so exceeding
+    # one means the config must be redesigned before it can deploy. The messages
+    # say which, so the user doesn't waste a Support request on an unraisable
+    # limit. See _quota_warn.
+    def _quota_warn(count, limit, hard, subject):
+        """Append a soft/hard quota warning if count exceeds (or nears) limit."""
+        if count > limit:
+            if hard:
+                all_warnings.append(
+                    f"{subject}: {count} exceeds the HARD limit of {limit} — NOT "
+                    f"adjustable via Service Quotas/AWS Support. Must reduce/redesign "
+                    f"before deploying.")
+            else:
+                all_warnings.append(
+                    f"{subject}: {count} exceeds the default quota of {limit} (SOFT). "
+                    f"Request a quota increase via Service Quotas before deploying.")
+        elif not hard and count > limit * 0.8:
+            all_warnings.append(
+                f"{subject}: {count} approaching the default quota of {limit} (SOFT).")
+
+    # Per-account custom policy counts (SOFT: 20 each).
     policy_counts = {"cache_policy": 0, "origin_request_policy": 0, "response_headers_policy": 0}
     for entry in manifest.values():
         t = entry["type"]
         if t in policy_counts:
             policy_counts[t] += 1
-    for ptype, limit, label in [
-        ("cache_policy", 20, "Custom cache policies"),
-        ("origin_request_policy", 20, "Custom origin request policies"),
-        ("response_headers_policy", 20, "Custom response headers policies"),
+    for ptype, label in [
+        ("cache_policy", "Custom cache policies per account"),
+        ("origin_request_policy", "Custom origin request policies per account"),
+        ("response_headers_policy", "Custom response headers policies per account"),
     ]:
-        count = policy_counts[ptype]
-        if count > limit:
-            all_warnings.append(f"{label}: {count} (default quota: {limit}). Request quota increase before deploying.")
-        elif count > limit * 0.8:
-            all_warnings.append(f"{label}: {count} (default quota: {limit}). Approaching limit.")
+        _quota_warn(policy_counts[ptype], 20, False, label)
 
-    # Per-policy item quotas
+    # Per-policy item quotas. Counts (query/header/cookie ≤ 10) are SOFT; the
+    # combined name length (≤ 1024) is HARD.
     for pid, entry in manifest.items():
         cfg = entry["config"]
         used = ", ".join(entry.get("used_by", [entry.get("sample_hostname", "?")]))
         if entry["type"] == "cache_policy":
-            qs = cfg.get("query_strings_list", [])
-            if isinstance(qs, list) and len(qs) > 10:
-                all_warnings.append(f"Cache policy {pid} (used by {used}): {len(qs)} query strings (quota: 10).")
+            ck = cfg.get("cache_key", cfg)
+            qs = ck.get("query_strings_list", ck.get("query_strings", []))
+            hd = ck.get("headers", [])
+            co = ck.get("cookies", [])
+            qs = qs if isinstance(qs, list) else []
+            _quota_warn(len(qs), 10, False, f"Cache policy {pid} (used by {used}) query strings")
+            _quota_warn(len(hd) if isinstance(hd, list) else 0, 10, False, f"Cache policy {pid} (used by {used}) headers")
+            _quota_warn(len(co) if isinstance(co, list) else 0, 10, False, f"Cache policy {pid} (used by {used}) cookies")
+            _quota_warn(_combined_name_len(qs, hd, co), 1024, True,
+                        f"Cache policy {pid} (used by {used}) combined query/header/cookie name length")
+        elif entry["type"] == "origin_request_policy":
+            fwd = cfg.get("forward", {})
+            qs = fwd.get("query_strings_list", []) if isinstance(fwd.get("query_strings_list"), list) else []
+            hd = cfg.get("headers", []) if isinstance(cfg.get("headers"), list) else []
+            co = fwd.get("cookies_list", []) if isinstance(fwd.get("cookies_list"), list) else []
+            _quota_warn(_combined_name_len(qs, hd, co), 1024, True,
+                        f"Origin request policy {pid} (used by {used}) combined name length")
         elif entry["type"] == "response_headers_policy":
             ch = cfg.get("custom_headers", [])
-            if isinstance(ch, list) and len(ch) > 10:
-                all_warnings.append(f"RHP {pid} (used by {used}): {len(ch)} custom headers (quota: 10).")
+            _quota_warn(len(ch) if isinstance(ch, list) else 0, 10, False,
+                        f"Response headers policy {pid} (used by {used}) custom headers")
 
+    # Cache behaviors per distribution (SOFT: 75).
     for ir in all_irs:
         hostname = ir["metadata"]["hostname"]
-        beh_count = len(ir["cache_behaviors"])
-        if beh_count > 75:
-            all_warnings.append(f"{hostname}: {beh_count} cache behaviors (default quota: 75). Request quota increase.")
-        elif beh_count > 60:
-            all_warnings.append(f"{hostname}: {beh_count} cache behaviors (default quota: 75). Approaching limit.")
+        _quota_warn(len(ir["cache_behaviors"]), 75, False, f"{hostname}: cache behaviors")
 
-    # CFF quota check removed — dedup (Stage 8) reduces CFF count significantly.
-    # Stage 8 reports actual CFF_TOTAL in ---RESULT--- after dedup.
+    # Per-account totals the pipeline can know: one distribution per proxied
+    # host (SOFT: 500), one KVS store per host that needs KVS (SOFT: 50).
+    _quota_warn(len(all_irs), 500, False, "Distributions per account (one per proxied host)")
+    kvs_domains = sum(1 for ir in all_irs
+                      if any(ir["metadata"].get("kvs_requirements", {}).values()))
+    _quota_warn(kvs_domains, 50, False, "KeyValueStores per account (one per host needing KVS)")
+
+    # CFF count quota (SOFT: 100) is checked post-dedup in Stage 8 (generate-js),
+    # which reports the actual deduped CFF_TOTAL. The CFF SIZE limit (10 KB) is
+    # HARD and enforced there too.
     cff_warning = None
 
     # CORS credentials + wildcard check
