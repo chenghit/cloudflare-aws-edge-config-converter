@@ -198,8 +198,8 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
         pinfo = manifest["policies"].get(pid, {})
         ptype = pinfo.get("type", "")
         if ptype == "cache_policy":
-            bypass = pinfo.get("config", {}).get("bypass", False)
-            prefix = "cfcdn-cache-bypass" if bypass else "cfcdn-cache-policy"
+            caching_disabled = pinfo.get("config", {}).get("caching_disabled", False)
+            prefix = "cfcdn-caching-disabled" if caching_disabled else "cfcdn-cache-policy"
             w(f'data "aws_cloudfront_cache_policy" "{hcl_id(pid)}" {{')
             w(f'  name = "{prefix}-{pid}"')
             w('}')

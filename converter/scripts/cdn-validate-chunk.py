@@ -18,12 +18,19 @@ VALID_ORP_HEADERS = set()
 for headers in FIELD_TO_ORP_HEADERS.values():
     VALID_ORP_HEADERS.update(headers)
 
-# Valid viewer_request_ops type ordering groups (same index = same priority)
+# Valid viewer_request_ops type ordering groups (same index = same priority).
+# Must match the section emission order in cdn-generate-js generate_viewer_request_js
+# (the codegen re-groups by type, so this mirrors that order, not IR list order).
 VR_OPS_ORDER_GROUP = {
     "redirect": 0,
     "rewrite": 1,
     "origin_override": 2,
     "bulk_redirect": 3,
+    # cache_bypass is emitted BEFORE header transforms (it must read the original
+    # viewer request, mirroring Cloudflare's phase order), and after redirect/
+    # rewrite/bulk. Same group as headers so IR order [rewrite, cache_bypass,
+    # set_request_header] is accepted; codegen emits bypass first within the group.
+    "cache_bypass": 4,
     "set_request_header": 4, "add_request_header": 4, "remove_request_header": 4,
 }
 

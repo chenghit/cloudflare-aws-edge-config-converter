@@ -28,11 +28,14 @@ def hcl_list(items):
 def gen_cache_policy(pid, config):
     lines = []
     w = lines.append
-    bypass = config.get("bypass", False)
+    caching_disabled = config.get("caching_disabled", False)
 
-    if bypass:
+    if caching_disabled:
+        # Unconditional cache bypass — the whole behavior never caches. Same
+        # semantics as the AWS-managed CachingDisabled policy (all TTLs 0, no
+        # cache-key inputs), emitted as a custom resource for uniform wiring.
         w(f'resource "aws_cloudfront_cache_policy" "{hcl_id(pid)}" {{')
-        w(f'  name        = "cfcdn-cache-bypass-{pid}"')
+        w(f'  name        = "cfcdn-caching-disabled-{pid}"')
         w(f'  min_ttl     = 0')
         w(f'  default_ttl = 0')
         w(f'  max_ttl     = 0')

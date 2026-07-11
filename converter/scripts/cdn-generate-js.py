@@ -24,7 +24,8 @@ from pathlib import Path
 # Add scripts dir to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 from cdn_expr_parser import (parse_expression_full, parse_dynamic_expression,
-                             CF_FIELD_MAP, iter_condition_children)
+                             CF_FIELD_MAP, iter_condition_children,
+                             CACHE_BYPASS_HEADER)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -84,6 +85,12 @@ CFF_ACCESSORS = {
     "uri.path.extension": "request.uri.split('.').pop()",
     "host": "request.headers.host.value",
     "method": "request.method",
+    # http.cookie = the entire Cookie request header as a string (Cloudflare:
+    # "session=abc; theme=dark"). CFF does NOT expose the raw Cookie header —
+    # cookies arrive PARSED in request.cookies (a Map). `request.headers.cookie`
+    # is undefined. So http.cookie is rebuilt from the map via the _cookieStr
+    # helper (see _cookie_str_accessor); handled as a special case in
+    # _condition_to_js, not via this direct-accessor table.
     "user_agent": ("request.headers['user-agent']", "request.headers['user-agent'].value"),
     "referer": ("request.headers.referer", "request.headers.referer.value"),
     "http_version": ("request.headers['cloudfront-viewer-http-version']", "request.headers['cloudfront-viewer-http-version'].value"),
@@ -398,6 +405,50 @@ def _condition_to_js(cond, target="cff", indent=2):
             return _NEVER
         return f"!({js_cond})" if negated else js_cond
 
+    # Special: a named cookie / header / query-string arg
+    # (http.request.cookies["n"] / .headers["n"] / .uri.args["n"]). CFF exposes
+    # each as a Map keyed by name: request.cookies / request.headers /
+    # request.querystring, values `{value, multiValue}`. Two leaf forms:
+    #   existence (value is True)      → `map['n'] !== undefined`
+    #   scalar value (eq/ne/contains…) → existence-guarded op on `map['n'].value`
+    # Header names are lowercased (CFF header keys are ASCII-lowercase); cookie
+    # and arg names are used as-is. Handled before the generic accessor path.
+    if field in _INDEXED_NAMED_FIELDS:
+        base = _indexed_named_base(field, target)
+        if base is None:
+            print(f"  WARN: {field} unsupported in this target, emitting false", file=sys.stderr)
+            return _NEVER
+        raw_name = cond.get(_INDEXED_NAMED_FIELDS[field], "")
+        name = raw_name.lower() if field == "header_named" else raw_name
+        entry = f"{base}[{js_string(name)}]"
+        if value is True:  # existence form
+            return f"{entry} === undefined" if negated else f"{entry} !== undefined"
+        # scalar value comparison: guard existence, then compare .value
+        val_expr = _apply_leaf_modifiers(f"{entry}.value", cond)
+        js_cond = _op_to_js(val_expr, base_op, value, field)
+        if js_cond is _NEVER:
+            return _NEVER
+        if negated:
+            return f"{entry} === undefined || !({js_cond})"
+        return f"{entry} !== undefined && {js_cond}"
+
+    # Special: http.cookie = the whole Cookie header string. CFF has no raw
+    # Cookie header, so rebuild it from the parsed request.cookies map with the
+    # _cookieStr helper and run the op (contains/eq/wildcard/matches) on that
+    # reconstruction — faithful to Cloudflare's whole-string semantics (a
+    # `contains "foo=bar"` matches across the name=value boundary, unlike a
+    # per-cookie check). Only in CFF (the map + helper live there).
+    if field == "cookie":
+        acc = _cookie_str_accessor(target)
+        if acc is None:
+            print(f"  WARN: http.cookie unsupported in this target, emitting false", file=sys.stderr)
+            return _NEVER
+        acc = _apply_leaf_modifiers(acc, cond)
+        js_cond = _op_to_js(acc, base_op, value, field)
+        if js_cond is _NEVER:
+            return _NEVER
+        return f"!({js_cond})" if negated else js_cond
+
     # Special: continent / is_eu handled via preamble (not inline condition)
     # These are handled at the section level, not here.
 
@@ -440,6 +491,40 @@ def _condition_to_js(cond, target="cff", indent=2):
     if negated:
         return f"!({js_cond})"
     return js_cond
+
+
+# Synthetic "named indexed field" short names → the leaf key carrying the name.
+_INDEXED_NAMED_FIELDS = {
+    "cookie_named": "cookie_name",
+    "header_named": "header_name",
+    "arg_named": "arg_name",
+}
+
+
+def _indexed_named_base(field, target="cff"):
+    """The JS Map accessor a named cookie/header/arg indexes into, or None if the
+    target can't source it. CFF and viewer-response expose parsed maps
+    (request.cookies / request.headers / request.querystring); Lambda@Edge
+    origin-request does not (raw headers only), so return None → caller fails
+    closed. Cache-bypass runs in the viewer-request CFF, the path that matters."""
+    if target == "lambda":
+        return None
+    prefix = "event.request" if target == "response" else "request"
+    suffix = {"cookie_named": "cookies", "header_named": "headers",
+              "arg_named": "querystring"}[field]
+    return f"{prefix}.{suffix}"
+
+
+def _cookie_str_accessor(target="cff"):
+    """JS accessor that rebuilds the whole Cookie header string (http.cookie)
+    from the parsed cookie map, via the _cookieStr helper. None for Lambda@Edge
+    (no parsed-cookie map). CFF only — cookie-bypass runs in the viewer-request
+    CFF. The helper (see _cookie_str_helper_lines) joins name=value pairs with
+    '; ', matching Cloudflare's Cookie string."""
+    if target == "lambda":
+        return None
+    base = "event.request.cookies" if target == "response" else "request.cookies"
+    return f"_cookieStr({base})"
 
 
 def _val_accessor(field, target="cff"):
@@ -916,6 +1001,37 @@ def _generate_op_js(op, target="cff", indent="  "):
         else:
             lines.append(f"{indent}{body}")
 
+    elif op_type == "cache_bypass":
+        # Cloudflare "Bypass cache" for matching requests. CloudFront can't skip
+        # the cache at request time, so force a guaranteed MISS: inject a header
+        # with a per-request-unique value that is part of the cache key (the
+        # cache policy whitelists CACHE_BYPASS_HEADER). Every matching request
+        # then gets a unique key → always a miss → always fetched from origin.
+        #
+        # The value is FOUR Math.random() segments joined by '-'. Math.random()
+        # in CloudFront Functions is a per-invocation CSPRNG (arc4random); string
+        # CONCATENATION preserves each segment's ~52 bits (≈208 bits total), so
+        # cross-request collisions are impossible — a collision would let one
+        # user's personalized page be served from cache to another (silent data
+        # leak). Do NOT add/multiply the randoms: that collapses them back into a
+        # single float (≤52 bits) and skews the distribution.
+        #
+        # The else-branch DELETE is mandatory: without it a client could send the
+        # header itself on a NON-matching (e.g. anonymous) request and split /
+        # poison the shared cache. Stripping it for non-matching requests keeps
+        # them on one clean cache entry. (Both verified live on CloudFront.)
+        hdr = js_string(CACHE_BYPASS_HEADER)
+        buster = ("''+Math.random()+'-'+Math.random()+'-'"
+                  "+Math.random()+'-'+Math.random()")
+        set_stmt = f"request.headers[{hdr}] = {{value: {buster}}};"
+        del_stmt = f"delete request.headers[{hdr}];"
+        if cond_js:
+            lines.append(f"{indent}if ({cond_js}) {{ {set_stmt} }} else {{ {del_stmt} }}")
+        else:
+            # No condition → unconditional bypass is handled as a CachingDisabled
+            # policy upstream, never as this op. Emit the set defensively.
+            lines.append(f"{indent}{set_stmt}")
+
     else:
         lines.append(f"{indent}// TODO: unsupported op type: {op_type}")
 
@@ -956,6 +1072,34 @@ def _qs_helper_lines(indent="  "):
         f"{indent}    }}",
         f"{indent}  }}",
         f"{indent}  return p.join('&');",
+        f"{indent}}}",
+    ]
+
+
+def _needs_cookie_str_helper(all_ops):
+    """True if any op condition references http.cookie (the whole-Cookie-string
+    field), which renders as _cookieStr(request.cookies). Only that field needs
+    the helper — cookie_named existence uses a direct map lookup, no helper."""
+    return any(_cond_has_field(op.get("condition"), ("cookie",)) for op in all_ops)
+
+
+def _cookie_str_helper_lines(indent="  "):
+    """The `_cookieStr` helper that rebuilds Cloudflare's http.cookie value — the
+    whole Cookie header string — from CFF's parsed request.cookies map. CFF does
+    not expose the raw Cookie header, so a `http.cookie contains "…"` match is
+    run against this reconstruction. Pairs are `name=value` joined by '; ' (the
+    Cookie header separator); duplicate-name cookies expand via multiValue."""
+    return [
+        f"{indent}function _cookieStr(c) {{",
+        f"{indent}  var p = [];",
+        f"{indent}  for (var k in c) {{",
+        f"{indent}    if (c[k].multiValue) {{",
+        f"{indent}      c[k].multiValue.forEach(function(mv) {{ p.push(k + '=' + mv.value); }});",
+        f"{indent}    }} else {{",
+        f"{indent}      p.push(k + '=' + c[k].value);",
+        f"{indent}    }}",
+        f"{indent}  }}",
+        f"{indent}  return p.join('; ');",
         f"{indent}}}",
     ]
 
@@ -1111,6 +1255,11 @@ def generate_viewer_request_js(ir, target="cff"):
     if target == "cff" and _needs_qs_helper(all_ops):
         lines.extend(_qs_helper_lines())
 
+    # _cookieStr helper — rebuilds http.cookie (whole Cookie string) from the
+    # parsed request.cookies map. CFF only (Lambda@Edge has the raw header).
+    if target == "cff" and _needs_cookie_str_helper(all_ops):
+        lines.extend(_cookie_str_helper_lines())
+
     # Continent/EU preamble
     if _has_continent_or_eu(all_ops):
         lines.extend(_generate_continent_preamble(all_ops))
@@ -1122,6 +1271,7 @@ def generate_viewer_request_js(ir, target="cff"):
     bulk = [o for o in all_ops if o.get("type") == "bulk_redirect"]
     headers = [o for o in all_ops if o.get("type", "").endswith("_header") or "header" in o.get("type", "")]
     errors = [o for o in all_ops if o.get("type") == "serve_error_inline"]
+    bypasses = [o for o in all_ops if o.get("type") == "cache_bypass"]
 
     for section_ops in [redirects, rewrites, origins]:
         for op in section_ops:
@@ -1129,6 +1279,15 @@ def generate_viewer_request_js(ir, target="cff"):
 
     if bulk:
         lines.extend(_generate_bulk_redirect_block())
+
+    # Cache-bypass is emitted BEFORE header transforms: a Cloudflare Cache Rule
+    # evaluates against the ORIGINAL viewer request, so the bypass condition
+    # (cookie/path/query) must be tested before a request-header-transform rule
+    # in the same CFF can mutate a header it might read. This mirrors Cloudflare's
+    # phase order (cache rules run before late request-header transforms) and the
+    # IR op order (cache rules are processed before header rules).
+    for op in bypasses:
+        lines.extend(_generate_op_js(op, target))
 
     for op in headers:
         lines.extend(_generate_op_js(op, target))
@@ -1173,6 +1332,11 @@ def generate_viewer_response_js(ir):
     # the CFF target, where querystring is a parsed object.)
     if _cond_uses_query(all_ops):
         lines.extend(_qs_helper_lines())
+
+    # _cookieStr helper — a http.cookie condition on a response op rebuilds the
+    # Cookie string from event.request.cookies (viewer-response is CFF).
+    if _needs_cookie_str_helper(all_ops):
+        lines.extend(_cookie_str_helper_lines())
 
     # Continent/EU preamble — same KVS-backed country lookup as viewer-request
     # (KVS reads work in viewer-response). Without it, a continent/is_eu

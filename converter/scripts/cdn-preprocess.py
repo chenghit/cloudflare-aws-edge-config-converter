@@ -13,6 +13,7 @@ from cdn_expr_parser import (
     parse_expression, extract_orp_headers, extract_orp_headers_from_raw,
     extract_kvs_triggers, extract_host_filter, extract_path_pattern_single,
     iter_condition_children, host_filter_applies, host_leaf_is_routing,
+    CACHE_BYPASS_HEADER,
 )
 from cdn_rule_processors import (
     process_redirect_rule, process_rewrite_rule, process_config_rule,
@@ -297,7 +298,7 @@ def make_default_behavior(domain_config, origin_content):
             "s3_origin": domain_config.get("origin_type") == "s3",
         },
         "cache_policy": {
-            "bypass": False,
+            "caching_disabled": False,
             "ttl": {"min": 0, "default": 7200, "max": 86400},
             "cache_key": {"headers": [], "cookies": [], "query_strings": "none",
                          "query_strings_list": [], "query_strings_exclude": []},
@@ -450,6 +451,23 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
                 if "ip.src.is_in_european_union" in raw:
                     ir["metadata"]["kvs_requirements"]["needs_eu"] = True
 
+    # Cache-bypass: whitelist the buster header in the cache key. The viewer
+    # request CFF is SHARED across all of a domain's behaviors, so a cache_bypass
+    # op (even one scoped to a single path) may inject the buster on any behavior
+    # the shared CFF runs on. The buster only forces a miss if it's part of that
+    # behavior's cache key — so if ANY behavior carries a cache_bypass op, add the
+    # header to EVERY behavior's cache-key header whitelist. Harmless where the
+    # CFF never injects it (absent header = one shared empty value = normal
+    # caching — verified live). Same constant the CFF codegen writes, so the
+    # injected header and the cache-key header can't drift (avoids a split-brain).
+    if any(op.get("type") == "cache_bypass"
+           for beh in ir["cache_behaviors"]
+           for op in beh["viewer_request_ops"]):
+        for beh in ir["cache_behaviors"]:
+            hdrs = beh["cache_policy"]["cache_key"]["headers"]
+            if CACHE_BYPASS_HEADER not in hdrs:
+                hdrs.append(CACHE_BYPASS_HEADER)
+
     return ir
 
 
@@ -522,6 +540,35 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         ir["metadata"]["kvs_requirements"]["needs_error_pages"] = True
         ir["metadata"]["kvs_data"].append({"key": kvs_key, "value": content})
         # Fall through to viewer_request_ops placement below
+
+    if rtype == "cache_setting" and result.get("params", {}).get("bypass"):
+        # Cache bypass = "don't serve this from cache; always go to origin".
+        # CloudFront can't conditionally skip the cache at request time, so:
+        #   - UNCONDITIONAL bypass (host-stripped condition is always/None) → the
+        #     whole behavior never caches: use the managed CachingDisabled policy.
+        #   - CONDITIONAL bypass (a real request-time predicate: cookie, path,
+        #     query, …) → a viewer-request CFF forces a guaranteed cache MISS for
+        #     matching requests by injecting a unique cache-buster header that is
+        #     part of the cache key. Represented as a `cache_bypass` op so it runs
+        #     through the normal viewer_request_ops placement + codegen.
+        bcond = result.get("condition")
+        # An UNPARSEABLE condition (raw_expression, no structured cond) must NOT
+        # be treated as unconditional — that would disable caching for the WHOLE
+        # behavior when the rule really only meant to bypass a specific subset
+        # (e.g. any(uri.args["x"][*]=="v"), which we don't convert). Silent
+        # over-bypass. Report it non-convertible instead.
+        if result.get("raw_expression") and not bcond:
+            _mark_cache_non_convertible(ir, result, expr)
+            return
+        if bcond is None or bcond.get("always"):
+            path = _extract_path_from_result(result, cond, expr)
+            beh = find_or_create_behavior(ir, path, domain_config, origin_content)
+            beh["cache_policy"]["caching_disabled"] = True
+            return
+        # Conditional → re-tag as a cache_bypass viewer-request op and fall
+        # through to the generic viewer_request_ops placement below.
+        result["type"] = "cache_bypass"
+        rtype = "cache_bypass"
 
     if rtype == "cache_setting":
         # OR cache rule: try to split into one behavior per path. OR is now a
@@ -698,13 +745,14 @@ def _extract_path_from_result(result, cond, expr):
 
 
 def _apply_cache_setting(beh, result):
-    """Apply cache rule settings to a behavior."""
+    """Apply cache rule settings to a behavior.
+
+    Bypass is NOT handled here — _place_result intercepts every bypass cache
+    rule before this runs (unconditional → CachingDisabled policy; conditional →
+    a cache_bypass viewer-request op), so only TTL / cache-key settings reach it.
+    """
     params = result.get("params", {})
     cp = beh["cache_policy"]
-
-    if params.get("bypass"):
-        cp["bypass"] = True
-        return
 
     if "edge_ttl_override" in params:
         cp["ttl"]["default"] = params["edge_ttl_override"]

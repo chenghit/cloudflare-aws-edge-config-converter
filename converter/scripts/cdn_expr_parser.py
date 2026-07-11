@@ -40,6 +40,16 @@ def _parse_full_uri_wildcard(pattern):
     return None, None
 
 
+# Header injected by the conditional cache-bypass CFF to force a guaranteed
+# cache MISS. It carries a per-request-unique value and MUST be part of the
+# behavior's cache-key (whitelisted in the cache policy) for the miss to happen.
+# SINGLE SOURCE OF TRUTH: both the CFF codegen (cdn-generate-js) and the
+# cache-policy whitelist (cdn-preprocess / cdn-generate-shared-policies) import
+# this — the header the CFF writes and the header the cache key includes can
+# never drift apart (the ORP split-brain lesson). Lowercase: CFF header keys are
+# lowercased, and cache-policy header matching is case-insensitive.
+CACHE_BYPASS_HEADER = "x-cf-cache-bypass"
+
 # ── field → condition field mapping ──────────────────────────────────────────
 
 CF_FIELD_MAP = {
@@ -53,6 +63,7 @@ CF_FIELD_MAP = {
     "http.request.method": "method",
     "http.request.version": "http_version",
     "http.request.full_uri": "full_uri",
+    "http.cookie": "cookie",  # the entire Cookie header as a string
     "ip.src": "ip.src",
     "ip.src.country": "country",
     "ip.src.continent": "continent",
@@ -70,6 +81,45 @@ CF_FIELD_MAP = {
     "ip.src.subdivision_2_iso_code": "subdivision_2",
     "http.response.code": "response_code",
 }
+
+# Indexed (named) Cloudflare fields: cookies / headers / query-string args, each
+# a Map keyed by name. We support the leaf forms a rule actually uses to gate a
+# cache bypass: EXISTENCE (the bare indexed field as a boolean, "this name is
+# present") and a scalar VALUE comparison (eq/ne/contains/…), both mapped to a
+# synthetic short field carrying the name. The multi-value form
+# any(field["k"][*] == "v") parses to a raw expression (the any() wrapper is
+# unsupported) → reported non-convertible, never silently converted.
+#   cookies → request.cookies (name as-is)
+#   headers → request.headers (name LOWERCASED at render — CFF header keys are
+#             ASCII-lowercase; the Cookie header is excluded, it lives in cookies)
+#   uri.args → request.querystring (name case-sensitive, as-is)
+_RE_INDEXED_FIELD = re.compile(
+    r'^http\.request\.(cookies|headers|uri\.args)\["((?:[^"\\]|\\.)*)"\]$')
+_INDEXED_SHORT = {"cookies": "cookie_named", "headers": "header_named",
+                  "uri.args": "arg_named"}
+
+
+# Short field names synthesized by _map_field that are NOT CF_FIELD_MAP values
+# but ARE convertible (so the unmappable screen doesn't reject them).
+_SYNTHETIC_CONVERTIBLE_FIELDS = {"cookie_named", "header_named", "arg_named"}
+# The extra-dict key each synthetic field uses to carry its name.
+_SYNTHETIC_NAME_KEY = {"cookie_named": "cookie_name", "header_named": "header_name",
+                       "arg_named": "arg_name"}
+
+
+def _map_field(field):
+    """Map a raw Cloudflare field token to (short_field, extra) for a leaf.
+
+    Returns (mapped_field, extra_dict). extra_dict carries leaf attributes that
+    depend on the field shape — for an indexed cookie/header/arg field it's the
+    structured name. For a plain field it's the CF_FIELD_MAP lookup (or the
+    field unchanged), no extras.
+    """
+    m = _RE_INDEXED_FIELD.match(field)
+    if m:
+        short = _INDEXED_SHORT[m.group(1)]
+        return short, {_SYNTHETIC_NAME_KEY[short]: m.group(2)}
+    return CF_FIELD_MAP.get(field, field), {}
 
 # Fields that need ORP headers
 FIELD_TO_ORP_HEADERS = {
@@ -559,6 +609,11 @@ _TT_EOF = 14
 _OPS = {"eq", "ne", "contains", "matches", "wildcard", "in", "gt", "lt", "ge", "le"}
 _OP_CLIKE = {"==": "eq", "!=": "ne", "~": "matches", ">": "gt", "<": "lt", ">=": "ge", "<=": "le"}
 _FUNC_OPS = {"starts_with", "ends_with", "lower", "upper", "len"}
+# A ["quoted key"] subscript following a field name (cookies/headers maps). The
+# tokenizer absorbs it into the field token; an optional [*] array-expansion
+# after it (any(cookies["x"][*] == ...)) is captured so the field layer can
+# reject value-comparison forms cleanly instead of the parser choking on `[`.
+_RE_FIELD_SUBSCRIPT = re.compile(r'\[\s*"(?:[^"\\]|\\.)*"\s*\](?:\[\*\])?')
 
 
 def _tokenize_cdn(expr):
@@ -622,6 +677,16 @@ def _tokenize_cdn(expr):
             while i < n and (expr[i].isalnum() or expr[i] in '._'):
                 i += 1
             word = expr[start:i]
+            # A ["key"] subscript directly after a field name (e.g.
+            # http.request.cookies["session"] / http.request.headers["x"]) is
+            # part of the field, not a separate token. Absorb it into the field
+            # token so the field-map layer sees the whole indexed name; the bare
+            # `[` would otherwise hit the "Unexpected character" error below.
+            m = _RE_FIELD_SUBSCRIPT.match(expr, i)
+            if m:
+                word = expr[start:m.end()]
+                i = m.end()
+                tokens.append(_Token(_TT_FIELD, word, pos)); continue
             if word == "strict":
                 j = i
                 while j < n and expr[j].isspace():
@@ -758,11 +823,12 @@ class _CDNParser:
     def _field_expr(self):
         field_tok = self.advance()
         field = field_tok.value
-        mapped = CF_FIELD_MAP.get(field, field)
+        mapped, extra = _map_field(field)
 
-        # Bare boolean field (no operator follows)
+        # Bare boolean field (no operator follows). For an indexed cookie this is
+        # the existence check (http.request.cookies["x"] → "x" is present).
         if self.peek().type not in (_TT_OP,):
-            return {"field": mapped, "op": "eq", "value": True}
+            return {"field": mapped, "op": "eq", "value": True, **extra}
 
         op_tok = self.advance()
         op = op_tok.value
@@ -787,19 +853,19 @@ class _CDNParser:
                 if host_pat and path_pat:
                     return {"field": "full_uri", "op": "wildcard", "value": value,
                             "host_pattern": host_pat, "path_pattern": path_pat}
-            return {"field": mapped, "op": "wildcard" if op == "wildcard" else "strict_wildcard", "value": value}
+            return {"field": mapped, "op": "wildcard" if op == "wildcard" else "strict_wildcard", "value": value, **extra}
 
         # matches — keep regex as-is, try simple wildcard conversion
         if op == "matches":
             value = self._read_value()
             wc = _try_simple_regex_to_wildcard(value)
             if wc:
-                return {"field": mapped, "op": "wildcard", "value": wc}
-            return {"field": mapped, "op": "matches", "value": value}
+                return {"field": mapped, "op": "wildcard", "value": wc, **extra}
+            return {"field": mapped, "op": "matches", "value": value, **extra}
 
         # Standard comparison: eq, ne, contains, gt, lt, ge, le
         value = self._read_value()
-        return {"field": mapped, "op": op, "value": value}
+        return {"field": mapped, "op": op, "value": value, **extra}
 
     def _read_op(self):
         t = self.expect(_TT_OP)
@@ -949,6 +1015,10 @@ def condition_unmappable_fields(cond, target="cff"):
         return out
     field = cond.get("field")
     if field is None:
+        return []
+    # Synthetic short names not in CF_FIELD_MAP but produced by _map_field
+    # (structured cookie existence) are convertible.
+    if field in _SYNTHETIC_CONVERTIBLE_FIELDS:
         return []
     # Known short names (values of CF_FIELD_MAP) are convertible unless listed
     # in UNMAPPABLE_FIELDS. A raw dotted name that never got mapped is unknown.

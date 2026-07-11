@@ -129,11 +129,11 @@ def generate_test_script(ir):
         if pp != "*":
             cp = beh.get("cache_policy", {})
             ttl = cp.get("ttl", {})
-            if cp.get("bypass"):
-                tests.append({
-                    "name": f"cache bypass: {pp}",
-                    "path": _path_from_pattern(pp),
-                    "expect_cache_control_no_store": True,
+            if cp.get("caching_disabled"):
+                manual.append({
+                    "name": f"caching disabled: {pp}",
+                    "note": (f"send two requests to {_path_from_pattern(pp)} and confirm "
+                             "both show 'X-Cache: Miss from cloudfront' (behavior never caches)"),
                 })
 
     # Bulk redirect tests (sample)
