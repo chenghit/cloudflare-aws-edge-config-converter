@@ -150,6 +150,16 @@ def load_managed_transforms(zone_dir):
     return data.get("result", {})
 
 
+# An S3 host (REST endpoint `bucket.s3[.region].amazonaws.com` or website
+# endpoint `bucket.s3-website[.-]region.amazonaws.com`). Mirrors the S3 patterns
+# in cdn-parse-dns.classify_origin; used to spot a redundant S3 origin-override.
+_RE_S3_HOST = re.compile(r"\.s3[.-]", re.I)
+
+
+def _is_s3_host(host):
+    return bool(host) and ".amazonaws.com" in host.lower() and bool(_RE_S3_HOST.search(host))
+
+
 # ── domain matching ──────────────────────────────────────────────────────────
 
 def hostname_matches(hostname, pattern):
@@ -566,6 +576,19 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         beh["origin"]["domain"] = params.get("origin_host", beh["origin"]["domain"])
         beh["origin"]["s3_origin"] = "s3." in params.get("origin_host", "")
         return
+
+    # Drop a redundant S3 origin-override. Cloudflare pointing at an S3 bucket
+    # needs an Origin Rule that rewrites the Host header to the bucket name (S3
+    # routes by Host). On CloudFront+OAC that handling is UNNECESSARY: OAC signs
+    # the request (SigV4) and CloudFront sets Host to the origin (bucket) domain
+    # automatically — re-setting it via cf.updateRequestOrigin is at best noise
+    # and can interfere with signing. So for an S3 origin, drop an origin_override
+    # that only re-points Host/origin at the bucket (no genuinely different,
+    # non-S3 origin). A real cross-origin override (to a non-S3 host) is kept.
+    if rtype == "origin_override" and domain_config.get("origin_type") == "s3":
+        ov_origin = result.get("params", {}).get("origin_host") or ""
+        if not ov_origin or _is_s3_host(ov_origin):
+            return  # redundant on CloudFront+OAC — drop
 
     # viewer_request_ops or viewer_response_ops
     is_response = "response" in rtype

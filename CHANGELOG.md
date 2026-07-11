@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-07-15
+
+### CDN: S3-origin fidelity — no Host-forwarding ORP on S3+OAC, drop redundant S3 host-override
+
+S3 origins have opposite forwarding needs from the server origins the previous round optimized for. When a Cloudflare domain (directly or via Cloud Connector) points at an S3 bucket, Cloudflare needs an Origin Rule / Page Rule to rewrite the Host header to the bucket name (S3 routes by Host). On CloudFront that handling is unnecessary and actively harmful: CloudFront uses an Origin Access Control (OAC) that signs each request with SigV4, and forwarding the viewer Host (or arbitrary headers) breaks the signature — S3 returns `SignatureDoesNotMatch` / 403. Verified against AWS docs via two independent AWS-knowledge subagents. Two fixes:
+
+- **S3+OAC behaviors get NO origin request policy.** Round-13 attached a forward-all ORP (managed `AllViewer` / custom_orp) to every behavior to match Cloudflare's proxy default. For an S3+OAC origin that forwards the Host and 403s. `_orp_reference` now returns no ORP when the behavior's origin is S3 (checked before the geo-header branch, so even a geo domain's S3 behavior gets none). CloudFront sets Host to the bucket domain itself and OAC handles auth, so S3 needs none of the viewer Host/cookies/query. Server origins are unchanged (still `AllViewer`).
+- **Redundant S3 host-override is dropped at placement.** A Cloudflare Origin Rule that rewrites Host to the S3 bucket is dropped for an S3 origin instead of being converted to a `cf.updateRequestOrigin` op (it would be noise at best and could interfere with OAC signing). A genuinely different, non-S3 cross-origin override is still kept.
+
+S3 detection is unchanged and correct: a REST endpoint (`bucket.s3[.region].amazonaws.com`) → OAC; a website endpoint (`s3-website`) → a custom origin with no OAC (OAC/OAI aren't available for website endpoints, which need public access). Verified end to end: the example pipeline (54 domains) stays green, a new S3 e2e domain generates OAC + `s3_origin` + no `origin_request_policy_id` + no Host header, `terraform validate` passes, and JS still `node --check`s.
+
 ## 2026-07-14
 
 ### CDN: viewer events are CloudFront-Functions-only; complete quota evaluation (soft vs hard)

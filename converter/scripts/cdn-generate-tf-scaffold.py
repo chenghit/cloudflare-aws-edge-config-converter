@@ -105,11 +105,15 @@ def _behavior_has_host_override(beh):
 
 
 def _orp_reference(beh, orp_headers, san):
-    """The ORP resource reference (HCL RHS) for a behavior. Cloudflare is a
-    reverse proxy — it forwards the FULL request (all headers incl. Host, all
-    cookies, all query strings) to origin by default — so EVERY behavior gets a
-    forward-all ORP (CloudFront strips everything not in the cache key without
-    one). Selection:
+    """The ORP resource reference (HCL RHS) for a behavior, or None for no ORP.
+    Cloudflare is a reverse proxy — it forwards the FULL request (all headers
+    incl. Host, all cookies, all query strings) to origin by default — so a
+    behavior fronting a normal server origin gets a forward-all ORP (CloudFront
+    strips everything not in the cache key without one). Selection:
+      - S3 + OAC origin → NO ORP (None). OAC signs the request with SigV4;
+        forwarding the viewer Host (or arbitrary headers) breaks the signature
+        → S3 returns SignatureDoesNotMatch / 403. S3 needs none of the viewer
+        Host/cookies/query, and CloudFront sets Host to the bucket domain itself.
       - native CloudFront-* headers needed → custom_orp_{san}
         (header_behavior allViewerAndWhitelistCloudFront + cookie/query all).
       - a Host override on this behavior → AllViewerExceptHostHeader (drop the
@@ -119,6 +123,8 @@ def _orp_reference(beh, orp_headers, san):
     Shared by the default and ordered-behavior emitters so their ORP wiring
     can't diverge.
     """
+    if beh.get("origin", {}).get("s3_origin"):
+        return None  # S3+OAC: no ORP (Host/header forwarding breaks SigV4)
     if orp_headers:
         # custom_orp forwards all viewer headers (incl. Host) + CloudFront-*
         # headers + all cookies/query strings. A Host override still works: the
