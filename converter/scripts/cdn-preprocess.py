@@ -590,6 +590,15 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         if not ov_origin or _is_s3_host(ov_origin):
             return  # redundant on CloudFront+OAC — drop
 
+    # Drop a no-op origin_override — an Origin Rule with no origin host, port,
+    # host_header, or sni has nothing to convert. Keeping it would emit an empty
+    # (no-op) CFF statement that then trips validate-js's origin_override
+    # coverage check ("missing updateRequestOrigin").
+    if rtype == "origin_override":
+        p = result.get("params", {})
+        if not (p.get("origin_host") or p.get("origin_port") or p.get("host_header") or p.get("sni")):
+            return
+
     # viewer_request_ops or viewer_response_ops
     is_response = "response" in rtype
     path = _extract_path_from_result(result, cond, expr)

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-07-16
+
+### CDN: origin_override correctness — conditional Host, port/protocol, dead L@E branch, no-op drop
+
+A review of the Host-handling round found several origin_override gaps (verified by executing the real modules — most of the review's list was against an older commit and had already been fixed by the S3 / viewer-CFF-only rounds; these are the ones that survived on HEAD):
+
+- **A conditional Host override no longer strips the viewer Host from every request.** The ORP choice keyed on "any origin_override with a host_header," so a *conditional* override (e.g. Host rewrite only when a query flag is set) put `AllViewerExceptHostHeader` on the whole behavior — non-matching requests then lost the viewer Host with no replacement. Now only an *unconditional* override that actually replaces the Host (host_header set and ≠ the origin domain) selects ExceptHost; a conditional one keeps `AllViewer` (the CFF's conditional `updateRequestOrigin(hostHeader)` still wins for matching requests, since it overrides the ORP-forwarded Host). This "does the behavior replace the Host for every request" test now uses the same rule the codegen uses to emit `hostHeader`, so the scaffold and codegen can't diverge.
+- **origin_override port override emits the real protocol, not a hardcoded `https`.** `cf.updateRequestOrigin`'s `customOriginConfig` requires `{port, protocol, sslProtocols}` together; Cloudflare Origin Rules carry a port but no scheme, so the protocol is inferred from the port (80/8080 → http, else https) instead of always emitting https onto what might be an HTTP origin. (AWS-verified: `port`/`protocol` are nested in `customOriginConfig`, `hostHeader` is top-level, and omitted keys inherit from the assigned origin.)
+- **Removed the dead Lambda@Edge branch** in the origin_override codegen. Since viewer events are CFF-only (no L@E escalation), `_generate_op_js` is never called with a lambda target; the L@E branch (and its divergent Host / missing-SNI behavior the review flagged) was unreachable. origin_override is CFF-only via `cf.updateRequestOrigin`.
+- **A no-op origin_override is dropped at placement.** An Origin Rule with no origin host/port/host_header/sni produced an op that emitted nothing and then tripped the validate-js `origin_override` coverage check. It's now dropped in preprocess, alongside the redundant-S3-override drop.
+- **Removed the denylisted `Host` custom-origin-header emission** (latent: `origin['host_header']` was never populated, but `Host` is on CloudFront's custom-origin-header denylist and would be rejected — and it conflicted with the ORP/updateRequestOrigin Host strategy).
+
+Verified: full example pipeline (54 domains) green, e2e extended with a conditional-host-override domain (asserts AllViewer not ExceptHost) and the existing unconditional/S3 domains, `node --check`, `terraform validate`. Two review items left as-is with reasoning: the ORP data-source path (`dead-code`) is dormant-but-self-consistent defensive code (no behavior carries a non-none dedup ORP today), and the "updateRequestOrigin({hostHeader}) → 502" candidate was correctly refuted (domainName is optional; omitted keys inherit).
+
 ## 2026-07-15
 
 ### CDN: S3-origin fidelity — no Host-forwarding ORP on S3+OAC, drop redundant S3 host-override
