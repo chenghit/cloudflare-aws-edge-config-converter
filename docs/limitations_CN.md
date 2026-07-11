@@ -14,11 +14,22 @@ CDN pipeline 把以下 Cloudflare 规则类型转换为 CloudFront 等价物：
 | Origin Rules | CloudFront Functions (`updateRequestOrigin`) 或独立 cache behaviors |
 | Bulk Redirects | KVS + CloudFront Functions |
 | Request Header Transform | CloudFront Functions + Origin Request Policy |
-| Cache Rules | Cache behaviors 上的 cache policies |
+| Cache Rules（TTL / cache key） | Cache behaviors 上的 cache policies |
+| Cache Rules（条件式 "Bypass cache"） | viewer-request CloudFront Function，对匹配的请求强制 cache miss（见下）；无条件 bypass → 托管 CachingDisabled policy |
 | Cloud Connector Rules | 独立 cache behaviors + 独立 origins |
 | Custom Error Rules | CloudFront custom error responses |
 | Response Header Transform | Response Headers Policy + CloudFront Functions (viewer-response) |
 | Compression Rules | Cache policy `enable_gzip` / `enable_brotli` |
+
+### 条件式缓存绕过（cache bypass）
+
+CloudFront 没有请求时"跳过缓存"的开关——缓存决策由 behavior 上的 cache policy 固定，而 behavior 只按路径选择（不按 cookie/header/query）。要转换一条条件式 bypass 缓存的 Cloudflare Cache Rule（例如带 `wordpress_logged_in` cookie 时 bypass，或 `?test=true`），工具会生成一个 viewer-request CloudFront Function：对匹配的请求，注入一个值每请求唯一的 header（`x-cf-cache-bypass`），并把它纳入 cache key。这样每个匹配请求都得到唯一的 cache key → 必然 miss → 必然回源。这是强制 **miss**，不是真正的跳过（响应仍会被存储，但存在一个永不复用的一次性 key 下），但对访客的效果完全一致。
+
+支持的 bypass 条件：cookie（`http.cookie`、`http.request.cookies["name"]`）、具名 request header（`http.request.headers["name"]`）、具名 query 参数（`http.request.uri.args["name"]`），以及 query / user-agent / path 子串——存在性或标量值比较。
+
+注意：
+- 多值形式 `any(http.request.cookies["x"][*] == "v")`（以及 header/arg 的等价写法）**不**转换——会被标记为 non-convertible，而不是猜测其意图。
+- 由于 bypass 写入 cache key，它会在运行的 behavior 上产生一次 CFF 调用开销，并为匹配请求产生一次性缓存条目（无害——永不复用，会自然过期淘汰）。
 
 ## CDN Pipeline——不能转换的内容
 
@@ -45,7 +56,6 @@ CDN pipeline 把以下 Cloudflare 规则类型转换为 CloudFront 等价物：
 | 自定义错误 + inline content + response-phase 条件 | Custom Error Rules | CFF viewer-response 在 4xx+ 时不执行 | 将错误页面部署为 origin 上的静态文件 |
 | 自定义错误 + 不支持的状态码 | Custom Error Rules | CloudFront 只支持：400、403、404、405、414、416、500–504 | Lambda@Edge origin-response |
 | 自定义错误 + 动态 headers/逻辑 | Custom Error Rules | CFF 和 L@E viewer-response 在 4xx+ 时不执行 | Lambda@Edge origin-response |
-| 仅 query string 的 rewrite | URL Rewrite | CloudFront Functions 无法单独修改 query strings | Lambda@Edge |
 | `browser_check` | Configuration | CloudFront 没有对应项 | AWS WAF Bot Control |
 | `minify` (HTML/CSS/JS) | Configuration | CloudFront 原生不支持 | Origin 端压缩 |
 | `rocket_loader` | Configuration | Cloudflare 专有 JS 优化 | N/A |
@@ -68,21 +78,25 @@ Cloudflare 允许 `Access-Control-Allow-Credentials: true` 与 `Access-Control-A
 
 ### CloudFront Function 大小限制
 
-CloudFront Functions 压缩后有 10 KB 大小限制。当域名的 `viewer_request.js` 超过此限制时：
+CloudFront Functions 有 **硬** 10 KB 大小限制（无法通过 Service Quotas 或 AWS Support 提高）。viewer 事件只使用 CloudFront Functions——本工具从不为 viewer-request/response 回退到 Lambda@Edge，因为 L@E 会增加延迟和每请求成本，并改变执行模型。
 
-1. 如果函数包含 `origin_override` 操作，这些操作会被拆分到 Lambda@Edge origin-request handler，减小 CFF 大小。
-2. 如果拆分后 CFF 仍超过 10 KB，最低优先级的操作会被移除并标记为 `non_convertible`。这些操作**不会**升级到 Lambda@Edge viewer-request——viewer 事件只使用 CloudFront Functions。
+当某域名的 `viewer_request.js` 或 `viewer_response.js` 超过 10 KB 时，工具会先压缩；若仍超限，则**整个域名**报告为 `SIZE_EXCEEDED` 交由人工处理（CFF 无法部分部署，request/response 是一个逻辑单元）。工具不会静默丢弃操作，也不会迁移到 Lambda@Edge。可选做法是：简化/拆分该 host 的 Cloudflare 规则，或删除放不下的规则。（`origin_override` 始终留在 CFF 里，用 `cf.updateRequestOrigin`。Lambda@Edge 只用于真正的 origin 事件——default-cache / custom-error 的 origin-response——不用于 viewer 事件。）
 
 ### CloudFront 配额限制
 
-| 资源 | 限制 | 超出时的处理 |
-|----------|-------|---------------------------|
-| 每账号 CloudFront Functions 数量 | 100 | Content-hash 去重自动共享相同 CFF（如 54 域名 → 5 CFF）。去重后仍超限则在转换报告中警告。此配额未在 Service Quotas 中列为可调整——可联系 AWS Support 咨询，但不保证批准 |
-| 每个 distribution 的 cache behaviors | 75 | Pipeline 报错——需减少 Cloudflare 规则 |
-| Cache policy headers (whitelist) | 10 | 标记为 non_convertible |
-| Cache policy cookies (whitelist) | 10 | 标记为 non_convertible |
-| Cache policy query strings (whitelist) | 10 | 标记为 non_convertible |
-| Origin request policy headers | 10 | 标记为 non_convertible |
+配额标注为**软**（可通过 Service Quotas 提高）或**硬**（必须重新设计）。转换报告会为每条警告标明是哪种，避免为不可提高的限制去开 Support case。
+
+| 资源 | 限制 | 软/硬 | 超出时的处理 |
+|----------|-------|-------|---------------------------|
+| 每账号 CloudFront Functions 数量 | 100 | 软 | Content-hash 去重自动共享相同 CFF（如 54 域名 → 5 CFF）。去重后检查；仍超限则在转换报告中警告——通过 Service Quotas 提高 |
+| 每账号 distributions 数量 | 500 | 软 | 警告（每个代理 host 一个 distribution） |
+| 每账号 KeyValueStores 数量 | 50 | 软 | 警告（每个需要 KVS 的 host 一个） |
+| 每个 distribution 的 cache behaviors | 75 | 软 | 校验报错 + 警告——提高配额或减少 Cloudflare 规则 |
+| 每账号自定义 cache/ORP/RHP policy 数量 | 各 20 | 软 | 警告 |
+| Cache policy headers / cookies / query strings (whitelist) | 各 10 | 软 | 警告——通过 Service Quotas 提高 |
+| Origin request policy headers | 10 | 软 | 警告 |
+| 每个 policy 的 query/header/cookie **名称合计长度** | 1024 | 硬 | 警告（无法提高） |
+| CloudFront Function 大小 | 10 KB | 硬 | 域名报告 `SIZE_EXCEEDED`（见上） |
 
 ### 没有 CloudFront 对应项的 Cloudflare 匹配字段
 
@@ -95,10 +109,10 @@ CloudFront Functions 压缩后有 10 KB 大小限制。当域名的 `viewer_requ
 
 ### Regex 限制
 
-CloudFront path patterns 只支持 `*` 和 `?` 通配符——不支持 regex。当 Cloudflare 规则用了无法映射为通配符的 regex path 表达式时：
+CloudFront path patterns 只支持 `*` 和 `?` 通配符——不支持 regex。当 Cloudflare 规则用了无法映射为单个通配符的 regex/复杂 path 表达式时：
 
-- **Cache Rules**：路由到 Lambda@Edge origin-response，在运行时计算 regex 并设置 `Cache-Control` header。
-- **其他规则类型**（redirect、rewrite、header transform）：分配到默认 `"*"` behavior，原始表达式保留为 `raw_expression` 供 CloudFront Function JS 生成使用。
+- **Cache Rules**（TTL / cache-key 设置）：cache 设置作用于某个具体 behavior 的 cache policy，因此其 scope 必须能用该 behavior 的 path pattern 表达。表达不了的（regex、多字段 AND、取反 path）会被记录为 **non-convertible** 并上报——不会路由到 Lambda@Edge 条件式缓存 handler（那个 sink 曾经存在、无人消费、会静默丢规则，已删除）。
+- **其他规则类型**（redirect、rewrite、header transform、cache **bypass**）：这些在 CloudFront Function 里运行，函数会逐请求计算完整条件。它们落在默认 `"*"` behavior，条件被渲染进 CFF JS（基于 `request.uri` 匹配），因此 regex/复杂 path 仍然有效——只是不作为独立的 cache behavior。
 
 ### 不可转换项的处理方式
 
@@ -132,5 +146,5 @@ AI 生成的配置在上生产前必须人工审查。重点关注：
 ### 本工具不配置的功能
 
 - **CloudFront access logging**——涉及 S3 bucket、日志格式、共享还是按域名分等决策，超出迁移范围。
-- **Lambda@Edge origin-request 部署**——当 CFF 超过 10 KB 且 origin_override 操作被拆分到 Lambda@Edge 时，生成的 `origin_request_handler.js` 文件头部包含需要手动添加到 `main.tf` 的条目。这只适用于 CFF 大小溢出触发拆分的域名——大多数域名不需要。Lambda@Edge origin-response 是全自动的（IAM role、archive、Lambda 函数和 `main.tf` 中的 `qualified_arn` 引用都由 scaffold 生成）。
+- **Lambda@Edge origin-response**——当某规则需要它时（default-cache / custom-error 的 origin-response），这是**全自动**的：IAM role、archive、Lambda 函数和 `main.tf` 中的 `qualified_arn` 引用都由 scaffold 生成。viewer 事件没有 Lambda@Edge——超过 10 KB 的 CFF 会报告 `SIZE_EXCEEDED` 交由人工处理，绝不拆分到 L@E。
 - **DNS 切换**——工具会生成 CloudFront distributions，但不会动 DNS 记录。确认配置没问题后，你自己更新 DNS 指向 CloudFront。
