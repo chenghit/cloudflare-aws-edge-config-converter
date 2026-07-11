@@ -126,7 +126,7 @@ cloudflare-to-aws-cdn/
             ├── kvs.tf               # 仅当有批量重定向时
             ├── functions/
             │   └── viewer_request.js
-            └── lambda/              # 仅当 CF Function 超过 10KB 时
+            └── lambda/              # 仅当某条 default-cache-TTL 规则需要时
 ```
 
 </details>

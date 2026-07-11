@@ -69,8 +69,7 @@ cloudflare-to-aws-cdn/
             ├── functions/
             │   ├── <name>_viewer_request.js
             │   └── <name>_viewer_response.js   # Only if response header ops exist
-            └── lambda/             # Only if CloudFront Function exceeded 10KB
-                ├── origin_request_handler.js
+            └── lambda/             # Only if a default-cache-TTL rule needs it
                 └── default_cache_origin_response.js
 ```
 
@@ -105,15 +104,13 @@ terraform apply
 Repeat for each domain. Domains are independent — deploying or changing one
 does not affect others.
 
-Lambda@Edge origin-response functions (for default cache TTL and conditional
-cache rules) are fully automated — the scaffold generates IAM role, archive,
-Lambda function, and `qualified_arn` references in `main.tf`. No manual ARN
-replacement needed.
-
-Lambda@Edge origin-request functions (rare — only when CFF exceeds 10KB and
-origin_override ops are split) require a manual step: after `terraform apply`,
-add the origin-request association to `main.tf` as described in the comment
-at the top of `origin_request_handler.js`.
+The Lambda@Edge origin-response function (for the default cache-behavior TTL) is
+fully automated — the scaffold generates the IAM role, archive, Lambda function,
+and `qualified_arn` reference in `main.tf`. No manual ARN replacement needed.
+That is the only Lambda@Edge this tool emits: there is no origin-request
+function and no viewer-event Lambda@Edge — viewer logic is CloudFront-Functions
+-only, and a CFF over the 10 KB limit is reported `SIZE_EXCEEDED` for you to
+simplify or split the rules, never split to Lambda@Edge.
 
 #### Step 3: Seed KVS data (if any)
 
@@ -163,10 +160,11 @@ After verifying each CloudFront distribution is working:
 - **The shared module (`modules/cloudfront_distribution/`) should not be
   edited.** It's a generic wrapper — all domain-specific configuration is in
   each domain's `main.tf`.
-- **CloudFront Functions have a 10KB size limit.** If a function exceeds this,
-  the pipeline splits origin_override logic to Lambda@Edge origin-request.
-  Remaining viewer-event ops that still don't fit are marked non-convertible.
-  Check the `lambda/` directory in each domain for origin-event handlers.
+- **CloudFront Functions have a hard 10KB size limit.** If a function exceeds
+  this even after minification, the whole domain is reported `SIZE_EXCEEDED` for
+  human intervention — the tool does not split viewer logic to Lambda@Edge
+  (viewer events are CloudFront-Functions-only). Simplify or split the Cloudflare
+  rules for that host, or drop rules that can't fit.
 - **CloudFront KVS has a default quota of 50 stores per account.** If you have
   more than 50 domains using bulk redirects, [request a quota increase](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html)
   before deploying.

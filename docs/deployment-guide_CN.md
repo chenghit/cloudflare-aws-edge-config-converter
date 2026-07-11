@@ -66,8 +66,7 @@ cloudflare-to-aws-cdn/
             ├── functions/
             │   ├── <name>_viewer_request.js
             │   └── <name>_viewer_response.js   # 仅在有 response header 操作时存在
-            └── lambda/             # 仅在 CloudFront Function 超过 10KB 时存在
-                ├── origin_request_handler.js
+            └── lambda/             # 仅当某条 default-cache-TTL 规则需要时
                 └── default_cache_origin_response.js
 ```
 
@@ -99,9 +98,7 @@ terraform apply
 
 每个域名重复上面的步骤。域名之间互相独立——部署或修改一个不影响其他的。
 
-Lambda@Edge origin-response 函数（用于默认缓存 TTL 和条件性缓存规则）是全自动的——scaffold 生成了 IAM role、archive、Lambda 函数和 `main.tf` 中的 `qualified_arn` 引用。不需要手动替换 ARN。
-
-Lambda@Edge origin-request 函数（少见——仅当 CFF 超过 10KB 且 origin_override 操作被拆分时）需要手动步骤：`terraform apply` 后，按 `origin_request_handler.js` 文件头部的注释将 origin-request association 添加到 `main.tf`。
+Lambda@Edge origin-response 函数（用于 default-cache-behavior 的 TTL）是全自动的——scaffold 生成了 IAM role、archive、Lambda 函数和 `main.tf` 中的 `qualified_arn` 引用。不需要手动替换 ARN。这也是本工具唯一生成的 Lambda@Edge：没有 origin-request 函数，也没有 viewer 事件的 Lambda@Edge——viewer 逻辑只用 CloudFront Functions，超过 10 KB 硬限制的 CFF 会报告 `SIZE_EXCEEDED` 让你简化/拆分规则，绝不拆分到 Lambda@Edge。
 
 #### 第 3 步：灌入 KVS 数据（如果有的话）
 
@@ -139,6 +136,6 @@ python3 test-cdn-rules.py d111111abcdef8.cloudfront.net
 - **部署前先看 `conversion_report.md`**。里面列了所有无法转换的规则，可能需要手动处理。
 - **`ir/` 目录仅用于调试。** 部署不需要它。里面是转换过程中用到的中间表示和验证报告。
 - **共享 module（`modules/cloudfront_distribution/`）别改。** 它是通用 wrapper——所有域名特定配置都在各域名的 `main.tf` 里。
-- **CloudFront Functions 有 10KB 大小限制。** 超了的话，pipeline 会把 origin_override 逻辑拆到 Lambda@Edge origin-request。剩余 viewer 逻辑如果还是放不下，会标记为 non-convertible。检查每个域名的 `lambda/` 目录看有没有 origin event handler。
+- **CloudFront Functions 有 10KB 硬大小限制。** 即使压缩后仍超限，则整个域名会报告 `SIZE_EXCEEDED` 交由人工处理——工具不会把 viewer 逻辑拆到 Lambda@Edge（viewer 事件只用 CloudFront Functions）。请简化/拆分该 host 的 Cloudflare 规则，或删除放不下的规则。
 - **CloudFront KVS 默认配额是每账户 50 个 store。** 如果超过 50 个域名用了 bulk redirects，部署前先[申请配额提升](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html)。
 - **Lambda@Edge IAM role 可能在 `terraform destroy` 后残留。** 边缘副本是异步清理的（可能需要几小时）。如果销毁后重新部署，可能需要 `terraform import` 已有 role。详见[故障排除](./troubleshooting_CN.md)。

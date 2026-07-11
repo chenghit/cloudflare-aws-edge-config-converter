@@ -131,7 +131,7 @@ cloudflare-to-aws-cdn/
             ├── test-cdn-rules.py    # Post-deployment validation script
             ├── functions/           # Only if domain has independent CFF
             │   └── <domain>_viewer_request.js
-            └── lambda/              # Only if CF Function exceeds 10KB
+            └── lambda/              # Only if a default-cache-TTL rule needs it
 ```
 
 </details>

@@ -15,7 +15,7 @@ The CDN pipeline converts these Cloudflare rule types to CloudFront equivalents:
 | Bulk Redirects | KVS + CloudFront Functions |
 | Request Header Transform | CloudFront Functions + Origin Request Policy |
 | Cache Rules (TTL / cache key) | Cache policies on cache behaviors |
-| Cache Rules (conditional "Bypass cache") | Viewer-request CloudFront Function that forces a cache miss for matching requests (see below); unconditional bypass → managed CachingDisabled policy |
+| Cache Rules (conditional "Bypass cache") | Viewer-request CloudFront Function that forces a cache miss for matching requests (see below); unconditional bypass → a custom cache policy with CachingDisabled semantics (all TTLs 0, no cache-key inputs) |
 | Cloud Connector Rules | Independent cache behaviors with separate origins |
 | Custom Error Rules | CloudFront custom error responses |
 | Response Header Transform | Response Headers Policy + CloudFront Functions (viewer-response) |
@@ -25,11 +25,21 @@ The CDN pipeline converts these Cloudflare rule types to CloudFront equivalents:
 
 CloudFront has no request-time "skip the cache" switch — the cache decision is fixed by the cache policy on a behavior, and behaviors are selected only by path (not by cookie/header/query). To convert a Cloudflare Cache Rule that conditionally bypasses cache (e.g. bypass when a `wordpress_logged_in` cookie is present, or `?test=true`), the tool emits a viewer-request CloudFront Function that, for matching requests, injects a header (`x-cf-cache-bypass`) with a per-request-unique value that is part of the cache key. Each matching request then gets a unique cache key → always a miss → always fetched from origin. This is a forced **miss**, not a true skip (the response is still stored, under a one-time key that's never reused), but the effect for the viewer is identical.
 
-Supported bypass conditions: cookies (`http.cookie`, `http.request.cookies["name"]`), named request headers (`http.request.headers["name"]`), named query args (`http.request.uri.args["name"]`), and query / user-agent / path substrings — existence or a scalar value comparison.
+Supported bypass conditions: any field the converter can evaluate at the edge — cookies (`http.cookie`, `http.request.cookies["name"]`), named request headers (`http.request.headers["name"]`), named query args (`http.request.uri.args["name"]`), query / user-agent / path substrings, method, referer, and the geo/device `CloudFront-Viewer-*` fields — as an existence check or a scalar value comparison. (The bypass condition runs through the same CFF condition renderer as every other rule type, so whatever converts elsewhere converts here too.)
 
 Caveats:
 - The multi-value form `any(http.request.cookies["x"][*] == "v")` (and the header/arg equivalents) is **not** converted — it's reported non-convertible rather than guessed at.
 - Because the bypass writes into the cache key, it costs a CFF invocation on the behaviors it runs on and produces one-time cache entries for matching requests (harmless — they're never re-served and age out).
+
+### Origin forwarding & Host override
+
+Cloudflare forwards the full request to origin; CloudFront strips everything not in the cache key unless an **origin request policy (ORP)** forwards it. Each behavior's ORP is chosen by this priority (all-or-nothing per domain, so a behavior never ends up under-forwarded relative to its CFF):
+
+1. **S3 + OAC origin → no ORP.** OAC signs the request (SigV4); forwarding the viewer Host or arbitrary headers breaks the signature (403). CloudFront sets Host to the bucket domain itself.
+2. **Any behavior in the domain needs CloudFront native headers** (`CloudFront-Viewer-Country`, device flags, etc., because some rule reads them) → a **custom ORP** (`allViewerAndWhitelistCloudFront`) is attached to **every** non-S3 behavior of that domain. It forwards all viewer headers (including Host) **plus** the CloudFront-* native headers, so a CFF that reads a native header sees it on whichever behavior it runs on.
+3. **Otherwise → managed AllViewer** — forwards all viewer headers (including Host), matching Cloudflare's default.
+
+A **Host override** (Cloudflare Origin Rule) does **not** change this choice — it's orthogonal. The origin Host is set in the CFF via `cf.updateRequestOrigin({hostHeader})`, whose explicit value wins over whatever Host the ORP forwards (verified live), so a behavior can both need native headers (→ custom ORP, which also forwards Host) **and** override the Host, with no conflict. There is no "Host override → drop the viewer Host" ORP (the old `AllViewerExceptHostHeader` choice was removed — it stranded non-matching requests and bought nothing, since `hostHeader` already wins).
 
 ## CDN Pipeline — What Does NOT Get Converted
 
@@ -80,20 +90,20 @@ Limitations:
 
 CloudFront Functions have a **hard** 10 KB size limit (not raisable via Service Quotas or AWS Support). Viewer events are CloudFront-Functions-only — this tool never falls back to Lambda@Edge for viewer-request/response, because L@E adds latency and per-request cost and changes the execution model.
 
-When a domain's `viewer_request.js` or `viewer_response.js` exceeds 10 KB, the tool minifies it; if it still exceeds the limit, the **whole domain** is reported `SIZE_EXCEEDED` for human intervention (a CFF can't be partially deployed, and request/response are one logical unit). The tool does not silently drop operations or hand-migrate them to Lambda@Edge. The options are to simplify or split the Cloudflare rules for that host, or drop rules that can't fit. (`origin_override` always stays in the CFF as `cf.updateRequestOrigin`. Lambda@Edge is used only for genuine origin events — the default-cache / custom-error origin-response — not for viewer events.)
+When a domain's `viewer_request.js` or `viewer_response.js` exceeds 10 KB, the tool minifies it; if it still exceeds the limit, the **whole domain** is reported `SIZE_EXCEEDED` for human intervention (a CFF can't be partially deployed, and request/response are one logical unit). The tool does not silently drop operations or hand-migrate them to Lambda@Edge. The options are to simplify or split the Cloudflare rules for that host, or drop rules that can't fit. (`origin_override` always stays in the CFF as `cf.updateRequestOrigin`. Lambda@Edge is used only for the default-cache-behavior TTL origin-response — never for viewer events, and never for custom errors.)
 
 ### CloudFront quota limits
 
-Quotas are labeled **soft** (raisable via Service Quotas) or **hard** (must redesign). The conversion report states which for each warning, so you don't file a Support request for an unraisable limit.
+Quotas are labeled **soft** (raisable) or **hard** (must redesign). Most soft quotas are raised self-service via Service Quotas; a few (e.g. Functions per account) aren't in Service Quotas and need an AWS Support case. The conversion report states which for each warning, so you don't file a request for an unraisable limit.
 
 | Resource | Limit | Soft/Hard | What happens when exceeded |
 |----------|-------|-----------|---------------------------|
-| CloudFront Functions per account | 100 | Soft | Content-hash dedup shares identical CFF across domains (e.g., 54 domains → 5 CFF). Checked post-dedup; warning in conversion report if still exceeded — raise via Service Quotas |
+| CloudFront Functions per account | 100 | Soft (Support case) | Content-hash dedup shares identical CFF across domains (e.g., 54 domains → 5 CFF). Checked post-dedup; warning in conversion report if still exceeded. This quota is **not** in Service Quotas — raise it via an AWS Support case, not the self-service console |
 | Distributions per account | 500 | Soft | Warning (one distribution per proxied host) |
 | KeyValueStores per account | 50 | Soft | Warning (one per host needing KVS) |
 | Cache behaviors per distribution | 75 | Soft | Validation error + warning — raise via Service Quotas or reduce Cloudflare rules |
 | Custom cache/ORP/RHP policies per account | 20 each | Soft | Warning |
-| Cache policy headers / cookies / query strings (whitelist) | 10 each | Soft | Warning — raise via Service Quotas |
+| Cache policy headers / cookies / query strings (whitelist) | 10 each | Soft | Validation error + warning — the config won't deploy until raised via Service Quotas |
 | Origin request policy headers | 10 | Soft | Warning |
 | Combined query/header/cookie **name length** per policy | 1024 | Hard | Warning (cannot be raised) |
 | CloudFront Function size | 10 KB | Hard | Domain reported `SIZE_EXCEEDED` (see above) |
@@ -146,5 +156,5 @@ AI-generated configurations require manual review before production deployment. 
 ### Features not configured by this tool
 
 - **CloudFront access logging** — involves decisions (S3 bucket, log format, shared vs per-domain) outside migration scope
-- **Lambda@Edge origin-response** — this IS fully automated when a rule needs it (default-cache / custom-error origin-response): the IAM role, archive, Lambda function, and `qualified_arn` reference in `main.tf` are all generated by the scaffold. There is no Lambda@Edge for viewer events — a CFF over 10 KB is reported `SIZE_EXCEEDED` for human intervention, never split to L@E.
+- **Lambda@Edge origin-response** — this IS fully automated when a rule needs it (the default-cache-behavior TTL handler): the IAM role, archive, Lambda function, and `qualified_arn` reference in `main.tf` are all generated by the scaffold. The tool does **not** generate a Lambda@Edge origin-response for custom-error rules — those convert to native `custom_error_response`, or a CFF+KVS inline error page, or are reported non-convertible (see the Custom Error rows above). There is no Lambda@Edge for viewer events either — a CFF over 10 KB is reported `SIZE_EXCEEDED` for human intervention, never split to L@E.
 - **DNS cutover** — the tool generates CloudFront distributions but does not modify DNS records. You must update DNS to point to CloudFront after verifying the configuration.

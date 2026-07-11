@@ -426,9 +426,11 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
                       if any(ir["metadata"].get("kvs_requirements", {}).values()))
     _quota_warn(kvs_domains, 50, False, "KeyValueStores per account (one per host needing KVS)")
 
-    # CFF count quota (SOFT: 100) is checked post-dedup in Stage 8 (generate-js),
-    # which reports the actual deduped CFF_TOTAL. The CFF SIZE limit (10 KB) is
-    # HARD and enforced there too.
+    # CFF count quota (default 100) is checked post-dedup in Stage 8 (generate-js),
+    # which reports the actual deduped CFF_TOTAL. This quota is NOT in Service
+    # Quotas — it's raised via an AWS Support case, not self-service (that's what
+    # the Stage-8 runtime message says). The CFF SIZE limit (10 KB) is HARD and
+    # enforced there too.
     cff_warning = None
 
     # CORS credentials + wildcard check
