@@ -507,16 +507,29 @@ def ensure_cidr(addr: str) -> str:
     return f"{addr}/128" if is_ipv6(addr) else f"{addr}/32"
 
 
-def extract_ip_sets(cond: dict, rule_name: str, position: int = 0) -> list[dict]:
+def extract_ip_sets(cond: dict, rule_name: str, position: int = 0,
+                    scope_tag: str = "") -> list[dict]:
     """Walk conditions tree, find all ip.src in {...} leaves, extract IP sets.
     Returns list of {"name": ..., "addresses": [...]} dicts.
-    Also annotates each leaf node with "_ip_set_names" for generator matching."""
+    Also annotates each leaf node with "_ip_set_names" for generator matching.
+
+    `scope_tag` is a GLOBALLY-UNIQUE-per-rule prefix (e.g. "c5" = custom rule at
+    position 5) that the caller must supply. Without it, two rules could mint the
+    same inline-set name: rule "x" branch #2 → "x_2" collides with rule "x_2"
+    branch #0 → "x_2". Those names key the IP-set resources AND the generator's
+    reference map, so a collision silently drops one set's addresses and points
+    its rule at the other set's IPs (confirmed data-loss bug, 2026-07-12). The
+    tag makes the name space disjoint per rule: `<tag>_<slug><suffix>`. Note
+    sanitize_logical_id strips _/-/. all alike, so the tag must differ in DIGITS
+    or LETTERS, never just punctuation — `c5`/`c6` is safe."""
     ip_sets = []
     _counter = [0]
 
     slug = re.sub(r'[^a-z0-9]+', '_', rule_name.lower()).strip('_')
     if len(slug) < 3:
         slug = f"rule_{position}"
+    if scope_tag:
+        slug = f"{scope_tag}_{slug}"
 
     def _walk(node: dict):
         if "op" in node:

@@ -262,14 +262,19 @@ def process_ip_access_rules(config_path):
             entry["conditions"] = {"field": "ip.src", "operator": "in",
                                    "value": "{" + " ".join(addresses) + "}"}
             if v4 or v6:
+                # scope_tag "a{position}" makes these names globally unique, matching
+                # the c{n}/r{n} scheme the custom/rate analyzers use (see
+                # extract_ip_sets). IP-access conditions are built by hand, so the
+                # tag is applied here directly.
+                tag = f"a{i + 1}"
                 entry["ip_sets"] = []
                 set_names = []
                 if v4:
-                    n = f"{entry['name']}-ipv4"
+                    n = f"{tag}_{entry['name']}-ipv4"
                     entry["ip_sets"].append({"name": n, "addresses": v4})
                     set_names.append(n)
                 if v6:
-                    n = f"{entry['name']}-ipv6"
+                    n = f"{tag}_{entry['name']}-ipv6"
                     entry["ip_sets"].append({"name": n, "addresses": v6})
                     set_names.append(n)
                 # Annotate the leaf so the generator can resolve the inline set to

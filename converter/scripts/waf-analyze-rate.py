@@ -157,8 +157,9 @@ def main():
                     "manual_action": f"Configure AWS equivalent for {f}",
                 })
 
-        # Extract IP sets
-        ip_sets = extract_ip_sets(cond, description, i + 1)
+        # Extract IP sets. scope_tag "r{position}" keeps inline-set names unique
+        # across rules AND across the custom section (which uses "c{position}").
+        ip_sets = extract_ip_sets(cond, description, i + 1, scope_tag=f"r{i + 1}")
         if ip_sets:
             entry["ip_sets"] = ip_sets
 

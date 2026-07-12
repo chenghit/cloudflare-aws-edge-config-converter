@@ -153,9 +153,10 @@ def main():
                     "manual_action": f"Configure AWS equivalent for {f}",
                 })
 
-        # Extract IP sets
+        # Extract IP sets. scope_tag "c{position}" keeps inline-set names unique
+        # across rules (custom section) so two rules can't mint the same name.
         if cond:
-            ip_sets = extract_ip_sets(cond, description, i + 1)
+            ip_sets = extract_ip_sets(cond, description, i + 1, scope_tag=f"c{i + 1}")
             if ip_sets:
                 entry["ip_sets"] = ip_sets
 
