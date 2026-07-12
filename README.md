@@ -27,6 +27,14 @@ Convert CDN configuration in /path/to/cloudflare-backup to CloudFront Terraform
 Convert all Cloudflare configuration in /path/to/cloudflare-backup to AWS
 ```
 
+Once the conversion finishes, each pipeline writes a report — `conversion_report.md` for CDN and `README_aws-waf-deployment.md` for WAF — with every deploy step, quota concern, and manual action. You can then ask the agent to deploy for you, e.g.:
+
+```
+Read the conversion report and deploy it to AWS for me.
+```
+
+The agent follows the report's deploy steps (Terraform apply / CloudFormation) and tells you the manual prerequisites first. **Heads up for CDN: provision your ACM certificates in us-east-1 before deploying** — CloudFront looks them up at plan time, so a missing cert fails the deploy. Review the report before approving; you stay in control of what gets applied.
+
 Don't have a backup yet? The `backup/` directory contains the backup script — the agent will guide you through running it (it never sees your API credentials; you configure those yourself). See [Getting a backup](#getting-a-backup) below.
 
 Always provide the **backup root directory** (the one containing `account/` and zone subdirectories like `example.com/`). Do **not** provide a subdirectory — both WAF and CDN pipelines need files from the `account/` directory (IP lists for WAF, bulk redirect lists for CDN) that live outside the zone directory.
@@ -37,7 +45,7 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 
 - **An AI coding agent** — Claude Code, Kiro CLI, Codex, Cursor, or any agent that can read a markdown file and run shell commands. The agent only needs to understand user intent, run scripts, and translate deployment guides for non-English users. Tools that support the Agent Skills format (Kiro CLI, Claude Code) auto-discover `converter/SKILL.md`; other tools read `AGENTS.md` (many read it automatically) or you point them at it.
 - **Terraform** >= 1.8.0 with AWS Provider >= 6.x — [Install Terraform](https://developer.hashicorp.com/terraform/install). Required for CDN pipeline only. WAF pipeline uses CloudFormation (no Terraform needed).
-- **Python 3** — Required by both WAF and CDN pipeline scripts. WAF pipeline is entirely Python-based (expression parsing, analysis, validation, CloudFormation generation). CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–7.6). Pre-installed on macOS and most Linux distributions. No third-party packages needed for the conversion pipeline (stdlib only). **Post-conversion**: CDN domains with KVS (bulk redirects, IP lists, error pages) generate a `seed-kvs.py` script that requires `boto3` — install with `pip install boto3` before deploying.
+- **Python 3** — Required by both WAF and CDN pipeline scripts. WAF pipeline is entirely Python-based (expression parsing, analysis, validation, CloudFormation generation). CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–7.6). Pre-installed on macOS and most Linux distributions. No third-party packages needed for the conversion pipeline (stdlib only). **Post-conversion**: CDN domains with KVS (bulk redirects, IP lists, error pages) generate a `seed-kvs.py` script that requires `boto3` **with the CRT extra** for CloudFront KeyValueStore SigV4a signing — install with `pip install 'boto3[crt]'` (quote it) before deploying. Plain `boto3` will fail seeding with a signing error.
 - **Model**: No model requirement for the conversion pipeline itself — all scripts are deterministic Python with zero LLM invocations.
 - **For the backup step**: `bash`, `curl`, and `jq`. See `backup/README.md`.
 - **ACM certificates** (CDN only): CloudFront requires certs in us-east-1. Provision wildcard certificates (e.g., `*.example.com`) before running. Terraform auto-discovers existing ISSUED certs via data source lookup.

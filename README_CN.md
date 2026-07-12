@@ -27,6 +27,14 @@ agent 会读取 `AGENTS.md` → `converter/SKILL.md` 并为你运行流程。你
 将 /path/to/cloudflare-backup 中的全部 Cloudflare 配置转换到 AWS
 ```
 
+转换完成后，每条 pipeline 都会生成一份报告——CDN 是 `conversion_report.md`，WAF 是 `README_aws-waf-deployment.md`——里面写清了所有部署步骤、配额关切和需要手动处理的事项。你可以接着让 agent 帮你部署，例如：
+
+```
+读取转换报告，帮我部署到 AWS。
+```
+
+agent 会按报告里的部署步骤操作（Terraform apply / CloudFormation），并先告诉你有哪些手动前置。**CDN 特别注意：部署前先在 us-east-1 准备好 ACM 证书**——CloudFront 在 plan 阶段就要查证书，缺证书会直接导致部署失败。批准前请先看一遍报告，部署什么由你掌控。
+
 还没有备份？`backup/` 目录里就是备份脚本——agent 会指导你运行它（它不会看到你的 API 凭据，凭据由你自己配置）。详见下面的 [获取备份](#获取备份)。
 
 请始终提供 **备份根目录**（包含 `account/` 和 zone 子目录如 `example.com/` 的那个目录）。**不要**提供子目录——WAF 和 CDN pipeline 都需要 `account/` 目录中的文件（WAF 需要 IP 列表，CDN 需要 bulk redirect 列表），这些文件位于 zone 目录之外。
@@ -37,7 +45,7 @@ agent 会读取 `AGENTS.md` → `converter/SKILL.md` 并为你运行流程。你
 
 - **一个 AI 编码 agent** — Claude Code、Kiro CLI、Codex、Cursor，或任何能读取 markdown 文件并运行 shell 命令的 agent。agent 只需要理解用户意图、运行脚本，以及为非英文用户翻译部署文档。支持 Agent Skills 格式的工具（Kiro CLI、Claude Code）会自动发现 `converter/SKILL.md`；其他工具读取 `AGENTS.md`（很多工具会自动读取），或由你指给它。
 - **Terraform** >= 1.8.0，AWS Provider >= 6.x — [安装 Terraform](https://developer.hashicorp.com/terraform/install)。仅 CDN pipeline 需要。WAF pipeline 使用 CloudFormation（不需要 Terraform）。
-- **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF pipeline 完全基于 Python（表达式解析、分析、验证、CloudFormation 生成）。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）。macOS 和大多数 Linux 发行版已预装。转换流程无需第三方包（仅用标准库）。**部署阶段**：有 KVS 的 CDN 域名（批量重定向、IP 列表、错误页面）会生成 `seed-kvs.py` 脚本，需要 `boto3`——部署前运行 `pip install boto3` 安装。
+- **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF pipeline 完全基于 Python（表达式解析、分析、验证、CloudFormation 生成）。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）。macOS 和大多数 Linux 发行版已预装。转换流程无需第三方包（仅用标准库）。**部署阶段**：有 KVS 的 CDN 域名（批量重定向、IP 列表、错误页面）会生成 `seed-kvs.py` 脚本，需要**带 CRT 扩展的 `boto3`**（CloudFront KeyValueStore 的 SigV4a 签名依赖它）——部署前运行 `pip install 'boto3[crt]'`（记得加引号）安装。只装普通 `boto3` 会在 seeding 时报签名错误。
 - **模型**：转换 pipeline 本身无模型要求——所有脚本都是确定性 Python，零 LLM 调用。
 - **备份步骤需要**：`bash`、`curl` 和 `jq`。详见 `backup/README.md`。
 - **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。运行前申请通配符证书（如 `*.example.com`），Terraform 会自动查找已签发的证书。
