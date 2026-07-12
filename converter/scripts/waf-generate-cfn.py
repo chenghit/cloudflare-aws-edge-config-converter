@@ -215,9 +215,33 @@ def compute_statement_wcu(stmt, managed_wcu=None):
     return 1
 
 
+def _label_wcu(n_labels):
+    """WCU that defining `n_labels` RuleLabels adds. AWS pools this per WebACL /
+    per rule group: 1 WCU for every 5 labels defined across the container's rules
+    (docs: waf-rule-label-add.html). Confirmed live via CheckCapacity (2026-07-12):
+    a base rule measured +1 with 1-5 labels, +2 with 6-10, +3 with 11-15."""
+    return -(-n_labels // 5)  # ceil(n_labels / 5)
+
+
 def compute_rule_wcu(rule, managed_wcu=None):
-    """WCU of a full emitted Rule dict (its top-level Statement)."""
-    return compute_statement_wcu(rule.get("Statement", {}), managed_wcu)
+    """WCU of a full emitted Rule dict EVALUATED ALONE: its statement + its own
+    RuleLabels cost. Matches CheckCapacity on a single rule. NOTE: label cost is
+    pooled at the container level, so summing this over a group OVER-counts the
+    label part — use compute_rules_wcu() for a group/WebACL total (accurate)."""
+    return (compute_statement_wcu(rule.get("Statement", {}), managed_wcu)
+            + _label_wcu(len(rule.get("RuleLabels", []))))
+
+
+def compute_rules_wcu(rules, managed_wcu=None):
+    """Accurate WCU of a SET of rules evaluated together in one container (rule
+    group or WebACL): sum of each rule's statement WCU PLUS the pooled label cost
+    ceil(total_labels / 5). This is what CheckCapacity returns for the container,
+    and what a rule group's declared Capacity must be (>= actual, so deploy is
+    accepted). Cheaper than summing compute_rule_wcu when labels don't divide
+    evenly across rules."""
+    stmt = sum(compute_statement_wcu(r.get("Statement", {}), managed_wcu) for r in rules)
+    labels = sum(len(r.get("RuleLabels", [])) for r in rules)
+    return stmt + _label_wcu(labels)
 
 
 # ── Rule-group overflow packing ───────────────────────────────────────────────
@@ -283,10 +307,18 @@ def _rule_produced_labels(rule):
 
 
 def _count_refs_in_stmt(stmt):
-    """Count reference statements (IP-set / regex-set) in a statement tree."""
+    """Count reference statements toward the WebACL's 50-ref cap. AWS counts, per
+    WebACL: IPSetReference + RegexPatternSetReference + your-own-RuleGroupReference
+    + AWS-MANAGED-RuleGroup references — ALL four types (EMPIRICALLY CONFIRMED live
+    2026-07-12: 45 IP refs + 5 AWS managed rule groups = 50 → accepted; 46 + 5 = 51
+    → NUM_REFERENCED_STATEMENT_IN_CONTAINER. So managed groups are NOT free against
+    this cap, contrary to earlier belief). A ManagedRuleGroupStatement's own
+    scope-down refs count too."""
     if not isinstance(stmt, dict):
         return 0
     if "IPSetReferenceStatement" in stmt or "RegexPatternSetReferenceStatement" in stmt:
+        return 1
+    if "RuleGroupReferenceStatement" in stmt:
         return 1
     if "AndStatement" in stmt:
         return sum(_count_refs_in_stmt(s) for s in stmt["AndStatement"]["Statements"])
@@ -296,6 +328,11 @@ def _count_refs_in_stmt(stmt):
         return _count_refs_in_stmt(stmt["NotStatement"]["Statement"])
     if "RateBasedStatement" in stmt and "ScopeDownStatement" in stmt["RateBasedStatement"]:
         return _count_refs_in_stmt(stmt["RateBasedStatement"]["ScopeDownStatement"])
+    if "ManagedRuleGroupStatement" in stmt:
+        n = 1  # the managed group reference itself consumes 1
+        if "ScopeDownStatement" in stmt["ManagedRuleGroupStatement"]:
+            n += _count_refs_in_stmt(stmt["ManagedRuleGroupStatement"]["ScopeDownStatement"])
+        return n
     return 0
 
 
@@ -383,9 +420,10 @@ def pack_webacl_rules(webacl_name, custom_block, rate_block, header_rules,
     """
     warnings = []
 
-    # Only IP-set / regex-set / rule-group references consume the 50-ref budget;
-    # RBR consume the 10-RBR budget. Injected header/trailer + managed rules are
-    # never packed — count what they consume up front.
+    # The 50-ref budget counts IP-set + regex-set + our-own-rule-group + AWS-MANAGED
+    # rule-group references (all four — confirmed live 2026-07-12). RBR consume the
+    # separate 10-RBR budget. Injected header/trailer + managed rules are never
+    # packed — count what they consume up front (managed groups are NOT free here).
     fixed_refs = sum(_count_refs_in_stmt(r.get("Statement", {}))
                      for r in header_rules + trailer_rules + managed_rules)
     fixed_rbr = sum(1 for r in header_rules + trailer_rules + managed_rules if _rule_is_rbr(r))
@@ -436,7 +474,7 @@ def _make_rule_group(block_name, gi, group_rules, unique_id, resources, managed_
         rc = copy.deepcopy(r)
         rc["Priority"] = pi
         g_rules.append(rc)
-    capacity = sum(compute_rule_wcu(r, managed_wcu) for r in group_rules)
+    capacity = compute_rules_wcu(group_rules, managed_wcu)
     resources[lid] = {"Type": "AWS::WAFv2::RuleGroup", "Properties": {
         "Name": rg_name, "Scope": "CLOUDFRONT", "Capacity": capacity,
         "Rules": g_rules,
@@ -451,33 +489,75 @@ def _make_rule_group(block_name, gi, group_rules, unique_id, resources, managed_
     return lid, rg_name, ref_rule
 
 
-def _rewrite_label_keys(all_placements, webacl_name):
-    """Rewrite every LabelMatchStatement.Key to its PRODUCER's fully-qualified
-    form. `all_placements` is a list of (rule, container_kind, container_name):
-    container_kind is 'webacl' or 'rulegroup'. A label produced by a rule in
-    container C must be matched with awswaf:<acct>:C:<label>. We use Fn::Sub so
-    CloudFormation fills the real account id at deploy (template stays portable).
+def _label_match_node(label, producers, own):
+    """The statement node that matches `label` from a consumer in container
+    `own` = (kind, name). AWS label-key rules (dual-subagent + 5 live tests,
+    2026-07-12): a BARE key resolves ONLY against the matching rule's own
+    container; a cross-container match needs the producer's fully-qualified
+    prefix awswaf:<acct>:<rulegroup|webacl>:<name>:<label>; writing your OWN
+    container's prefix is REJECTED ("parameter value isn't supported"). A label
+    can be produced in SEVERAL containers, so we OR one LabelMatch per producing
+    container — bare for `own`, Fn::Sub FQN for each other (portable: CFN fills
+    the account id). Matching a not-yet-set label is simply false, so OR-ing all
+    producers is always safe."""
+    def sort_key(p):
+        return (0 if p == own else 1, p[0], p[1])  # own (bare) first, then by container
 
-    Unqualified consumer keys resolve against the CONSUMER's own container, which
-    silently breaks if producer and consumer differ — so we make EVERY key fully
-    qualified (user decision). If a label has no known producer among placements,
-    leave the key unqualified (defensive: an externally/managed-produced label)."""
-    # Map produced label name → (container_kind, container_name) of its producer.
-    producer = {}
+    nodes = []
+    for pkind, pname in sorted(producers, key=sort_key):
+        if (pkind, pname) == own:
+            key = label  # same container → bare (a self-prefix would be rejected)
+        else:
+            key = {"Fn::Sub": f"awswaf:${{AWS::AccountId}}:{pkind}:{pname}:{label}"}
+        nodes.append({"LabelMatchStatement": {"Scope": "LABEL", "Key": key}})
+    return nodes[0] if len(nodes) == 1 else {"OrStatement": {"Statements": nodes}}
+
+
+def _rewrite_stmt(stmt, producers, own):
+    """Return `stmt` with every Scope==LABEL LabelMatchStatement replaced by the
+    correct bare/FQN/OR match node for a consumer in container `own`. Pure
+    transform: a replacement node is TERMINAL — we never recurse into freshly
+    created LabelMatch/OR nodes (which would re-expand a bare key forever)."""
+    if not isinstance(stmt, dict):
+        return stmt
+    if "LabelMatchStatement" in stmt:
+        lm = stmt["LabelMatchStatement"]
+        key = lm.get("Key")
+        if lm.get("Scope") != "LABEL" or not isinstance(key, str):
+            return stmt  # NAMESPACE scope or already-rewritten dict key — leave
+        prods = producers.get(key)
+        if not prods:
+            return stmt  # no known producer (external/managed label) — leave bare
+        return _label_match_node(key, prods, own)  # terminal
+    for cont in ("AndStatement", "OrStatement"):
+        if cont in stmt:
+            return {cont: {"Statements": [_rewrite_stmt(s, producers, own)
+                                          for s in stmt[cont]["Statements"]]}}
+    if "NotStatement" in stmt:
+        return {"NotStatement": {"Statement": _rewrite_stmt(
+            stmt["NotStatement"]["Statement"], producers, own)}}
+    for wrap in ("RateBasedStatement", "ManagedRuleGroupStatement"):
+        if wrap in stmt and "ScopeDownStatement" in stmt[wrap]:
+            out = copy.deepcopy(stmt)
+            out[wrap]["ScopeDownStatement"] = _rewrite_stmt(
+                stmt[wrap]["ScopeDownStatement"], producers, own)
+            return out
+    return stmt
+
+
+def _rewrite_label_keys(all_placements, webacl_name):
+    """Rewrite every consumer's Scope==LABEL LabelMatchStatement to the correct
+    bare/FQN/OR form given where each label is PRODUCED. `all_placements` is a
+    list of (rule, container_kind, container_name) with kind 'webacl'/'rulegroup'.
+    A label may have producers in multiple containers; each consumer OR-matches
+    them all (see _label_match_node). Mutates each rule's Statement in place."""
+    producers = {}
     for rule, kind, cname in all_placements:
         for lbl in _rule_produced_labels(rule):
-            producer.setdefault(lbl, (kind, cname))
+            producers.setdefault(lbl, set()).add((kind, cname))
 
-    for rule, _kind, _cname in all_placements:
-        for lm in _iter_label_match_statements(rule.get("Statement", {})):
-            key = lm.get("Key")
-            if not isinstance(key, str):
-                continue  # already rewritten (Fn::Sub dict) or non-literal
-            prod = producer.get(key)
-            if not prod:
-                continue  # unknown producer — leave as-is
-            pkind, pname = prod
-            lm["Key"] = {"Fn::Sub": f"awswaf:${{AWS::AccountId}}:{pkind}:{pname}:{key}"}
+    for rule, kind, cname in all_placements:
+        rule["Statement"] = _rewrite_stmt(rule.get("Statement", {}), producers, (kind, cname))
 
 
 def _finalize(header_rules, custom_direct, custom_groups, rate_direct, rate_groups,
@@ -513,8 +593,15 @@ def _finalize(header_rules, custom_direct, custom_groups, rate_direct, rate_grou
         placements.append((r, "webacl", webacl_name))
 
     # Rewrite label keys in place across every placement (WebACL rules AND rules
-    # now living inside rule groups).
+    # now living inside rule groups). This may OR-expand a LabelMatch into several
+    # (one per producing container), which ADDS WCU — so recompute each rule
+    # group's Capacity afterward (Capacity is immutable at create; a stale value
+    # lower than actual gets rejected at deploy).
     _rewrite_label_keys(placements, webacl_name)
+    for res in resources.values():
+        if res["Type"] == "AWS::WAFv2::RuleGroup":
+            res["Properties"]["Capacity"] = compute_rules_wcu(
+                res["Properties"]["Rules"], None)
 
     # Assemble final order + assign WebACL-level priorities.
     ordered = (list(header_rules) + list(custom_direct) + custom_refs
@@ -522,6 +609,47 @@ def _finalize(header_rules, custom_direct, custom_groups, rate_direct, rate_grou
     for p, r in enumerate(ordered):
         r["Priority"] = p
     return ordered
+
+
+def webacl_effective_wcu(resources, managed_wcu=None):
+    """Return {webacl_name: effective_wcu} for every WebACL in `resources`. A
+    WebACL's effective WCU = the WCU of its direct rules PLUS the Capacity of each
+    rule group it references (AWS charges the group's fixed capacity to the
+    referencing WebACL). This is the number that must stay ≤ 5000."""
+    # logical-id → rule group Capacity, for resolving RuleGroupReferenceStatement.
+    rg_capacity = {}
+    for lid, res in resources.items():
+        if res["Type"] == "AWS::WAFv2::RuleGroup":
+            rg_capacity[lid] = res["Properties"]["Capacity"]
+
+    def _group_ref_capacity(rule):
+        """If `rule` is a rule-group reference, return the group's charged
+        Capacity; else None (a direct rule, priced with the pooled batch)."""
+        ref = rule.get("Statement", {}).get("RuleGroupReferenceStatement")
+        if not ref:
+            return None
+        arn = ref.get("ARN", {})
+        # our own groups reference via {"Fn::GetAtt": [lid, "Arn"]}
+        if isinstance(arn, dict) and "Fn::GetAtt" in arn:
+            return rg_capacity.get(arn["Fn::GetAtt"][0], 0)
+        return 0
+
+    out = {}
+    for res in resources.values():
+        if res["Type"] != "AWS::WAFv2::WebACL":
+            continue
+        name = res["Properties"]["Name"]
+        # Referenced rule groups are charged at their fixed Capacity; the WebACL's
+        # OWN direct rules are priced together (labels pooled across them).
+        direct, total = [], 0
+        for r in res["Properties"]["Rules"]:
+            cap = _group_ref_capacity(r)
+            if cap is None:
+                direct.append(r)
+            else:
+                total += cap
+        out[name] = total + compute_rules_wcu(direct, managed_wcu)
+    return out
 
 
 class RefCounter:
@@ -1093,9 +1221,15 @@ def generate(ir):
 
     # ── Build rules ──────────────────────────────────────────────────────────
 
-    all_rules = []
-    priority = 0
-    rate_rule_count = 0
+    # Rules are built into two ordered blocks matching Cloudflare's phase order:
+    #   custom_block = IP-access + custom rules (http_request_firewall_custom phase)
+    #   rate_block   = rate-limiting rules       (http_ratelimit phase)
+    # managed rules are the http_request_firewall_managed phase (built separately).
+    # The packer keeps these blocks contiguous/ordered and offloads per-block
+    # overflow into rule groups. Priorities are assigned by the packer, so the
+    # rules here carry no meaningful Priority yet.
+    custom_block = []
+    rate_block = []
     used_rule_names = set()
 
     def unique_rule_name(raw_name):
@@ -1111,10 +1245,7 @@ def generate(ir):
         used_rule_names.add(deduped)
         return deduped
 
-    # Anti-DDoS at priority 0 (added per-WebACL later)
-    priority = 1
-
-    # IP Access Rules
+    # IP Access Rules (part of the custom phase, evaluated first)
     for rule in ir.get("ip_access_rules", {}).get("rules", []):
         if rule.get("convertibility") == "no":
             continue
@@ -1128,13 +1259,11 @@ def generate(ir):
         stmt = conditions_to_statement(cond, ctx)
         aws_action = ACTION_MAP.get(rule.get("mode", "block"), {"Block": {}})
         rn = unique_rule_name(rule["name"])
-        all_rules.append({
-            "Name": rn, "Priority": priority,
-            "Action": aws_action, "Statement": stmt,
+        custom_block.append({
+            "Name": rn, "Action": aws_action, "Statement": stmt,
             "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
                                  "MetricName": rn},
         })
-        priority += 1
 
     # Custom Rules
     skip_labels_present = ir.get("custom_rules", {}).get("skip_labels_present", {})
@@ -1159,7 +1288,6 @@ def generate(ir):
                 stmt["AndStatement"]["Statements"].insert(0, not_label)
             else:
                 stmt = {"AndStatement": {"Statements": [not_label, stmt]}}
-            wcu.add(rule["name"], 1)
 
         # Determine action
         action = rule.get("action", "block")
@@ -1171,8 +1299,7 @@ def generate(ir):
 
         rn = unique_rule_name(rule["name"])
         waf_rule = {
-            "Name": rn, "Priority": priority,
-            "Action": aws_action, "Statement": stmt,
+            "Name": rn, "Action": aws_action, "Statement": stmt,
             "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
                                  "MetricName": rn},
         }
@@ -1181,14 +1308,12 @@ def generate(ir):
         if action == "skip" and rule.get("labels"):
             waf_rule["RuleLabels"] = [{"Name": l} for l in rule["labels"]]
 
-        all_rules.append(waf_rule)
-        priority += 1
+        custom_block.append(waf_rule)
 
     # Rate-Limiting Rules
     for rule in ir.get("rate_limiting_rules", {}).get("rules", []):
         if rule.get("convertibility") == "no":
             continue
-        rate_rule_count += 1
         cond = rule.get("conditions") or rule.get("convertible_conditions")
 
         ctx = {"wcu": wcu, "refs": refs, "warnings": warnings,
@@ -1203,14 +1328,12 @@ def generate(ir):
                 "EvaluationWindowSec": rule.get("aws_evaluation_window_sec", 60),
             }
         }
-        wcu.add(rule["name"], 2)
 
         # Build scope-down
         scope_parts = []
         if rule.get("scope_down", {}).get("skip_http_ratelimit"):
             scope_parts.append({"NotStatement": {"Statement": {"LabelMatchStatement": {
                 "Scope": "LABEL", "Key": "skip:http_ratelimit"}}}})
-            wcu.add(rule["name"], 1)
         if cond:
             cond_stmt = conditions_to_statement(cond, ctx)
             # Flatten: if cond_stmt is AndStatement and we're building an AndStatement, merge
@@ -1228,16 +1351,14 @@ def generate(ir):
 
         aws_action = ACTION_MAP.get(rule.get("action", "block"), {"Block": {}})
         rn = unique_rule_name(rule["name"])
-        all_rules.append({
-            "Name": rn, "Priority": priority,
-            "Action": aws_action, "Statement": rate_stmt,
+        rate_block.append({
+            "Name": rn, "Action": aws_action, "Statement": rate_stmt,
             "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
                                  "MetricName": rn},
         })
-        priority += 1
 
-    # Managed rules (built separately, added per-WebACL)
-    managed_rules, _ = build_managed_rules(priority, skip_labels_present, wcu)
+    # Managed rules (built separately, added per-WebACL, never packed)
+    managed_rules, _ = build_managed_rules(0, skip_labels_present, wcu)
 
     # ── Build WebACLs ────────────────────────────────────────────────────────
 
@@ -1254,66 +1375,37 @@ def generate(ir):
             }
         }
 
-    # Legacy mode: 2 WebACLs
-    # Website WebACL: search engine label + Anti-DDoS with scope-down + customer rules + always-on challenge + managed
-    se_rule = build_search_engine_label_rule(0)
-    wcu.add("search-engine-label", 6)
-    ddos_website = build_anti_ddos_rule(1, advanced=False,
-                                         scope_down_exclude_labels=["custom:search-engine"])
-    wcu.add("AntiDDoS-website", 250)
+    # Legacy mode: 2 WebACLs (website + api). Each gets the SAME custom_block +
+    # rate_block, packed independently into its own rule groups (rule groups are
+    # per-WebACL so counters/labels stay isolated per WebACL). Injected rules:
+    #   website: header = [search-engine, anti-DDoS(challenge on)], trailer = [always-on-challenge]
+    #   api:     header = [anti-DDoS(challenge off/advanced)],       trailer = []
+    over_limits = []
 
-    # Find where rate rules end to insert always-on challenge
-    rate_end_idx = len(all_rules)
-    for idx, r in enumerate(all_rules):
-        if "RateBasedStatement" not in r.get("Statement", {}):
-            if idx > 0 and "RateBasedStatement" in all_rules[idx - 1].get("Statement", {}):
-                rate_end_idx = idx
-                break
+    def build_one_webacl(logical_id, name, header, trailer):
+        # Deep-copy the shared blocks so each WebACL's packing (label rewrites,
+        # priorities, rule-group materialization) is independent.
+        cust = copy.deepcopy(custom_block)
+        rate = copy.deepcopy(rate_block)
+        mgd = copy.deepcopy(managed_rules)
+        ordered, warns, over = pack_webacl_rules(
+            name, cust, rate, header, trailer, mgd, unique_id, resources)
+        warnings.extend(warns)
+        if over:
+            over_limits.append(over)
+        resources[logical_id] = build_webacl(name, ordered)
 
-    aoc_rule = build_always_on_challenge_rule(0)  # priority reassigned below
-    wcu.add("always-on-challenge", 3)
+    build_one_webacl(
+        "WebACLWebsite", "waf-website",
+        header=[build_search_engine_label_rule(0),
+                build_anti_ddos_rule(0, advanced=False,
+                                     scope_down_exclude_labels=["custom:search-engine"])],
+        trailer=[build_always_on_challenge_rule(0)])
 
-    # Reassign priorities for website WebACL
-    website_rules = [se_rule, ddos_website]
-    p = 2
-    for r in all_rules[:rate_end_idx]:
-        r_copy = copy.deepcopy(r)
-        r_copy["Priority"] = p
-        website_rules.append(r_copy)
-        p += 1
-    aoc_rule["Priority"] = p
-    website_rules.append(aoc_rule)
-    p += 1
-    for r in all_rules[rate_end_idx:]:
-        r_copy = copy.deepcopy(r)
-        r_copy["Priority"] = p
-        website_rules.append(r_copy)
-        p += 1
-    for mr in managed_rules:
-        mr_copy = copy.deepcopy(mr)
-        mr_copy["Priority"] = p
-        website_rules.append(mr_copy)
-        p += 1
-
-    resources["WebACLWebsite"] = build_webacl("waf-website", website_rules)
-
-    # API/File WebACL: Anti-DDoS (challenge disabled) + customer rules + managed
-    ddos_api = build_anti_ddos_rule(0, advanced=True)
-    wcu.add("AntiDDoS-api", 250)
-    api_rules = [ddos_api]
-    p = 1
-    for r in all_rules:
-        r_copy = copy.deepcopy(r)
-        r_copy["Priority"] = p
-        api_rules.append(r_copy)
-        p += 1
-    for mr in managed_rules:
-        mr_copy = copy.deepcopy(mr)
-        mr_copy["Priority"] = p
-        api_rules.append(mr_copy)
-        p += 1
-
-    resources["WebACLApiFile"] = build_webacl("waf-api-file", api_rules)
+    build_one_webacl(
+        "WebACLApiFile", "waf-api-file",
+        header=[build_anti_ddos_rule(0, advanced=True)],
+        trailer=[])
 
     # ── Clean up unreferenced IP sets ────────────────────────────────────────
 
@@ -1329,16 +1421,21 @@ def generate(ir):
             warnings.append(f"ASN list '{name}' not referenced by any rule")
 
     # ── Quota validation ─────────────────────────────────────────────────────
+    # WCU and ref counts are computed from the FINAL assembled resources (each
+    # WebACL's own effective WCU = its direct rules + the capacity of every rule
+    # group it references). The packer already fit RBR/refs under the per-WebACL
+    # caps or reported over_limits; here we surface WCU + any packer over-limits.
 
     errors = []
-    if wcu.total > MAX_WCU:
-        errors.append(f"WCU total {wcu.total} exceeds maximum {MAX_WCU}")
-    elif wcu.total > WARN_WCU:
-        warnings.append(f"WCU total {wcu.total} exceeds {WARN_WCU} (extra charges apply)")
-    if refs.count > MAX_REF_STATEMENTS:
-        errors.append(f"Reference statements {refs.count} exceeds maximum {MAX_REF_STATEMENTS} per WebACL")
-    if rate_rule_count > MAX_RATE_RULES:
-        errors.append(f"Rate-based rules {rate_rule_count} exceeds maximum {MAX_RATE_RULES}")
+    max_wcu_total = 0
+    for wl, wr in webacl_effective_wcu(resources).items():
+        max_wcu_total = max(max_wcu_total, wr)
+        if wr > MAX_WCU:
+            errors.append(f"WebACL {wl}: WCU {wr} exceeds maximum {MAX_WCU}")
+        elif wr > WARN_WCU:
+            warnings.append(f"WebACL {wl}: WCU {wr} exceeds {WARN_WCU} (extra charges apply)")
+    for over in over_limits:
+        errors.append(f"WebACL {over.get('webacl','?')}: {over['reason']}")
     if len(resources) > MAX_STACK_RESOURCES:
         errors.append(f"Stack resources {len(resources)} exceeds maximum {MAX_STACK_RESOURCES}")
 
@@ -1358,6 +1455,7 @@ def generate(ir):
         "Outputs": outputs,
     }
 
+    wcu.total = max_wcu_total  # report the highest per-WebACL WCU
     return template, wcu, refs, warnings, errors
 
 
@@ -1720,39 +1818,35 @@ def generate_split(split_ir):
 
 # ── WAFv2 API throttle mitigation ─────────────────────────────────────────────
 
-THROTTLE_BATCH_SIZE = 5  # WAFv2 Create/Update = 1 TPS; batches of 5 with retry
-
-
 def _add_throttle_chains(template):
     """Add DependsOn chains to WAFv2 resources to avoid API throttling.
 
     WAFv2 write API limit is 1 TPS (fixed, non-adjustable). CloudFormation
     creates resources in parallel by default, causing ThrottlingException
-    when many IP sets or WebACLs are created simultaneously.
+    when many IP sets are created simultaneously.
 
-    Strategy: chain resources of the same type in batches. Each batch of N
-    resources depends on the previous batch's last resource, forcing serial
-    batch execution. Within a batch, resources are created in parallel
-    (CloudFormation retries handle the 1 TPS limit for small batches).
+    Strategy: a FULLY SERIAL chain per resource type — each resource DependsOn
+    the previous one, so CloudFormation creates them strictly one at a time.
+    An earlier "batches of 5 in parallel, rely on CFN retries" strategy still
+    throttled at deploy (EMPIRICALLY: 55 IP sets → repeated ThrottlingException
+    + rollback), because 5 concurrent creates is 5x the 1 TPS ceiling and CFN's
+    retry budget is exhausted under sustained back-to-back batches. Serial is
+    the only rate that reliably stays under 1 TPS. IP set creation is fast
+    (~1s each), so 55 sets ≈ 1 min of serial creation — acceptable.
     """
     resources = template.get("Resources", {})
 
     for rtype in ("AWS::WAFv2::IPSet", "AWS::WAFv2::WebACL"):
         lids = [lid for lid, res in resources.items() if res["Type"] == rtype]
-        if len(lids) <= THROTTLE_BATCH_SIZE:
-            continue
-        # Chain: batch N depends on last resource of batch N-1
-        for i in range(THROTTLE_BATCH_SIZE, len(lids), THROTTLE_BATCH_SIZE):
-            anchor = lids[i - 1]  # last resource of previous batch
-            batch_end = min(i + THROTTLE_BATCH_SIZE, len(lids))
-            for j in range(i, batch_end):
-                res = resources[lids[j]]
-                deps = res.get("DependsOn", [])
-                if isinstance(deps, str):
-                    deps = [deps]
-                if anchor not in deps:
-                    deps.append(anchor)
-                res["DependsOn"] = deps
+        # Serial chain: resource i depends on resource i-1.
+        for prev, cur in zip(lids, lids[1:]):
+            res = resources[cur]
+            deps = res.get("DependsOn", [])
+            if isinstance(deps, str):
+                deps = [deps]
+            if prev not in deps:
+                deps.append(prev)
+            res["DependsOn"] = deps
 
 
 # ── Template writing (compact + split if needed) ─────────────────────────────
