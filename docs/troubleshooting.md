@@ -60,8 +60,8 @@
 3. For validation failures: check `cloudflare-to-aws-cdn/ir/validation/chunk/<domain>-v1.json` or `final/<domain>-v2.json`
 4. Common causes:
    - `domain_scope.json` not found → run Stage 1 (cdn-parse-dns.py) first
-   - JSON parse error in Cloudflare config → check if CloudflareBackup export is complete
-   - Zone directory not found → verify the config path points to the CloudflareBackup root (containing `account/` and zone subdirectories)
+   - JSON parse error in Cloudflare config → check if the backup export is complete
+   - Zone directory not found → verify the config path points to the backup root (containing `account/` and zone subdirectories)
 5. To retry a single domain: `python3 /path/to/clone/converter/scripts/cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`
 
 ## "found under multiple zones" Error
@@ -204,13 +204,15 @@ aws cloudformation delete-stack \
 
 **Note on the 50-reference and 10-rate-based-rule caps**: you should rarely see BLOCKED for these. A rule-group overflow packer automatically moves overflow IP-set references and rate-based rules into referenced rule groups, which don't count against the WebACL's 10-RBR / 50-reference caps (the WebACL pays just 1 reference per rule group). It also rewrites label keys to the correct cross-container form and recomputes each rule group's WCU. So a config that would once have needed a per-host split now fits in the default 2 WebACLs. The 50-ref → `--force-split` fallback described in older docs no longer exists.
 
-**The two situations that genuinely BLOCK**:
+**The situations that genuinely BLOCK** (the common ones):
 
-1. **A WebACL's WCU exceeds the 5000 hard cap.** WCU is the sum of every rule's cost (see [limitations](./limitations.md) for the model) plus each referenced rule group's capacity. This can't be reduced by packing — the rules are genuinely too expensive.
+1. **A WebACL's WCU exceeds the 5000 hard cap.** WCU is the sum of every rule's cost (per-statement — see the WCU caps in [limitations](./limitations.md)) plus each referenced rule group's capacity. This can't be reduced by packing — the rules are genuinely too expensive.
    - **Fix**: simplify the offending WebACL's source Cloudflare rules — fewer `contains`/regex byte matches, fewer text transformations, fewer regex-pattern-set references — then re-run. Or move some hosts to a separate deployment with `--force-split`.
 
 2. **A single rule is too complex to fit one rule group** (a lone rule whose own references/WCU exceed a rule group's limits, so it can't be offloaded).
    - **Fix**: split that one rule in Cloudflare (e.g. break a giant OR of IP lists into several rules), then re-run.
+
+(Rarely, a WebACL with an extreme number of distinct IP-set references can also report that the packer "cannot peel enough rules to fit direct caps" — same fix: reduce the rule/reference count for that host.)
 
 `BLOCKED_ITEMS` names the specific WebACL/rule and the reason. After fixing the source, re-run the pipeline — do not hand-edit the template.
 

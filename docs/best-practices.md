@@ -8,7 +8,7 @@
    - After completing conversion for one domain, start a new chat session
    - Avoid mixing configurations from multiple projects
 
-2. **Provide the CloudflareBackup Directory Path**
+2. **Provide the Backup Directory Path**
    - Example: `Convert security rules in /path/to/cloudflare-backup to AWS WAF`
    - The agent will automatically locate the configuration files within the backup directory
 

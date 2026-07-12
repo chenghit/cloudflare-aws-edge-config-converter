@@ -88,7 +88,7 @@ flowchart TD
     CDN6 -->|通过| CDN7["🐍 共享策略"]
     CDN7 --> CDN75["🐍 TF 骨架"]
     CDN75 --> CDN76["🐍 测试脚本"]
-    CDN76 --> CDN8["TF 域名 × N"]
+    CDN76 --> CDN8["🐍 JS 生成"]
     CDN8 --> CDN9["🐍 JS 校验"]
     CDN9 -->|通过| CDN_Done([CDN Terraform + JS ✅])
 
@@ -201,7 +201,7 @@ aws acm request-certificate \
 - **每账号每区域 IP set 数量**：100（软限制，可申请提额）
 - **每账号每区域 WebACL 数量**：100（软限制）
 
-Pipeline 默认生成 2 个 WebACL，用 rule-group overflow packer 把超出的速率规则和 IP set 引用移入被引用的 rule group，从而保持在 10 条速率规则 / 50 条引用的硬上限内（rule group 内的引用不计入这两个上限）。当 inline IP set 超过 100 时启用跨规则 IP set 去重。生成的部署手册包含 Quota Usage 表格。详见 [为什么用 CloudFormation](./docs/why-cloudformation_CN.md)。
+Pipeline 默认生成 2 个 WebACL，用 rule-group overflow packer 把超出的速率规则和 IP set 引用移入被引用的 rule group，从而保持在 10 条速率规则 / 50 条引用的硬上限内（rule group 内的引用不计入这两个上限）。在 `--force-split` 模式下，当 inline IP set 超过 100 时启用跨规则 IP set 去重。生成的部署手册包含 Quota Usage 表格。详见 [为什么用 CloudFormation](./docs/why-cloudformation_CN.md)。
 
 </details>
 

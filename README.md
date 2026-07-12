@@ -206,7 +206,7 @@ The tool generates a `data "aws_acm_certificate"` lookup that finds your existin
 - **IP sets per account per region**: 100 (soft limit, can request increase via support case)
 - **WebACLs per account per region**: 100 (soft limit)
 
-The pipeline generates 2 WebACLs and uses a rule-group overflow packer to keep each under the 10-rate-based-rule and 50-reference-statement hard limits (overflow goes into referenced rule groups, which don't count against those caps). Cross-rule IP set deduplication kicks in when inline IP sets exceed 100. The generated deployment README includes a Quota Usage section showing actual consumption vs limits. See [Why CloudFormation](./docs/why-cloudformation.md) for details.
+The pipeline generates 2 WebACLs and uses a rule-group overflow packer to keep each under the 10-rate-based-rule and 50-reference-statement hard limits (overflow goes into referenced rule groups, which don't count against those caps). In `--force-split` mode, cross-rule IP set deduplication kicks in when inline IP sets exceed 100. The generated deployment README includes a Quota Usage section showing actual consumption vs limits. See [Why CloudFormation](./docs/why-cloudformation.md) for details.
 
 </details>
 

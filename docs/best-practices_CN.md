@@ -8,7 +8,7 @@
    - 完成一个域名的转换后，开启新的聊天会话
    - 避免在同一会话中混合多个项目的配置
 
-2. **提供 CloudflareBackup 目录路径**
+2. **提供备份目录路径**
    - 示例：`Convert security rules in /path/to/cloudflare-backup to AWS WAF`
    - agent 会自动在备份目录中定位配置文件
 

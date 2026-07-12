@@ -60,8 +60,8 @@
 3. 校验失败：查看 `cloudflare-to-aws-cdn/ir/validation/chunk/<domain>-v1.json` 或 `final/<domain>-v2.json`
 4. 常见原因：
    - `domain_scope.json` 未找到 → 先运行 Stage 1（cdn-parse-dns.py）
-   - Cloudflare 配置 JSON 解析错误 → 检查 CloudflareBackup 导出是否完整
-   - Zone 目录未找到 → 确认配置路径指向 CloudflareBackup 根目录（包含 `account/` 和 zone 子目录）
+   - Cloudflare 配置 JSON 解析错误 → 检查备份导出是否完整
+   - Zone 目录未找到 → 确认配置路径指向备份根目录（包含 `account/` 和 zone 子目录）
 5. 重试单个域名：`python3 /path/to/clone/converter/scripts/cdn-preprocess.py <config_path> cloudflare-to-aws-cdn --domain <hostname>`
 
 ## "found under multiple zones" 错误
@@ -204,13 +204,15 @@ aws cloudformation delete-stack \
 
 **关于 50 引用 / 10 速率规则上限**：这两项很少会导致 BLOCKED。rule-group overflow packer 会自动把超出的 IP set 引用和速率规则移入被引用的 rule group，而 rule group 内的引用不计入 WebACL 的 10 速率规则 / 50 引用上限（整个 rule group 只算 WebACL 的 1 条引用）。它还会把 label key 改写成正确的跨容器形式，并重新计算每个 rule group 的 WCU。所以过去需要 per-host 拆分的配置，现在能装进默认的 2 个 WebACL。旧文档里那个「引用超 50 → `--force-split` 回退」已不存在。
 
-**真正会 BLOCK 的两种情况**：
+**真正会 BLOCK 的情况**（常见的）：
 
-1. **某 WebACL 的 WCU 超过 5000 硬上限。** WCU 是每条规则的成本（模型见 [限制](./limitations_CN.md)）加上每个被引用 rule group 的容量之和。这无法靠打包降低——规则本身就是太贵了。
+1. **某 WebACL 的 WCU 超过 5000 硬上限。** WCU 是每条规则的成本（按 statement 计算——见 [限制](./limitations_CN.md) 里的 WCU 上限）加上每个被引用 rule group 的容量之和。这无法靠打包降低——规则本身就是太贵了。
    - **解决**：简化该 WebACL 的源 Cloudflare 规则——减少 `contains`/正则字节匹配、减少 text transformation、减少 regex-pattern-set 引用——然后重跑。或用 `--force-split` 把部分域名拆到单独部署。
 
 2. **单条规则复杂到无法装入一个 rule group**（某条规则自身的引用/WCU 超过一个 rule group 的上限，无法被移入）。
    - **解决**：在 Cloudflare 里拆分那一条规则（例如把一个巨大的 IP 列表 OR 拆成几条规则），然后重跑。
+
+（极少数情况下，某个 WebACL 引用了极多不同的 IP set，packer 会报告「cannot peel enough rules to fit direct caps」——解决办法相同：减少该 host 的规则/引用数量。）
 
 `BLOCKED_ITEMS` 会指明具体的 WebACL/规则和原因。修复源配置后重跑 pipeline——不要手改模板。
 
