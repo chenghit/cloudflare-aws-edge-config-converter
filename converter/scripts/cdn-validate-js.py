@@ -348,8 +348,15 @@ def main():
                                  f"see conversion_report.md.")
         if _s.get("skipped_domains"):
             summary_lines.append(f"SKIPPED domains: {', '.join(_s['skipped_domains'])}")
+        # Warnings from cdn-finalize / cdn-generate-js already carry their own
+        # action tag (QUOTA-RAISE = raise the quota then deploy; QUOTA-REDESIGN =
+        # HARD limit, deploy blocked until the source is redesigned). Pass them
+        # through verbatim — do NOT re-prefix — so the tag reaches the agent.
         for w in _s.get("warnings", []):
-            summary_lines.append(f"QUOTA/WARNING — {w}")
+            summary_lines.append(w if w.startswith("QUOTA-") else f"QUOTA/WARNING — {w}")
+    # Any HARD-limit breach makes the config undeployable as-is (no quota bump
+    # exists) — surface it as a distinct deploy blocker the agent must not skip.
+    redesign = [w for w in _s.get("warnings", []) if w.startswith("QUOTA-REDESIGN")]
     # ACM is the hardest prerequisite: the generated Terraform reads each cert via
     # `data "aws_acm_certificate"` (or an explicit ARN), so `terraform plan`
     # FAILS immediately if the cert isn't already ISSUED in us-east-1. This is a
@@ -368,10 +375,24 @@ def main():
         if summary_lines else ""
 
     if fail_count == 0:
+        # A HARD-limit (QUOTA-REDESIGN) breach means the config cannot deploy
+        # as-is and no quota increase will help — the agent must STOP and tell
+        # the user, not attempt apply. Make that the first, loudest step.
+        redesign_step = ""
+        if redesign:
+            redesign_step = (
+                "\n  ⛔ DEPLOY BLOCKED (do this FIRST) — the DEPLOY_SUMMARY has QUOTA-REDESIGN"
+                " line(s): a HARD CloudFront limit is exceeded and CANNOT be raised via Service"
+                " Quotas/Support. Do NOT run `terraform apply` — it will be rejected. Tell the user"
+                " exactly which limit and what to shrink in the source Cloudflare config, then stop"
+                " and wait.")
         print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nDOMAINS: {len(results)}\nPASSED: {pass_count}"
               f"{deploy_summary}\n"
               f"POST_ACTION: Do ALL of the following, in order:"
+              f"{redesign_step}"
               f"\n  1. REPORT the full DEPLOY_SUMMARY above to the user — every line — as the CDN completion summary."
+              f" QUOTA-RAISE line(s) mean the conversion is correct but deploy is blocked until the user"
+              f" requests that quota increase; relay each one so the user can raise it before applying."
               f"\n  2. Before ANY `terraform apply`, confirm with the user that ACM certificates are"
               f" already ISSUED in us-east-1 for every custom domain (see the PRE-DEPLOY BLOCKER line)."
               f" If not, tell them to provision + validate them first — apply will fail otherwise."

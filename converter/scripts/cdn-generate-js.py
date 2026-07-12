@@ -1849,12 +1849,20 @@ if __name__ == "__main__":
     _summary["cff_total"] = actual_count
     _summary["cff_dedup"] = f"{original_count} -> {actual_count}"
     _summary["kvs_total"] = kvs_total
+    # Tag with QUOTA-RAISE so the final ---RESULT--- carries the same
+    # raise-and-proceed signal as cdn-finalize's checks (both are SOFT quotas;
+    # the conversion is correct, deploy is only blocked until the quota is
+    # raised). CFF count is raised via AWS Support (NOT the Service Quotas
+    # console); KVS stores via Service Quotas.
     _extra = list(_summary.get("warnings", []))
     if actual_count > 100:
-        _extra.append(f"{actual_count} CloudFront Functions exceed the default quota 100 "
-                      f"(raise via AWS Support, or deploy a subset of domains).")
+        _extra.append(f"QUOTA-RAISE — CloudFront Functions per account: {actual_count} "
+                      f"exceeds the default quota 100 (SOFT). The conversion is correct; "
+                      f"request an increase via AWS Support (not Service Quotas), then "
+                      f"deploy unchanged. Or deploy a subset of domains. Blocked until raised.")
     if kvs_warn:
-        _extra.append(kvs_warn)
+        # kvs_warn already describes the SOFT overage; tag it for the agent.
+        _extra.append(f"QUOTA-RAISE — {kvs_warn}" if kvs_total > 50 else kvs_warn)
     _summary["warnings"] = _extra
     with open(summary_path, "w") as f:
         json.dump(_summary, f, indent=2, ensure_ascii=False)

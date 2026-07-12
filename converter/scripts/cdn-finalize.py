@@ -357,18 +357,31 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     # one means the config must be redesigned before it can deploy. The messages
     # say which, so the user doesn't waste a Support request on an unraisable
     # limit. See _quota_warn.
-    def _quota_warn(count, limit, hard, subject):
-        """Append a soft/hard quota warning if count exceeds (or nears) limit."""
+    def _quota_warn(count, limit, hard, subject, raise_via="Service Quotas"):
+        """Append a soft/hard quota warning if count exceeds (or nears) limit.
+
+        Each over-limit warning starts with a machine-readable tag so the final
+        ---RESULT--- and the agent know what to DO, not just that a number was
+        exceeded:
+          QUOTA-REDESIGN — HARD limit, not adjustable. Deploy WILL be rejected
+                           forever as-is; the source must be shrunk/redesigned.
+          QUOTA-RAISE    — SOFT limit, adjustable. Config is correct; deploy is
+                           blocked only until the quota is raised, then deploys
+                           unchanged (the tool has already minimized usage via
+                           dedup — there is no further code-side lever).
+        `raise_via` names where to request the increase (some quotas are
+        Support-only, not in the Service Quotas console)."""
         if count > limit:
             if hard:
                 all_warnings.append(
-                    f"{subject}: {count} exceeds the HARD limit of {limit} — NOT "
-                    f"adjustable via Service Quotas/AWS Support. Must reduce/redesign "
-                    f"before deploying.")
+                    f"QUOTA-REDESIGN — {subject}: {count} exceeds the HARD limit of "
+                    f"{limit}, NOT adjustable via Service Quotas/AWS Support. Deploy will "
+                    f"be rejected as-is — reduce/redesign the source before deploying.")
             else:
                 all_warnings.append(
-                    f"{subject}: {count} exceeds the default quota of {limit} (SOFT). "
-                    f"Request a quota increase via Service Quotas before deploying.")
+                    f"QUOTA-RAISE — {subject}: {count} exceeds the default quota of "
+                    f"{limit} (SOFT). The conversion is correct; request an increase via "
+                    f"{raise_via}, then deploy unchanged. Deploy is blocked until raised.")
         elif not hard and count > limit * 0.8:
             all_warnings.append(
                 f"{subject}: {count} approaching the default quota of {limit} (SOFT).")
@@ -427,10 +440,39 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
             _quota_warn(len(ch) if isinstance(ch, list) else 0, 10, False,
                         f"Response headers policy {pid} (used by {used}) custom headers")
 
-    # Cache behaviors per distribution (SOFT: 75).
+    # Per-distribution quotas (all keyed on the domain's own IR).
     for ir in all_irs:
         hostname = ir["metadata"]["hostname"]
+        # Cache behaviors per distribution (SOFT: 75).
         _quota_warn(len(ir["cache_behaviors"]), 75, False, f"{hostname}: cache behaviors")
+
+        # Custom ORP header whitelist (SOFT: 10). The custom ORP forwards the
+        # UNION of required_orp_headers across all of the domain's behaviors
+        # (that's what cdn-generate-tf-scaffold's collect_orp_headers builds and
+        # what the shared ORP resource actually contains). Checking per-behavior
+        # would miss a domain that stays <10 on each behavior but exceeds 10 in
+        # the union — the real ORP resource is what AWS validates. Header NAME
+        # length also counts toward the 1024 combined-name HARD limit.
+        orp_union = sorted({h for b in ir["cache_behaviors"]
+                            for h in b.get("required_orp_headers", [])})
+        if orp_union:
+            _quota_warn(len(orp_union), 10, False,
+                        f"{hostname}: custom ORP forwarded headers (union across behaviors)")
+            _quota_warn(sum(len(h) for h in orp_union), 1024, True,
+                        f"{hostname}: custom ORP combined header-name length")
+
+        # Origins per distribution (SOFT: 100). Origins are deduped by domain in
+        # collect_origins, so count distinct origin domains across behaviors —
+        # this matches the number of origin blocks the scaffold emits.
+        origin_domains = {b.get("origin", {}).get("domain")
+                          for b in ir["cache_behaviors"]
+                          if b.get("origin", {}).get("domain")}
+        _quota_warn(len(origin_domains), 100, False, f"{hostname}: origins per distribution")
+
+        # Alternate domain names (CNAMEs) per distribution (SOFT: 100). One
+        # distribution == one hostname here, so this is 1 in practice; checked so
+        # a future many-alias change can't silently breach the cap.
+        _quota_warn(1, 100, False, f"{hostname}: alternate domain names (CNAMEs)")
 
     # Per-account totals the pipeline can know here: one distribution per proxied
     # host (SOFT: 500). NOTE: the KVS-store quota is NOT checked here — KVS is
