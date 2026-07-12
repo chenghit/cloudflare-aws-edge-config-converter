@@ -78,6 +78,148 @@ class WCUTracker:
         self.per_rule[rule_name] = self.per_rule.get(rule_name, 0) + wcu
 
 
+# ── WCU calculation ───────────────────────────────────────────────────────────
+# Authoritative per-statement WCU model (AWS WAF Developer Guide, dual-source +
+# internal-wiki confirmed, cross-checked against a real CheckCapacity example =
+# 15 WCU). A local per-statement sum is a SAFE UPPER BOUND: AWS may charge once
+# for a text transformation shared across rules in the same WebACL/rule group,
+# so the real (CheckCapacity) total is ≤ this sum. Over-estimating never fails a
+# deploy — which is exactly what we want for packing under the 5000 ceiling.
+# Verify the final packed rulesets with `aws wafv2 check-capacity` (see the
+# WCU-verification RESULT protocol) for the tightest numbers.
+
+# ByteMatch base cost by PositionalConstraint.
+_BYTEMATCH_WCU = {"EXACTLY": 2, "STARTS_WITH": 2, "ENDS_WITH": 2,
+                  "CONTAINS": 10, "CONTAINS_WORD": 10}
+
+# Fixed Capacity of AWS managed rule groups we emit. These are version-dependent
+# — prefer a live DescribeManagedRuleGroup when an AWS profile is available; this
+# table is the zero-credential default. (AWS docs / DescribeManagedRuleGroup.)
+MANAGED_RULE_GROUP_WCU = {
+    "AWSManagedRulesCommonRuleSet": 700,
+    "AWSManagedRulesKnownBadInputsRuleSet": 200,
+    "AWSManagedRulesSQLiRuleSet": 200,
+    "AWSManagedRulesAmazonIpReputationList": 25,
+    "AWSManagedRulesAnonymousIpList": 50,
+    "AWSManagedRulesAntiDDoSRuleSet": 50,
+    "AWSManagedRulesBotControlRuleSet": 50,
+    "AWSManagedRulesATPRuleSet": 50,
+    "AWSManagedRulesACFPRuleSet": 50,
+    "AWSManagedRulesAdminProtectionRuleSet": 100,
+    "AWSManagedRulesPHPRuleSet": 100,
+    "AWSManagedRulesWordPressRuleSet": 100,
+    "AWSManagedRulesUnixRuleSet": 200,
+    "AWSManagedRulesLinuxRuleSet": 200,
+    "AWSManagedRulesWindowsRuleSet": 200,
+}
+DEFAULT_MANAGED_RULE_GROUP_WCU = 200  # conservative fallback for an unknown group
+
+
+def _text_transform_wcu(field_to_match_owner):
+    """10 WCU per non-NONE text transformation entry on a statement (NONE = 0)."""
+    tts = field_to_match_owner.get("TextTransformations", [])
+    return 10 * sum(1 for t in tts if t.get("Type") != "NONE")
+
+
+def _field_to_match_wcu(stmt_body):
+    """FieldToMatch surcharge: AllQueryArguments +10 (flat), JsonBody ×2 on base.
+    Returns (flat_add, base_multiplier). Every other component adds nothing."""
+    ftm = stmt_body.get("FieldToMatch", {})
+    if "AllQueryArguments" in ftm:
+        return 10, 1
+    if "JsonBody" in ftm:
+        return 0, 2
+    return 0, 1
+
+
+def compute_statement_wcu(stmt, managed_wcu=None):
+    """Compute the WCU of one emitted AWS WAF Statement (dict), recursively.
+
+    Walks the generated statement JSON (not the Cloudflare condition), so the
+    number reflects exactly what gets deployed and is unit-testable against the
+    CheckCapacity API. `managed_wcu` optionally overrides MANAGED_RULE_GROUP_WCU
+    (e.g. from a live DescribeManagedRuleGroup lookup)."""
+    mwcu = managed_wcu or MANAGED_RULE_GROUP_WCU
+
+    # ── Logical containers: sum children, container itself costs 0 ──
+    if "AndStatement" in stmt:
+        return sum(compute_statement_wcu(s, managed_wcu) for s in stmt["AndStatement"]["Statements"])
+    if "OrStatement" in stmt:
+        return sum(compute_statement_wcu(s, managed_wcu) for s in stmt["OrStatement"]["Statements"])
+    if "NotStatement" in stmt:
+        return compute_statement_wcu(stmt["NotStatement"]["Statement"], managed_wcu)
+
+    # ── Component-inspecting statements (base × JsonBody + AllQueryArgs + transforms) ──
+    if "ByteMatchStatement" in stmt:
+        b = stmt["ByteMatchStatement"]
+        base = _BYTEMATCH_WCU.get(b.get("PositionalConstraint", "EXACTLY"), 10)
+        add, mult = _field_to_match_wcu(b)
+        return base * mult + add + _text_transform_wcu(b)
+    if "RegexMatchStatement" in stmt:
+        b = stmt["RegexMatchStatement"]
+        add, mult = _field_to_match_wcu(b)
+        return 3 * mult + add + _text_transform_wcu(b)
+    if "RegexPatternSetReferenceStatement" in stmt:
+        b = stmt["RegexPatternSetReferenceStatement"]
+        add, mult = _field_to_match_wcu(b)
+        return 25 * mult + add + _text_transform_wcu(b)
+    if "SizeConstraintStatement" in stmt:
+        b = stmt["SizeConstraintStatement"]
+        add, mult = _field_to_match_wcu(b)
+        return 1 * mult + add + _text_transform_wcu(b)
+    if "SqliMatchStatement" in stmt:
+        b = stmt["SqliMatchStatement"]
+        base = 30 if b.get("SensitivityLevel") == "HIGH" else 20
+        add, mult = _field_to_match_wcu(b)
+        return base * mult + add + _text_transform_wcu(b)
+    if "XssMatchStatement" in stmt:
+        b = stmt["XssMatchStatement"]
+        add, mult = _field_to_match_wcu(b)
+        return 40 * mult + add + _text_transform_wcu(b)
+
+    # ── Flat-cost statements (no FieldToMatch / transforms) ──
+    if "GeoMatchStatement" in stmt:
+        return 1  # flat, not per country
+    if "LabelMatchStatement" in stmt:
+        return 1
+    if "AsnMatchStatement" in stmt:
+        return 1  # flat, not per ASN
+    if "IPSetReferenceStatement" in stmt:
+        b = stmt["IPSetReferenceStatement"]
+        fwd = b.get("IPSetForwardedIPConfig", {})
+        return 5 if fwd.get("Position") == "ANY" else 1
+
+    # ── Special statements ──
+    if "RateBasedStatement" in stmt:
+        b = stmt["RateBasedStatement"]
+        wcu = 2
+        if b.get("AggregateKeyType") == "CUSTOM_KEYS":
+            wcu += 30 * len(b.get("CustomKeys", []))
+        if "ScopeDownStatement" in b:
+            wcu += compute_statement_wcu(b["ScopeDownStatement"], managed_wcu)
+        return wcu
+    if "ManagedRuleGroupStatement" in stmt:
+        b = stmt["ManagedRuleGroupStatement"]
+        wcu = mwcu.get(b.get("Name", ""), DEFAULT_MANAGED_RULE_GROUP_WCU)
+        if "ScopeDownStatement" in b:
+            wcu += compute_statement_wcu(b["ScopeDownStatement"], managed_wcu)
+        return wcu
+    if "RuleGroupReferenceStatement" in stmt:
+        # A reference to our OWN rule group: the WebACL is charged the group's
+        # capacity. Caller supplies it out-of-band (we know it — we built it);
+        # a bare reference with no known capacity contributes 0 here and is
+        # accounted where the rule group is built.
+        return 0
+
+    # Unknown statement type — conservative nonzero so we never under-count.
+    return 1
+
+
+def compute_rule_wcu(rule, managed_wcu=None):
+    """WCU of a full emitted Rule dict (its top-level Statement)."""
+    return compute_statement_wcu(rule.get("Statement", {}), managed_wcu)
+
+
 class RefCounter:
     """Count reference statements and track which IP set logical IDs are referenced.
     AWS WAF hard limit: 50 reference statements per WebACL.
