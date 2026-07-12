@@ -76,16 +76,6 @@ def is_ipv6(addr):
     return ':' in addr.split('/')[0]
 
 
-class WCUTracker:
-    def __init__(self):
-        self.total = 0
-        self.per_rule = {}
-
-    def add(self, rule_name, wcu):
-        self.total += wcu
-        self.per_rule[rule_name] = self.per_rule.get(rule_name, 0) + wcu
-
-
 # ── WCU calculation ───────────────────────────────────────────────────────────
 # Authoritative per-statement WCU model (AWS WAF Developer Guide, dual-source +
 # internal-wiki confirmed, cross-checked against a real CheckCapacity example =
@@ -740,8 +730,6 @@ def conditions_to_statement(cond, ctx):
     transform = cond.get("transform")
 
     text_transforms = [{"Priority": 0, "Type": "LOWERCASE" if transform == "lowercase" else "NONE"}]
-    if transform == "lowercase":
-        ctx["wcu"].add(ctx["rule_name"], 10)
 
     # IP set reference
     if field == "ip.src" and operator in ("in", "not_in"):
@@ -754,12 +742,10 @@ def conditions_to_statement(cond, ctx):
         elif operator == "eq":
             codes = [str(value).upper()]
         elif operator == "ne":
-            ctx["wcu"].add(ctx["rule_name"], 1)
             return {"NotStatement": {"Statement": {
                 "GeoMatchStatement": {"CountryCodes": [str(value).upper()]}}}}
         else:
             codes = [str(value).upper()]
-        ctx["wcu"].add(ctx["rule_name"], 1)
         return {"GeoMatchStatement": {"CountryCodes": codes}}
 
     # ASN match
@@ -770,7 +756,6 @@ def conditions_to_statement(cond, ctx):
     if operator == "eq" and value is True:
         # Non-convertible bare boolean — should have been caught by convertibility check
         ctx["warnings"].append(f"Bare boolean field '{field}' in statement — may not convert correctly")
-        ctx["wcu"].add(ctx["rule_name"], 1)
         return {"ByteMatchStatement": {
             "SearchString": "1", "PositionalConstraint": "EXACTLY",
             "FieldToMatch": {"SingleHeader": {"Name": field.replace(".", "-")}},
@@ -781,7 +766,6 @@ def conditions_to_statement(cond, ctx):
         regex = glob_to_regex(str(value), case_insensitive=(operator == "wildcard"))
         if len(regex) > MAX_REGEX_LEN:
             ctx["warnings"].append(f"Regex pattern exceeds {MAX_REGEX_LEN} chars for field '{field}'")
-        ctx["wcu"].add(ctx["rule_name"], 3)
         ftm = FIELD_TO_MATCH.get(field, {"UriPath": {}})
         return {"RegexMatchStatement": {
             "RegexString": regex,
@@ -790,7 +774,6 @@ def conditions_to_statement(cond, ctx):
 
     # Regex match
     if operator == "matches":
-        ctx["wcu"].add(ctx["rule_name"], 3)
         ftm = FIELD_TO_MATCH.get(field, {"UriPath": {}})
         return {"RegexMatchStatement": {
             "RegexString": str(value),
@@ -809,7 +792,6 @@ def conditions_to_statement(cond, ctx):
     # Size constraint
     if operator in ("gt", "lt", "ge", "le") and cond.get("size_check"):
         comp_map = {"gt": "GT", "lt": "LT", "ge": "GE", "le": "LE"}
-        ctx["wcu"].add(ctx["rule_name"], 1)
         ftm = FIELD_TO_MATCH.get(field, {"UriPath": {}})
         return {"SizeConstraintStatement": {
             "ComparisonOperator": comp_map[operator],
@@ -823,7 +805,6 @@ def conditions_to_statement(cond, ctx):
         search = str(value)
         if len(search) > MAX_STRING_MATCH_LEN:
             ctx["warnings"].append(f"String match exceeds {MAX_STRING_MATCH_LEN} chars for '{field}'")
-        ctx["wcu"].add(ctx["rule_name"], 1)
         ftm = FIELD_TO_MATCH.get(field, {"SingleHeader": {"Name": field.split(".")[-1]}})
         return {"ByteMatchStatement": {
             "SearchString": search,
@@ -833,7 +814,6 @@ def conditions_to_statement(cond, ctx):
 
     # ne → NOT + EXACTLY
     if operator == "ne":
-        ctx["wcu"].add(ctx["rule_name"], 1)
         ftm = FIELD_TO_MATCH.get(field, {"SingleHeader": {"Name": field.split(".")[-1]}})
         return {"NotStatement": {"Statement": {"ByteMatchStatement": {
             "SearchString": str(value),
@@ -843,7 +823,6 @@ def conditions_to_statement(cond, ctx):
 
     # Fallback — unknown field/operator
     ctx["warnings"].append(f"Unknown field/operator: {field} {operator} — generating placeholder")
-    ctx["wcu"].add(ctx["rule_name"], 1)
     return {"ByteMatchStatement": {
         "SearchString": str(value) if value else "PLACEHOLDER",
         "PositionalConstraint": "CONTAINS",
@@ -853,7 +832,6 @@ def conditions_to_statement(cond, ctx):
 
 def _build_ip_statement(value, ctx, cond=None):
     """Build IPSetReferenceStatement(s) for ip.src in ... conditions."""
-    ctx["wcu"].add(ctx["rule_name"], 1)
     value_str = str(value)
 
     # Named list: $list_name
@@ -922,10 +900,7 @@ def _build_asn_from_list(asns, ctx):
         ctx["warnings"].append("Empty ASN list")
         return {"AsnMatchStatement": {"AsnList": [0]}}
     chunks = [asns[i:i+MAX_ASN_PER_STATEMENT] for i in range(0, len(asns), MAX_ASN_PER_STATEMENT)]
-    stmts = []
-    for chunk in chunks:
-        ctx["wcu"].add(ctx["rule_name"], 1)
-        stmts.append({"AsnMatchStatement": {"AsnList": chunk}})
+    stmts = [{"AsnMatchStatement": {"AsnList": chunk}} for chunk in chunks]
     return stmts[0] if len(stmts) == 1 else {"OrStatement": {"Statements": stmts}}
 
 
@@ -934,19 +909,15 @@ def _build_string_set_statement(field, items, text_transforms, ctx):
     ftm = FIELD_TO_MATCH.get(field, {"SingleHeader": {"Name": field.split(".")[-1]}})
 
     if len(items) <= STRING_SET_REGEX_THRESHOLD:
-        stmts = []
-        for item in items:
-            ctx["wcu"].add(ctx["rule_name"], 1)
-            stmts.append({"ByteMatchStatement": {
-                "SearchString": item, "PositionalConstraint": "EXACTLY",
-                "FieldToMatch": ftm, "TextTransformations": text_transforms}})
+        stmts = [{"ByteMatchStatement": {
+            "SearchString": item, "PositionalConstraint": "EXACTLY",
+            "FieldToMatch": ftm, "TextTransformations": text_transforms}} for item in items]
         return stmts[0] if len(stmts) == 1 else {"OrStatement": {"Statements": stmts}}
 
     # Optimize: combine into regex
     escaped = [re.escape(item) for item in items]
     regex = "^(" + "|".join(escaped) + ")$"
     if len(regex) <= MAX_REGEX_LEN:
-        ctx["wcu"].add(ctx["rule_name"], 3)
         return {"RegexMatchStatement": {"RegexString": regex, "FieldToMatch": ftm,
                 "TextTransformations": text_transforms}}
 
@@ -957,7 +928,6 @@ def _build_string_set_statement(field, items, text_transforms, ctx):
     for e in escaped:
         if current_len + len(e) + 1 > MAX_REGEX_LEN - 4:
             r = "^(" + "|".join(batch) + ")$"
-            ctx["wcu"].add(ctx["rule_name"], 3)
             stmts.append({"RegexMatchStatement": {"RegexString": r, "FieldToMatch": ftm,
                           "TextTransformations": text_transforms}})
             batch = [e]
@@ -967,7 +937,6 @@ def _build_string_set_statement(field, items, text_transforms, ctx):
             current_len += len(e) + 1
     if batch:
         r = "^(" + "|".join(batch) + ")$"
-        ctx["wcu"].add(ctx["rule_name"], 3)
         stmts.append({"RegexMatchStatement": {"RegexString": r, "FieldToMatch": ftm,
                       "TextTransformations": text_transforms}})
     return stmts[0] if len(stmts) == 1 else {"OrStatement": {"Statements": stmts}}
@@ -988,8 +957,9 @@ ACTION_MAP = {
 }
 
 
-def build_managed_rules(priority_start, skip_labels_present, wcu):
-    """Build the 5 managed rule group rules."""
+def build_managed_rules(priority_start, skip_labels_present):
+    """Build the managed rule group rules (WCU is computed later from the
+    assembled template by webacl_effective_wcu, not tracked here)."""
     rules = []
     p = priority_start
 
@@ -1008,7 +978,6 @@ def build_managed_rules(priority_start, skip_labels_present, wcu):
             "NotStatement": {"Statement": {"LabelMatchStatement": {
                 "Scope": "LABEL", "Key": "skip:http_request_firewall_managed"}}}}
     rules.append(ip_rep)
-    wcu.add("AWS-IpReputation", 25)
     p += 1
 
     # Common Rule Set
@@ -1027,7 +996,6 @@ def build_managed_rules(priority_start, skip_labels_present, wcu):
             "NotStatement": {"Statement": {"LabelMatchStatement": {
                 "Scope": "LABEL", "Key": "skip:http_request_firewall_managed"}}}}
     rules.append(crs)
-    wcu.add("AWS-CRS", 700)
     p += 1
 
     # Known Bad Inputs
@@ -1044,7 +1012,6 @@ def build_managed_rules(priority_start, skip_labels_present, wcu):
             "NotStatement": {"Statement": {"LabelMatchStatement": {
                 "Scope": "LABEL", "Key": "skip:http_request_firewall_managed"}}}}
     rules.append(kbi)
-    wcu.add("AWS-KBI", 200)
     p += 1
 
     # SQLi
@@ -1061,7 +1028,6 @@ def build_managed_rules(priority_start, skip_labels_present, wcu):
             "NotStatement": {"Statement": {"LabelMatchStatement": {
                 "Scope": "LABEL", "Key": "skip:http_request_firewall_managed"}}}}
     rules.append(sqli)
-    wcu.add("AWS-SQLi", 200)
     p += 1
 
     return rules, p
@@ -1162,7 +1128,6 @@ def generate(ir):
     """Generate CloudFormation template from IR JSON."""
     resources = {}
     warnings = []
-    wcu = WCUTracker()
     refs = RefCounter()
 
     # ── Build IP set resources ───────────────────────────────────────────────
@@ -1260,7 +1225,7 @@ def generate(ir):
         cond = rule.get("conditions")
         if not cond:
             continue
-        ctx = {"wcu": wcu, "refs": refs, "warnings": warnings,
+        ctx = {"refs": refs, "warnings": warnings,
                "rule_name": rule["name"], "ip_list_map": ip_list_map,
                "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
                "current_rule_ip_sets": rule.get("ip_sets", [])}
@@ -1281,7 +1246,7 @@ def generate(ir):
         cond = rule.get("conditions") or rule.get("convertible_conditions")
         if not cond:
             continue
-        ctx = {"wcu": wcu, "refs": refs, "warnings": warnings,
+        ctx = {"refs": refs, "warnings": warnings,
                "rule_name": rule["name"], "ip_list_map": ip_list_map,
                "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
                "current_rule_ip_sets": rule.get("ip_sets", [])}
@@ -1324,7 +1289,7 @@ def generate(ir):
             continue
         cond = rule.get("conditions") or rule.get("convertible_conditions")
 
-        ctx = {"wcu": wcu, "refs": refs, "warnings": warnings,
+        ctx = {"refs": refs, "warnings": warnings,
                "rule_name": rule["name"], "ip_list_map": ip_list_map,
                "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
                "current_rule_ip_sets": rule.get("ip_sets", [])}
@@ -1366,7 +1331,7 @@ def generate(ir):
         })
 
     # Managed rules (built separately, added per-WebACL, never packed)
-    managed_rules, _ = build_managed_rules(0, skip_labels_present, wcu)
+    managed_rules, _ = build_managed_rules(0, skip_labels_present)
 
     # ── Build WebACLs ────────────────────────────────────────────────────────
 
@@ -1473,8 +1438,9 @@ def generate(ir):
         "Outputs": outputs,
     }
 
-    wcu.total = max_wcu_total  # report the highest per-WebACL WCU
-    return template, wcu, refs, warnings, errors, blocked
+    # max_wcu_total = the highest per-WebACL effective WCU (computed from the
+    # assembled template, not tracked during rule building).
+    return template, max_wcu_total, refs, warnings, errors, blocked
 
 
 def generate_split(split_ir):
@@ -1597,9 +1563,8 @@ def generate_split(split_ir):
     blocked = []            # deliverable-but-won't-deploy findings (WCU>5000, etc.)
 
     for domain, domain_data in split_ir.get("domains", {}).items():
-        # A throwaway tracker/refs — conditions_to_statement needs them, but the
-        # authoritative WCU + ref counts come from the packed resources below.
-        domain_wcu = WCUTracker()
+        # `refs` feeds unreferenced-IP-set cleanup; the authoritative WCU + ref
+        # counts come from the packed resources below (webacl_effective_wcu).
         refs = RefCounter()
         used_rule_names = set()
 
@@ -1628,7 +1593,7 @@ def generate_split(split_ir):
             cond = rule.get("conditions")
             if not cond:
                 continue
-            ctx = {"wcu": domain_wcu, "refs": refs, "warnings": warnings,
+            ctx = {"refs": refs, "warnings": warnings,
                    "rule_name": rule["name"], "ip_list_map": ip_list_map,
                    "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
                    "current_rule_ip_sets": rule.get("ip_sets", [])}
@@ -1648,7 +1613,7 @@ def generate_split(split_ir):
             cond = rule.get("conditions") or rule.get("convertible_conditions")
             if not cond:
                 continue
-            ctx = {"wcu": domain_wcu, "refs": refs, "warnings": warnings,
+            ctx = {"refs": refs, "warnings": warnings,
                    "rule_name": rule["name"], "ip_list_map": ip_list_map,
                    "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
                    "current_rule_ip_sets": rule.get("ip_sets", [])}
@@ -1684,7 +1649,7 @@ def generate_split(split_ir):
             if rule.get("convertibility") == "no":
                 continue
             cond = rule.get("conditions") or rule.get("convertible_conditions")
-            ctx = {"wcu": domain_wcu, "refs": refs, "warnings": warnings,
+            ctx = {"refs": refs, "warnings": warnings,
                    "rule_name": rule["name"], "ip_list_map": ip_list_map,
                    "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
                    "current_rule_ip_sets": rule.get("ip_sets", [])}
@@ -1718,7 +1683,7 @@ def generate_split(split_ir):
             })
 
         # Managed rules (never packed)
-        managed_rules, _ = build_managed_rules(0, skip_labels_present, domain_wcu)
+        managed_rules, _ = build_managed_rules(0, skip_labels_present)
 
         # Pack the domain's blocks into a WebACL. Per-domain WebACLs each carry
         # the same injected header/trailer as legacy mode's website variant
@@ -1996,9 +1961,8 @@ def main():
             sys.exit(1)
         with open(ir_path) as f:
             ir = json.load(f)
-        template, wcu, refs, warnings, errors, blocked = generate(ir)
-        max_wcu_val = wcu.total
-        wcu_display = f"WCU={wcu.total}"
+        template, max_wcu_val, refs, warnings, errors, blocked = generate(ir)
+        wcu_display = f"WCU={max_wcu_val}"
         exceeded_domains = []
         dedup = False
         domain_ref_counts = {}
