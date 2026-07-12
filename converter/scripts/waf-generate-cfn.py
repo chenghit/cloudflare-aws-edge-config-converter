@@ -1575,8 +1575,11 @@ def generate_split(split_ir):
     all_referenced_asn_lists = set()
     exceeded_domains = []
     domain_ref_counts = {}  # domain → ref count for quota reporting
+    over_limits = []        # packer over-limit reports (per domain)
 
     for domain, domain_data in split_ir.get("domains", {}).items():
+        # A throwaway tracker/refs — conditions_to_statement needs them, but the
+        # authoritative WCU + ref counts come from the packed resources below.
         domain_wcu = WCUTracker()
         refs = RefCounter()
         used_rule_names = set()
@@ -1593,21 +1596,13 @@ def generate_split(split_ir):
             used_rule_names.add(deduped)
             return deduped
 
-        acl_rules = []
-        p = 0
+        # Build the two ordered phase blocks (no Priority/WCU here — the packer
+        # assigns priorities, offloads overflow into rule groups, and rewrites
+        # label keys; WCU/refs are then read back from the assembled resources).
+        custom_block = []
+        rate_block = []
 
-        # Injected: search engine label
-        acl_rules.append(build_search_engine_label_rule(p))
-        domain_wcu.add("search-engine-label", 6)
-        p += 1
-
-        # Injected: Anti-DDoS with scope-down
-        acl_rules.append(build_anti_ddos_rule(p, advanced=False,
-                                               scope_down_exclude_labels=["custom:search-engine"]))
-        domain_wcu.add("AntiDDoS", 250)
-        p += 1
-
-        # IP Access Rules
+        # IP Access Rules (custom phase, first)
         for rule in domain_data.get("ip_access_rules", []):
             if rule.get("convertibility") == "no":
                 continue
@@ -1621,13 +1616,11 @@ def generate_split(split_ir):
             stmt = conditions_to_statement(cond, ctx)
             aws_action = ACTION_MAP.get(rule.get("mode", "block"), {"Block": {}})
             rn = unique_rule_name(rule["name"])
-            acl_rules.append({
-                "Name": rn, "Priority": p,
-                "Action": aws_action, "Statement": stmt,
+            custom_block.append({
+                "Name": rn, "Action": aws_action, "Statement": stmt,
                 "VisibilityConfig": {"SampledRequestsEnabled": True,
                                      "CloudWatchMetricsEnabled": True, "MetricName": rn},
             })
-            p += 1
 
         # Custom Rules
         for rule in domain_data.get("custom_rules", []):
@@ -1649,7 +1642,6 @@ def generate_split(split_ir):
                     stmt["AndStatement"]["Statements"].insert(0, not_label)
                 else:
                     stmt = {"AndStatement": {"Statements": [not_label, stmt]}}
-                domain_wcu.add(rule["name"], 1)
 
             action = rule.get("action", "block")
             if action == "skip":
@@ -1660,15 +1652,13 @@ def generate_split(split_ir):
 
             rn = unique_rule_name(rule["name"])
             waf_rule = {
-                "Name": rn, "Priority": p,
-                "Action": aws_action, "Statement": stmt,
+                "Name": rn, "Action": aws_action, "Statement": stmt,
                 "VisibilityConfig": {"SampledRequestsEnabled": True,
                                      "CloudWatchMetricsEnabled": True, "MetricName": rn},
             }
             if action == "skip" and rule.get("labels"):
                 waf_rule["RuleLabels"] = [{"Name": l} for l in rule["labels"]]
-            acl_rules.append(waf_rule)
-            p += 1
+            custom_block.append(waf_rule)
 
         # Rate-Limiting Rules
         for rule in domain_data.get("rate_limiting_rules", []):
@@ -1684,12 +1674,10 @@ def generate_split(split_ir):
                 "AggregateKeyType": "IP",
                 "EvaluationWindowSec": rule.get("aws_evaluation_window_sec", 60),
             }}
-            domain_wcu.add(rule["name"], 2)
             scope_parts = []
             if rule.get("scope_down", {}).get("skip_http_ratelimit"):
                 scope_parts.append({"NotStatement": {"Statement": {"LabelMatchStatement": {
                     "Scope": "LABEL", "Key": "skip:http_ratelimit"}}}})
-                domain_wcu.add(rule["name"], 1)
             if cond:
                 cond_stmt = conditions_to_statement(cond, ctx)
                 if scope_parts and "AndStatement" in cond_stmt:
@@ -1704,68 +1692,67 @@ def generate_split(split_ir):
                         "AndStatement": {"Statements": scope_parts}}
             aws_action = ACTION_MAP.get(rule.get("action", "block"), {"Block": {}})
             rn = unique_rule_name(rule["name"])
-            acl_rules.append({
-                "Name": rn, "Priority": p,
-                "Action": aws_action, "Statement": rate_stmt,
+            rate_block.append({
+                "Name": rn, "Action": aws_action, "Statement": rate_stmt,
                 "VisibilityConfig": {"SampledRequestsEnabled": True,
                                      "CloudWatchMetricsEnabled": True, "MetricName": rn},
             })
-            p += 1
 
-        # Injected: always-on challenge (after rate rules, before managed)
-        acl_rules.append(build_always_on_challenge_rule(p))
-        domain_wcu.add("always-on-challenge", 3)
-        p += 1
+        # Managed rules (never packed)
+        managed_rules, _ = build_managed_rules(0, skip_labels_present, domain_wcu)
 
-        # Managed rules
-        managed, p = build_managed_rules(p, skip_labels_present, domain_wcu)
-        acl_rules.extend(managed)
-
-        total_rules += len(acl_rules)
-
-        # Track max WCU
-        if domain_wcu.total > max_wcu:
-            max_wcu = domain_wcu.total
-            max_wcu_domain = domain
-        if domain_wcu.total > MAX_WCU:
-            warnings.append(f"Domain {domain}: WCU {domain_wcu.total} exceeds {MAX_WCU}")
-        elif domain_wcu.total > WARN_WCU:
-            w = f"WCU {domain_wcu.total} exceeds {WARN_WCU} (extra charges apply)"
-            if w not in seen_warnings:
-                seen_warnings.add(w)
-                warnings.append(f"Domain {domain}: {w}")
-
-        # Check per-WebACL IP set refs (hard limit: 50)
-        if refs.count > MAX_REF_STATEMENTS:
-            exceeded_domains.append(f"{domain}: {refs.count} refs > {MAX_REF_STATEMENTS}")
-            domain_ref_counts[domain] = refs.count
-            # Don't merge referenced_ids — avoid orphan IP sets in template
-            continue
-
-        domain_ref_counts[domain] = refs.count
-        all_referenced_ids |= refs.referenced_ids
-        all_referenced_asn_lists |= refs.referenced_asn_lists
-
-        # Deduplicate warnings
-        for w in list(warnings):
-            if w in seen_warnings:
-                continue
-            seen_warnings.add(w)
-
+        # Pack the domain's blocks into a WebACL. Per-domain WebACLs each carry
+        # the same injected header/trailer as legacy mode's website variant
+        # (search-engine label + anti-DDoS challenge-on, always-on-challenge).
         webacl_name = sanitize_webacl_name(domain)
-        lid = f"WebACL{sanitize_logical_id(domain)}"
-        lid_unique = unique_id(lid)
+        lid_unique = unique_id(f"WebACL{sanitize_logical_id(domain)}")
+        header = [build_search_engine_label_rule(0),
+                  build_anti_ddos_rule(0, advanced=False,
+                                       scope_down_exclude_labels=["custom:search-engine"])]
+        trailer = [build_always_on_challenge_rule(0)]
+        ordered, warns, over = pack_webacl_rules(
+            webacl_name, custom_block, rate_block, header, trailer,
+            managed_rules, unique_id, resources)
+        warnings.extend(warns)
+
         resources[lid_unique] = {
             "Type": "AWS::WAFv2::WebACL",
             "Properties": {
                 "Name": webacl_name, "Scope": "CLOUDFRONT",
                 "DefaultAction": {"Allow": {}},
-                "Rules": acl_rules,
+                "Rules": ordered,
                 "VisibilityConfig": {"SampledRequestsEnabled": True,
                                      "CloudWatchMetricsEnabled": True,
                                      "MetricName": sanitize_rule_name(webacl_name)},
             }
         }
+        total_rules += len(ordered)
+
+        # Authoritative WCU + ref count read back from the assembled WebACL.
+        domain_total_wcu = webacl_effective_wcu(resources).get(webacl_name, 0)
+        webacl_refs = sum(_count_refs_in_stmt(r.get("Statement", {}))
+                          for r in ordered)
+        domain_ref_counts[domain] = webacl_refs
+        all_referenced_ids |= refs.referenced_ids
+        all_referenced_asn_lists |= refs.referenced_asn_lists
+
+        if domain_total_wcu > max_wcu:
+            max_wcu = domain_total_wcu
+            max_wcu_domain = domain
+        if domain_total_wcu > MAX_WCU:
+            warnings.append(f"Domain {domain}: WCU {domain_total_wcu} exceeds {MAX_WCU}")
+        elif domain_total_wcu > WARN_WCU:
+            w = f"WCU {domain_total_wcu} exceeds {WARN_WCU} (extra charges apply)"
+            if w not in seen_warnings:
+                seen_warnings.add(w)
+                warnings.append(f"Domain {domain}: {w}")
+
+        # The packer offloads RBR/ref overflow into rule groups; a residual
+        # over-limit (a single rule too big to split) is surfaced per domain.
+        if over:
+            over["domain"] = domain
+            over_limits.append(over)
+            exceeded_domains.append(f"{domain}: {over['reason']}")
 
     # ── Clean up unreferenced IP sets ────────────────────────────────────────
 
