@@ -2145,9 +2145,27 @@ def main():
                                      for x in r["Properties"]["Rules"])
         for r in template["Resources"].values()
         if r["Type"] == "AWS::WAFv2::WebACL"}
+    # Deploy-summary facts for the pipeline's final ---RESULT--- (so the agent
+    # surfaces every deploy concern to the user, not just STATUS). Computed from
+    # the assembled template: per-WebACL WCU (vs 1500 cost line / 5000 hard cap),
+    # rule-group count + total RBR (to show the 10-RBR/50-ref escape actually
+    # happened), and whether the >51KB S3 path is required.
+    wcu_per_webacl = webacl_effective_wcu(template["Resources"])
+    num_rule_groups = sum(1 for r in template["Resources"].values()
+                          if r["Type"] == "AWS::WAFv2::RuleGroup")
+    total_rbr = sum(1 for r in template["Resources"].values()
+                    if r["Type"] in ("AWS::WAFv2::WebACL", "AWS::WAFv2::RuleGroup")
+                    for x in r["Properties"]["Rules"]
+                    if "RateBasedStatement" in x.get("Statement", {}))
+    webacls_over_free = {n: w for n, w in wcu_per_webacl.items() if w > WARN_WCU}
+
     meta = {"mode": mode, "dedup": dedup, "ip_sets_total": num_ip_sets,
             "ref_counts_per_webacl": webacl_ref_counts,
             "max_ref_per_webacl": max(webacl_ref_counts.values(), default=0),
+            "wcu_per_webacl": wcu_per_webacl,
+            "webacls_over_free_tier": webacls_over_free,  # WCU > 1500 → extra charges
+            "rule_group_count": num_rule_groups,          # overflow packing used if > 0
+            "total_rate_based_rules": total_rbr,          # > 10*num_webacls means the cap was escaped
             "blocked_count": len(blocked), "blocked_items": blocked}
     if mode != "legacy":
         meta["ref_counts_per_domain"] = domain_ref_counts
