@@ -279,6 +279,20 @@ def _rule_is_rbr(rule):
     return "RateBasedStatement" in rule.get("Statement", {})
 
 
+def _rule_is_producer(rule):
+    """A skip-label PRODUCER — a converted Cloudflare skip rule (Count + RuleLabels).
+    Everything else in the custom phase is a CONSUMER (block/challenge/IP-access —
+    may consume a skip label via NOT-LabelMatch, or not, but never produces one).
+
+    A rule group must be role-HOMOGENEOUS: all producers or all consumers. Never
+    mix them, because a producer's label is only visible to rules evaluated LATER,
+    and a group evaluates as one contiguous block at its reference's priority slot
+    — so a producer packed into a group can't suppress consumers that sit before
+    the group reference, and mixing the two makes correctness depend on accidental
+    ordering. Homogeneous groups keep every producer's slot before its consumers'."""
+    return bool(rule.get("RuleLabels"))
+
+
 def _iter_label_match_statements(stmt):
     """Yield every LabelMatchStatement dict in a statement tree (for key rewrite)."""
     if not isinstance(stmt, dict):
@@ -334,67 +348,111 @@ def _count_refs_in_stmt(stmt):
     return 0
 
 
-def _pack_block(rules, direct_rbr_budget, direct_ref_budget, managed_wcu):
-    """Split ONE ordered rule block into (direct, [groups]) so the block's direct
-    RBR ≤ direct_rbr_budget and direct refs ≤ direct_ref_budget.
+def _rule_cost(rule, managed_wcu):
+    return (1 if _rule_is_rbr(rule) else 0,
+            _count_refs_in_stmt(rule.get("Statement", {})),
+            compute_rule_wcu(rule, managed_wcu))
 
-    Peels a contiguous TAIL of the block into rule groups (order preserved: the
-    peeled rules keep their relative order and the groups sit after the block's
-    direct rules). Each group ≤4 RBR, ≤50 refs, ≤WCU budget. Returns
-    (direct_rules, [group_rule_lists], over_reason|None). `over_reason` is set if
-    a single rule alone exceeds a group cap (can't be split further).
-    """
-    def _binpack(overflow):
-        """Pack an ordered overflow list into groups (≤4 RBR, ≤50 refs, ≤WCU).
-        Returns (groups, over_reason|None)."""
-        groups, cur, c_rbr, c_refs, c_wcu = [], [], 0, 0, 0
-        for r in overflow:
-            r_rbr = 1 if _rule_is_rbr(r) else 0
-            r_refs = _count_refs_in_stmt(r.get("Statement", {}))
-            r_wcu = compute_rule_wcu(r, managed_wcu)
-            if r_rbr > RULE_GROUP_MAX_RBR or r_refs > RULE_GROUP_MAX_REFS or r_wcu > 5000:
-                return None, "a single rule exceeds a rule group's own caps"
-            if cur and (c_rbr + r_rbr > RULE_GROUP_MAX_RBR
-                        or c_refs + r_refs > RULE_GROUP_MAX_REFS
-                        or c_wcu + r_wcu > RULE_GROUP_WCU_BUDGET):
-                groups.append(cur)
-                cur, c_rbr, c_refs, c_wcu = [], 0, 0, 0
-            cur.append(r)
-            c_rbr += r_rbr; c_refs += r_refs; c_wcu += r_wcu
-        if cur:
+
+def _binpack_run(run, managed_wcu):
+    """Pack an ordered, ROLE-HOMOGENEOUS run of rules into as few groups as
+    possible (each ≤4 RBR, ≤50 refs, ≤WCU budget), order preserved. Returns
+    ([group_rule_lists], over_reason|None)."""
+    groups, cur, c_rbr, c_refs, c_wcu = [], [], 0, 0, 0
+    for r in run:
+        r_rbr, r_refs, r_wcu = _rule_cost(r, managed_wcu)
+        if r_rbr > RULE_GROUP_MAX_RBR or r_refs > RULE_GROUP_MAX_REFS or r_wcu > 5000:
+            return None, "a single rule exceeds a rule group's own caps"
+        if cur and (c_rbr + r_rbr > RULE_GROUP_MAX_RBR
+                    or c_refs + r_refs > RULE_GROUP_MAX_REFS
+                    or c_wcu + r_wcu > RULE_GROUP_WCU_BUDGET):
             groups.append(cur)
-        return groups, None
+            cur, c_rbr, c_refs, c_wcu = [], 0, 0, 0
+        cur.append(r)
+        c_rbr += r_rbr; c_refs += r_refs; c_wcu += r_wcu
+    if cur:
+        groups.append(cur)
+    return groups, None
 
-    rbr_total = sum(1 for r in rules if _rule_is_rbr(r))
-    ref_total = sum(_count_refs_in_stmt(r.get("Statement", {})) for r in rules)
-    if rbr_total <= direct_rbr_budget and ref_total <= direct_ref_budget:
-        return rules, [], None
 
-    # Peel a contiguous tail into rule groups. This is chicken-and-egg for refs:
-    # each rule group we create ALSO consumes 1 of the block's direct ref budget,
-    # so peeling more can create another group and shift the target. Converge by
-    # peeling one more rule at a time until the DIRECT side fits BOTH:
-    #   direct_rbr ≤ direct_rbr_budget
-    #   direct_refs + num_groups ≤ direct_ref_budget   (group refs counted)
-    split = len(rules)
-    groups = []
-    while split > 0:
-        rem = rules[:split]
-        overflow = rules[split:]
-        rem_rbr = sum(1 for r in rem if _rule_is_rbr(r))
-        rem_refs = sum(_count_refs_in_stmt(r.get("Statement", {})) for r in rem)
-        if overflow:
-            groups, over = _binpack(overflow)
+def _pack_block(rules, direct_rbr_budget, direct_ref_budget, managed_wcu,
+                role_aware=False):
+    """Pack ONE ordered rule block, preserving source order, into a list of
+    ordered SLOTS: each slot is either a direct WebACL rule or a rule group.
+
+    Returns (slots, over_reason|None). A slot is:
+        {"kind": "direct", "rule": <rule>}
+        {"kind": "group",  "rules": [<rule>,...]}
+    placed in source order, so a producer group/rule always precedes the
+    consumers that depend on it.
+
+    Strategy (greedy): keep rules DIRECT while the block's direct budget (RBR +
+    refs, counting 1 ref per group created) allows; when direct budget is
+    exhausted, push whole rules into groups. `role_aware` (custom block) segments
+    into maximal same-role runs first and NEVER packs across a role boundary — a
+    group holds only skip-label producers or only consumers (see
+    _rule_is_producer). The rate block is single-role (all RBR consumers), so it
+    packs without role segmentation.
+    """
+    # Segment into runs. role_aware: maximal same-role runs. else: one run.
+    if role_aware:
+        runs = []
+        for r in rules:
+            role = _rule_is_producer(r)
+            if runs and runs[-1][0] == role:
+                runs[-1][1].append(r)
+            else:
+                runs.append((role, [r]))
+    else:
+        runs = [(None, list(rules))] if rules else []
+
+    # First pass: everything direct. If it already fits, done (no groups).
+    total_rbr = sum(1 for r in rules if _rule_is_rbr(r))
+    total_refs = sum(_count_refs_in_stmt(r.get("Statement", {})) for r in rules)
+    if total_rbr <= direct_rbr_budget and total_refs <= direct_ref_budget:
+        return [{"kind": "direct", "rule": r} for r in rules], None
+
+    # Overflow strategy (per run, source order preserved; groups built from ONE
+    # run so never straddle a role boundary → never mix skip producers with
+    # consumers). The two budgets pull opposite ways, so route each rule to where
+    # it's CHEAPEST on the WebACL's ref budget:
+    #   - RBR rules: keep DIRECT up to the RBR budget (they cost RBR, ~0 refs);
+    #     RBR beyond the budget goes to a group.
+    #   - ref-bearing non-RBR rules: GROUP them — N such rules share 1 group = 1
+    #     ref, vs N refs if kept direct. This is the big saver (e.g. 60 IP-set
+    #     refs → 2 groups = 2 refs).
+    #   - 0-ref non-RBR rules: keep DIRECT (grouping saves no refs and burns a
+    #     group slot).
+    # 12 RBR → 10 direct + 2 grouped (1 group). 60 ref-rules → 0 direct + 2 groups.
+    slots = []
+    d_rbr = 0
+    for role, run in runs:
+        direct_rules, group_rules = [], []
+        for r in run:
+            is_rbr = _rule_is_rbr(r)
+            refs = _count_refs_in_stmt(r.get("Statement", {}))
+            if is_rbr and d_rbr < direct_rbr_budget:
+                direct_rules.append(r); d_rbr += 1
+            elif is_rbr or refs > 0:
+                group_rules.append(r)          # overflow RBR, or any ref-bearing rule
+            else:
+                direct_rules.append(r)         # 0-ref non-RBR — cheap to keep direct
+        for r in direct_rules:
+            slots.append({"kind": "direct", "rule": r})
+        if group_rules:
+            grp, over = _binpack_run(group_rules, managed_wcu)
             if over:
-                return rem, [], over
-        else:
-            groups = []
-        if (rem_rbr <= direct_rbr_budget
-                and rem_refs + len(groups) <= direct_ref_budget):
-            return rem, groups, None
-        split -= 1
+                return None, over
+            slots.extend({"kind": "group", "rules": g} for g in grp)
 
-    return [], [], "cannot peel enough rules to fit direct caps"
+    # Verify the WebACL-level budget is actually met (direct refs + 1/group,
+    # direct RBR). If not, the config genuinely can't fit — report over-limit.
+    direct_refs = sum(_count_refs_in_stmt(s["rule"].get("Statement", {}))
+                      for s in slots if s["kind"] == "direct")
+    n_groups = sum(1 for s in slots if s["kind"] == "group")
+    if d_rbr > direct_rbr_budget or direct_refs + n_groups > direct_ref_budget:
+        return None, "cannot peel enough rules to fit direct caps"
+    return slots, None
 
 
 def pack_webacl_rules(webacl_name, custom_block, rate_block, header_rules,
@@ -429,34 +487,40 @@ def pack_webacl_rules(webacl_name, custom_block, rate_block, header_rules,
     rbr_budget = MAX_RATE_RULES - fixed_rbr       # RBR only ever come from rate rules
     ref_budget = MAX_REF_STATEMENTS - fixed_refs  # shared across custom + rate blocks
 
-    # Pack the custom block first (custom rules aren't RBR, so give it 0 RBR
-    # budget — it never needs any — and the full ref budget). _pack_block already
-    # accounts for each rule group costing 1 ref, so its result fits ref_budget.
-    cd, cg, cover = _pack_block(custom_block, 0, ref_budget, managed_wcu)
+    def _slots_ref_use(slots):
+        """Refs the block's slots consume from the WebACL: direct-rule refs + 1
+        per group."""
+        return sum(_count_refs_in_stmt(s["rule"].get("Statement", {}))
+                   if s["kind"] == "direct" else 1 for s in slots)
+
+    # Pack the custom block first — ROLE-AWARE (never mix skip producers with
+    # consumers in a group). Custom rules aren't RBR, so 0 RBR budget.
+    custom_slots, cover = _pack_block(custom_block, 0, ref_budget, managed_wcu,
+                                      role_aware=True)
     if cover:
-        return (_finalize(header_rules, cd, cg, [], [], trailer_rules,
+        return (_finalize(header_rules, custom_slots or [], [], trailer_rules,
                           managed_rules, webacl_name, unique_id, resources, warnings),
                 warnings, {"reason": cover, "webacl": webacl_name})
 
     # Rate block gets the RBR budget and the ref budget left after the custom
-    # block's direct refs + its rule-group refs.
-    custom_used_refs = (sum(_count_refs_in_stmt(r.get("Statement", {})) for r in cd)
-                        + len(cg))
-    rate_ref_budget = ref_budget - custom_used_refs
-    rd, rg, rover = _pack_block(rate_block, rbr_budget, rate_ref_budget, managed_wcu)
+    # block's slots (direct refs + 1 per group). Rate rules are single-role.
+    rate_ref_budget = ref_budget - _slots_ref_use(custom_slots)
+    rate_slots, rover = _pack_block(rate_block, rbr_budget, rate_ref_budget, managed_wcu)
     if rover:
-        return (_finalize(header_rules, cd, cg, rd, rg, trailer_rules, managed_rules,
-                          webacl_name, unique_id, resources, warnings),
+        return (_finalize(header_rules, custom_slots, rate_slots or [], trailer_rules,
+                          managed_rules, webacl_name, unique_id, resources, warnings),
                 warnings, {"reason": rover, "webacl": webacl_name})
 
-    if cg or rg:
-        moved = sum(len(g) for g in cg) + sum(len(g) for g in rg)
+    n_groups = sum(1 for s in custom_slots + rate_slots if s["kind"] == "group")
+    if n_groups:
+        moved = sum(len(s["rules"]) for s in custom_slots + rate_slots
+                    if s["kind"] == "group")
         warnings.append(
             f"WebACL '{webacl_name}': moved {moved} overflow rule(s) into "
-            f"{len(cg) + len(rg)} rule group(s) to fit the 10-RBR / 50-ref direct caps")
+            f"{n_groups} rule group(s) to fit the 10-RBR / 50-ref direct caps")
 
-    ordered = _finalize(header_rules, cd, cg, rd, rg, trailer_rules, managed_rules,
-                        webacl_name, unique_id, resources, warnings)
+    ordered = _finalize(header_rules, custom_slots, rate_slots, trailer_rules,
+                        managed_rules, webacl_name, unique_id, resources, warnings)
     return ordered, warnings, None
 
 
@@ -565,35 +629,42 @@ def _rewrite_label_keys(all_placements, webacl_name):
         rule["Statement"] = _rewrite_stmt(rule.get("Statement", {}), producers, (kind, cname))
 
 
-def _finalize(header_rules, custom_direct, custom_groups, rate_direct, rate_groups,
-              trailer_rules, managed_rules, webacl_name, unique_id, resources, warnings):
-    """Materialize rule groups, rewrite label keys to fully-qualified producer
-    form, assemble the final ordered rule list, and assign sequential priorities.
-    Order: header → custom-direct → custom-group-refs → rate-direct →
-    rate-group-refs → trailer → managed (Cloudflare phase order preserved)."""
-    # Build rule group resources; collect (rule, container_kind, container_name)
-    # placements for label rewrite BEFORE priorities are stamped.
-    placements = []
+def _finalize(header_rules, custom_slots, rate_slots, trailer_rules, managed_rules,
+              webacl_name, unique_id, resources, warnings):
+    """Materialize rule groups AT THEIR SLOT POSITION, rewrite label keys, assemble
+    the final ordered rule list, and assign sequential priorities.
+
+    `custom_slots` / `rate_slots` are ordered lists of slots (from _pack_block):
+    a direct rule or a group, in SOURCE ORDER. Group refs are placed inline at
+    their slot — NOT clumped at the block's end — so a skip producer's slot always
+    precedes the consumers that depend on it. Phase order is preserved:
+    header → (custom slots, in order) → (rate slots, in order) → trailer → managed."""
+    placements = []  # (rule, container_kind, container_name) for label rewrite
+
+    def emit_slots(slots, block_name):
+        """Turn a slot list into an ordered list of WebACL-level rules (direct
+        rules kept as-is; groups materialized to a reference rule)."""
+        out = []
+        gi = 0
+        for s in slots:
+            if s["kind"] == "direct":
+                r = s["rule"]
+                placements.append((r, "webacl", webacl_name))
+                out.append(r)
+            else:  # group
+                gi += 1
+                lid, rg_name, ref = _make_rule_group(f"{webacl_name}-{block_name}",
+                                                     gi, s["rules"], unique_id,
+                                                     resources, None)
+                for r in resources[lid]["Properties"]["Rules"]:
+                    placements.append((r, "rulegroup", rg_name))
+                out.append(ref)
+        return out
+
     for r in header_rules:
         placements.append((r, "webacl", webacl_name))
-    for r in custom_direct:
-        placements.append((r, "webacl", webacl_name))
-
-    custom_refs, rate_refs = [], []
-    for gi, g in enumerate(custom_groups, 1):
-        lid, rg_name, ref = _make_rule_group(f"{webacl_name}-custom", gi, g,
-                                             unique_id, resources, None)
-        custom_refs.append(ref)
-        for r in resources[lid]["Properties"]["Rules"]:
-            placements.append((r, "rulegroup", rg_name))
-    for r in rate_direct:
-        placements.append((r, "webacl", webacl_name))
-    for gi, g in enumerate(rate_groups, 1):
-        lid, rg_name, ref = _make_rule_group(f"{webacl_name}-rate", gi, g,
-                                             unique_id, resources, None)
-        rate_refs.append(ref)
-        for r in resources[lid]["Properties"]["Rules"]:
-            placements.append((r, "rulegroup", rg_name))
+    custom_out = emit_slots(custom_slots, "custom")
+    rate_out = emit_slots(rate_slots, "rate")
     for r in trailer_rules + managed_rules:
         placements.append((r, "webacl", webacl_name))
 
@@ -609,8 +680,8 @@ def _finalize(header_rules, custom_direct, custom_groups, rate_direct, rate_grou
                 res["Properties"]["Rules"], None)
 
     # Assemble final order + assign WebACL-level priorities.
-    ordered = (list(header_rules) + list(custom_direct) + custom_refs
-               + list(rate_direct) + rate_refs + list(trailer_rules) + list(managed_rules))
+    ordered = (list(header_rules) + custom_out + rate_out
+               + list(trailer_rules) + list(managed_rules))
     for p, r in enumerate(ordered):
         r["Priority"] = p
     return ordered
