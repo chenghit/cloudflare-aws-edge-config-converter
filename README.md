@@ -2,7 +2,7 @@
 
 **Automatically convert Cloudflare configurations to AWS edge service configurations through AI conversation**
 
-This tool reads [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) exports and generates ready-to-deploy AWS WAF (CloudFormation) and CloudFront (Terraform) configurations — including cache policies, CloudFront Functions, Lambda@Edge, and KVS data.
+This tool reads a Cloudflare configuration backup (produced by the bundled backup script in `backup/`) and generates ready-to-deploy AWS WAF (CloudFormation) and CloudFront (Terraform) configurations — including cache policies, CloudFront Functions, Lambda@Edge, and KVS data.
 
 ## Quick Start
 
@@ -27,9 +27,9 @@ Convert CDN configuration in /path/to/cloudflare-backup to CloudFront Terraform
 Convert all Cloudflare configuration in /path/to/cloudflare-backup to AWS
 ```
 
-Don't have a backup yet? The `backup/` directory contains the CloudflareBackup tool — the agent will guide you through running it (it never sees your API credentials; you configure those yourself). See [Getting a backup](#getting-a-backup) below.
+Don't have a backup yet? The `backup/` directory contains the backup script — the agent will guide you through running it (it never sees your API credentials; you configure those yourself). See [Getting a backup](#getting-a-backup) below.
 
-Always provide the **CloudflareBackup root directory** (the one containing `account/` and zone subdirectories like `example.com/`). Do **not** provide a subdirectory — both WAF and CDN pipelines need files from the `account/` directory (IP lists for WAF, bulk redirect lists for CDN) that live outside the zone directory.
+Always provide the **backup root directory** (the one containing `account/` and zone subdirectories like `example.com/`). Do **not** provide a subdirectory — both WAF and CDN pipelines need files from the `account/` directory (IP lists for WAF, bulk redirect lists for CDN) that live outside the zone directory.
 
 For testing without your own config, use `examples/cloudflare-configs/`.
 
@@ -41,7 +41,7 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 - **Model**: No model requirement for the conversion pipeline itself — all scripts are deterministic Python with zero LLM invocations.
 - **For the backup step**: `bash`, `curl`, and `jq`. See `backup/README.md`.
 - **ACM certificates** (CDN only): CloudFront requires certs in us-east-1. Provision wildcard certificates (e.g., `*.example.com`) before running. Terraform auto-discovers existing ISSUED certs via data source lookup.
-- **Input format**: Only works with [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) exports. NOT compatible with [cf-terraforming](https://github.com/cloudflare/cf-terraforming) — see [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md).
+- **Input format**: Works with backups produced by the bundled `backup/` script. NOT compatible with [cf-terraforming](https://github.com/cloudflare/cf-terraforming) — see [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md).
 
 ## What Gets Converted
 
@@ -77,9 +77,9 @@ All CDN stages are deterministic Python scripts. No LLM subagents. No user inter
 flowchart TD
     User([User]) -->|"Convert WAF / CDN / All"| Main["Orchestrator"]
 
-    Main -->|WAF| WAF_A1["🐍 IP Analyzer"] --> WAF_A2["🐍 Custom Rules"] --> WAF_A3["🐍 Rate Limits"] --> WAF_M["🐍 Merge + Validate"] --> WAF_G["🐍 Generate CFN (legacy)"] --> WAF_C{Ref limit?}
-    WAF_C -->|"≤50"| WAF_Done([CloudFormation ✅])
-    WAF_C -->|">50"| WAF_SP["🐍 Split by Host"] --> WAF_GP["🐍 Generate CFN (per-domain)"] --> WAF_Done
+    Main -->|WAF| WAF_A1["🐍 IP Analyzer"] --> WAF_A2["🐍 Custom Rules"] --> WAF_A3["🐍 Rate Limits"] --> WAF_M["🐍 Merge + Validate"] --> WAF_G["🐍 Generate CFN (2 WebACLs + rule-group packing)"] --> WAF_C{Over a hard cap?}
+    WAF_C -->|"No"| WAF_Done([CloudFormation ✅])
+    WAF_C -->|"WCU>5000 / rule too big"| WAF_B([STATUS: BLOCKED — simplify + re-run])
 
     Main -->|CDN| CDN1["🐍 DNS Parser"] --> CDN3["🐍 Preprocess"]
     CDN3 --> CDN4["🐍 V1 Validate"]
@@ -94,6 +94,7 @@ flowchart TD
 
     style Main fill:#f9f,stroke:#333
     style WAF_Done fill:#9f9,stroke:#333
+    style WAF_B fill:#fdd,stroke:#333
     style CDN_Done fill:#9f9,stroke:#333
 ```
 
@@ -199,8 +200,10 @@ The tool generates a `data "aws_acm_certificate"` lookup that finds your existin
 <details>
 <summary>AWS WAF quotas to be aware of</summary>
 
+- **Reference statements per WebACL**: 50 (**hard limit**, cannot be increased — IP-set + regex-set + rule-group + managed-rule-group references all count)
+- **Rate-based rules per WebACL**: 10 (**hard limit**)
+- **WCU per WebACL**: 5000 (**hard limit**; over 1500 = extra charges)
 - **IP sets per account per region**: 100 (soft limit, can request increase via support case)
-- **IP set + regex set references per WebACL**: 50 (**hard limit**, cannot be increased via Service Quotas)
 - **WebACLs per account per region**: 100 (soft limit)
 
 The pipeline generates 2 WebACLs and uses a rule-group overflow packer to keep each under the 10-rate-based-rule and 50-reference-statement hard limits (overflow goes into referenced rule groups, which don't count against those caps). Cross-rule IP set deduplication kicks in when inline IP sets exceed 100. The generated deployment README includes a Quota Usage section showing actual consumption vs limits. See [Why CloudFormation](./docs/why-cloudformation.md) for details.
@@ -209,7 +212,7 @@ The pipeline generates 2 WebACLs and uses a rule-group overflow packer to keep e
 
 ## Getting a backup
 
-If you don't already have a CloudflareBackup export, use the tool bundled in `backup/`:
+If you don't already have a backup, use the script bundled in `backup/`:
 
 ```bash
 cd backup
@@ -220,7 +223,7 @@ cp config.example config
 
 This writes `<zone>/<timestamp>/` and `account/<timestamp>/` directories — that parent directory is the path you give the converter. Your credentials live only in your local `config` file; the AI agent never reads or asks for them.
 
-The backup tool is [chenghit/CloudflareBackup](https://github.com/chenghit/CloudflareBackup), vendored here for convenience.
+The backup script lives in `backup/` — it's part of this repo, so there's nothing else to install or clone.
 
 ## How to run
 

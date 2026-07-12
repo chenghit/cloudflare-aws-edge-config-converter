@@ -71,6 +71,8 @@ CloudFormation 还支持直接在 AWS Console 部署——上传 JSON 文件点�
 
 CDN pipeline（CloudFront 分发、缓存策略、CloudFront Functions）继续生成 Terraform。CloudFront 资源没有递归嵌套问题，而且 Terraform 的模块系统对管理按域名划分的 CloudFront 分发和共享策略确实很有用。
 
-## 按域名拆分 WebACL
+## 适配 AWS 的 WebACL 硬上限
 
-当客户的 Cloudflare 配置包含大量 inline IP 列表时，pipeline 首先尝试 legacy 模式（2 个 WebACL）。如果 IP set 引用语句超过每个 WebACL 的**硬限制（50，不可通过 Service Quotas 提额）**，自动回退为 **per-domain WebACL**——每个 proxied 域名一个 WebACL。Host-specific 规则只放到对应域名的 WebACL，冗余的 host 条件被剥离。每个 WebACL 包含搜索引擎标签规则、Anti-DDoS 防护和 always-on challenge 规则。生成的部署手册包含 Quota Usage 表格，显示每个 WebACL 的实际引用数。详见生成的部署指南中的部署后检查清单。
+AWS 对每个 WebACL 强制两个不可调整的上限（Service Quotas、Support 都无法提高）：**10 条速率规则**和 **50 条引用语句**（IP set + regex set + rule group + 托管规则组引用都计入）。与其按代理域名拆分 WebACL（100 个域名 → 100 个 WebACL），pipeline 使用 **rule-group overflow packer**：把超出的速率规则和 IP set 引用移入被引用的自定义 rule group，从而绕开这两个上限（一个 rule group 最多 4 条速率规则、50 条引用，而整个 rule group 只算 WebACL 的 1 条引用）。Cloudflare 的固定阶段顺序（custom → rate → managed）和 label 语义都被保留——当规则跨越 WebACL↔rule-group 边界移动时，每个 `LabelMatchStatement` 都会被改写成正确的 bare/fully-qualified 形式。因此即使配置引用远超 50 个 IP set，默认输出仍是稳定的 **2 个 WebACL**。
+
+`--force-split`（每个代理域名一个 WebACL，剥离 host 条件）仍可按需使用，它同样走这个 packer。生成的部署手册包含 Quota Usage 表格，显示每个 WebACL 的实际引用数。只有当某 WebACL 的 WCU 超过 5000 硬上限、或单条规则复杂到无法装入一个 rule group 时才无法部署——此时报告 `STATUS: BLOCKED`。

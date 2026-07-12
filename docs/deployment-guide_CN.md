@@ -33,8 +33,10 @@ aws cloudformation deploy \
 ### WAF 注意事项
 
 - `Scope: CLOUDFRONT` 的 WAF 资源必须在 `us-east-1`。
-- **Legacy 模式**（每个 WebACL ≤50 引用语句）：生成两个 Web ACL——`waf-website`（搜索引擎标签 + Anti-DDoS challenge + always-on challenge）和 `waf-api-file`（Anti-DDoS challenge 禁用，block 灵敏度 MEDIUM）。
-- **Per-domain 模式**（引用语句超过 50 硬限制时自动回退）：每个 proxied 域名一个 WebACL。全部包含搜索引擎标签、Anti-DDoS 和 always-on challenge（Count 模式）。部署后按域名定制——见 `README_aws-waf-deployment.md` 中的部署后检查清单。
+- **默认生成两个 Web ACL**——`waf-website`（搜索引擎标签 + Anti-DDoS challenge + always-on challenge）和 `waf-api-file`（Anti-DDoS challenge 禁用，block 灵敏度 MEDIUM）。rule-group overflow packer 把超出的规则移入被引用的 rule group，让每个 WebACL 保持在硬上限内（10 条速率规则、50 条引用语句）——因此引用超过 50 不再强制 per-domain 拆分。
+- **`--force-split`**：如需按其他理由拆分，可生成每个代理域名一个 WebACL（剥离 host 条件），同样走这个 packer。
+- 若某 WebACL 的 WCU 超过 5000 硬上限，或单条规则复杂到无法装入一个 rule group，工具仍会写出模板但报告 `STATUS: BLOCKED`——**不要**部署，请简化相关规则后重跑。
+- **可选的部署前校验**：`python3 converter/scripts/waf-verify-wcu.py <output_dir> --profile <aws-profile>` 会用 AWS `CheckCapacity` 核对每个 rule group 声明的 `Capacity`。本地 WCU 已经精确，所以这是安全网而非必需步骤；没有 profile 就直接部署。
 - 所有托管规则使用 Count 模式做初始监控。确认没有误报后再切换到 Block。
 - 查看 `README_aws-waf-deployment.md`（自动生成）了解规则备注、WCU 汇总和不可转换项。
 

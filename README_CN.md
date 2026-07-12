@@ -2,7 +2,7 @@
 
 **通过 AI 对话，自动将 Cloudflare 配置转换为 AWS 边缘服务配置**
 
-本工具读取 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 导出的备份文件，生成可直接部署的 AWS WAF（CloudFormation）和 CloudFront（Terraform）配置——包括缓存策略、CloudFront Functions、Lambda@Edge 和 KVS 数据。
+本工具读取 Cloudflare 配置备份（由 `backup/` 目录里自带的备份脚本生成），生成可直接部署的 AWS WAF（CloudFormation）和 CloudFront（Terraform）配置——包括缓存策略、CloudFront Functions、Lambda@Edge 和 KVS 数据。
 
 ## 快速开始
 
@@ -27,9 +27,9 @@ agent 会读取 `AGENTS.md` → `converter/SKILL.md` 并为你运行流程。你
 将 /path/to/cloudflare-backup 中的全部 Cloudflare 配置转换到 AWS
 ```
 
-还没有备份？`backup/` 目录里就是 CloudflareBackup 工具——agent 会指导你运行它（它不会看到你的 API 凭据，凭据由你自己配置）。详见下面的 [获取备份](#获取备份)。
+还没有备份？`backup/` 目录里就是备份脚本——agent 会指导你运行它（它不会看到你的 API 凭据，凭据由你自己配置）。详见下面的 [获取备份](#获取备份)。
 
-请始终提供 **CloudflareBackup 的根目录**（包含 `account/` 和 zone 子目录如 `example.com/` 的那个目录）。**不要**提供子目录——WAF 和 CDN pipeline 都需要 `account/` 目录中的文件（WAF 需要 IP 列表，CDN 需要 bulk redirect 列表），这些文件位于 zone 目录之外。
+请始终提供 **备份根目录**（包含 `account/` 和 zone 子目录如 `example.com/` 的那个目录）。**不要**提供子目录——WAF 和 CDN pipeline 都需要 `account/` 目录中的文件（WAF 需要 IP 列表，CDN 需要 bulk redirect 列表），这些文件位于 zone 目录之外。
 
 如需在没有自己配置的情况下测试，可使用 `examples/cloudflare-configs/`。
 
@@ -41,7 +41,7 @@ agent 会读取 `AGENTS.md` → `converter/SKILL.md` 并为你运行流程。你
 - **模型**：转换 pipeline 本身无模型要求——所有脚本都是确定性 Python，零 LLM 调用。
 - **备份步骤需要**：`bash`、`curl` 和 `jq`。详见 `backup/README.md`。
 - **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。运行前申请通配符证书（如 `*.example.com`），Terraform 会自动查找已签发的证书。
-- **输入格式**：仅支持 [CloudflareBackup](https://github.com/chenghit/CloudflareBackup) 导出。不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)——详见 [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)
+- **输入格式**：支持由自带的 `backup/` 脚本生成的备份。不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)——详见 [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)
 
 ## 转换范围
 
@@ -65,9 +65,9 @@ agent 会读取 `AGENTS.md` → `converter/SKILL.md` 并为你运行流程。你
 
 你的 AI agent 读取 `converter/SKILL.md`，作为编排器调度确定性 Python 脚本完成 WAF 和 CDN 两条 pipeline。
 
-**WAF 流程**（全 Python，零 LLM）：分析 IP 列表 → 分析自定义规则 → 分析速率限制 → 合并 → 校验 → 生成 CloudFormation → **引用超限时自动回退为 per-domain 拆分**
+**WAF 流程**（全 Python，零 LLM）：分析 IP 列表 → 分析自定义规则 → 分析速率限制 → 合并 → 校验 → 生成 CloudFormation（**rule-group overflow packer 让每个 WebACL 保持在 AWS 硬限制内**）
 
-WAF pipeline 首先尝试 legacy 模式（2 个 WebACL）。如果 IP set 引用语句超过每个 WebACL 的 hard limit（50），自动回退为 per-domain WebACL（每个 proxied 域名一个）。Per-domain 模式下，host-specific 规则只放到对应域名的 WebACL，host 条件被剥离（WebACL 只服务一个域名时冗余）。每个 WebACL 包含搜索引擎标签规则（Googlebot/Bingbot/YandexBot）、Anti-DDoS（排除搜索引擎）和 always-on challenge 规则（Count 模式——用户确认后手动改为 Challenge）。
+WAF pipeline 默认生成 2 个 WebACL（website + api）。一个 rule-group overflow packer 把超出的速率规则和 IP set 引用移入被引用的 rule group，从而让每个 WebACL 保持在 AWS 的硬性上限内——每 WebACL 最多 10 条速率规则、50 条引用语句（rule group 内的规则不占用这两个上限，整个 rule group 只算 WebACL 的 1 条引用）。因此引用超过 50 不再强制 per-domain 拆分。`--force-split`（每个代理域名一个 WebACL，剥离 host 条件）仍可按需使用，它同样走这个 packer。每个 WebACL 包含搜索引擎标签规则（Googlebot/Bingbot/YandexBot）、Anti-DDoS（排除搜索引擎）和 always-on challenge 规则（Count 模式——用户确认后手动改为 Challenge）。只有当某个 WebACL 的 WCU 超过 5000 硬上限、或单条规则复杂到无法装入一个 rule group 时才无法部署，此时工具报告 `STATUS: BLOCKED`（模板仍会写出供检查）。
 
 **CDN 流程**（0 个 LLM 阶段 + 10 个 Python 脚本）：**🐍 解析 DNS + 生成域名配置** → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → **🐍 生成每域名 JS** → **🐍 校验 JS**
 
@@ -77,9 +77,9 @@ WAF pipeline 首先尝试 legacy 模式（2 个 WebACL）。如果 IP set 引用
 flowchart TD
     User([用户]) -->|"转换 WAF / CDN / 全部"| Main["编排器"]
 
-    Main -->|WAF| WAF_A1["🐍 IP 分析"] --> WAF_A2["🐍 自定义规则"] --> WAF_A3["🐍 速率限制"] --> WAF_M["🐍 合并 + 校验"] --> WAF_G["🐍 生成 CFN (legacy)"] --> WAF_C{引用超限?}
-    WAF_C -->|"≤50"| WAF_Done([CloudFormation ✅])
-    WAF_C -->|">50"| WAF_SP["🐍 按域名拆分"] --> WAF_GP["🐍 生成 CFN (per-domain)"] --> WAF_Done
+    Main -->|WAF| WAF_A1["🐍 IP 分析"] --> WAF_A2["🐍 自定义规则"] --> WAF_A3["🐍 速率限制"] --> WAF_M["🐍 合并 + 校验"] --> WAF_G["🐍 生成 CFN（2 WebACL + rule-group 打包）"] --> WAF_C{超硬上限?}
+    WAF_C -->|"否"| WAF_Done([CloudFormation ✅])
+    WAF_C -->|"WCU>5000 / 单规则过大"| WAF_B([STATUS: BLOCKED — 简化后重跑])
 
     Main -->|CDN| CDN1["🐍 DNS 解析"] --> CDN3["🐍 预处理"]
     CDN3 --> CDN4["🐍 V1 校验"]
@@ -94,6 +94,7 @@ flowchart TD
 
     style Main fill:#f9f,stroke:#333
     style WAF_Done fill:#9f9,stroke:#333
+    style WAF_B fill:#fdd,stroke:#333
     style CDN_Done fill:#9f9,stroke:#333
 ```
 
@@ -194,17 +195,19 @@ aws acm request-certificate \
 <details>
 <summary>需要了解的 AWS WAF 配额</summary>
 
-- **每账号每区域 IP set 数量**：100（软限制，可通过 support case 申请提额）
-- **每个 WebACL 的 IP set + regex set 引用数**：50（**硬限制**，不可通过 Service Quotas 提额）
+- **每个 WebACL 的引用语句数**：50（**硬限制**，不可提额；IP set + regex set + rule group + 托管规则组引用都计入）
+- **每个 WebACL 的速率规则数**：10（**硬限制**）
+- **每个 WebACL 的 WCU**：5000（**硬限制**，超过 1500 产生额外费用）
+- **每账号每区域 IP set 数量**：100（软限制，可申请提额）
 - **每账号每区域 WebACL 数量**：100（软限制）
 
-Pipeline 首先尝试 legacy 模式（2 个 WebACL）。如果引用语句超过每个 WebACL 的硬限制（50），自动回退为 per-domain WebACL；当 inline IP set 超过 100 时，启用跨规则 IP set 去重。生成的部署手册包含 Quota Usage 表格，显示实际使用量与限制的对比。详见 [为什么用 CloudFormation](./docs/why-cloudformation_CN.md)。
+Pipeline 默认生成 2 个 WebACL，用 rule-group overflow packer 把超出的速率规则和 IP set 引用移入被引用的 rule group，从而保持在 10 条速率规则 / 50 条引用的硬上限内（rule group 内的引用不计入这两个上限）。当 inline IP set 超过 100 时启用跨规则 IP set 去重。生成的部署手册包含 Quota Usage 表格。详见 [为什么用 CloudFormation](./docs/why-cloudformation_CN.md)。
 
 </details>
 
 ## 获取备份
 
-如果你还没有 CloudflareBackup 导出，使用 `backup/` 里自带的工具：
+如果你还没有备份，使用 `backup/` 里自带的脚本：
 
 ```bash
 cd backup
@@ -215,7 +218,7 @@ cp config.example config
 
 这会生成 `<zone>/<timestamp>/` 和 `account/<timestamp>/` 目录——那个父目录就是你要交给转换器的路径。你的凭据只存在本地 `config` 文件里，AI agent 绝不会读取或索取。
 
-备份工具即 [chenghit/CloudflareBackup](https://github.com/chenghit/CloudflareBackup)，为方便使用随本仓库分发。
+备份脚本就在 `backup/` 目录里——它是本仓库的一部分，无需另行安装或克隆。
 
 ## 如何运行
 

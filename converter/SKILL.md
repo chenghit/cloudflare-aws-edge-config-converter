@@ -15,7 +15,7 @@ Orchestrate conversion of Cloudflare configurations to AWS by running determinis
 
 This repository has two parts:
 
-- `backup/` — the CloudflareBackup tool (a bash script). The user runs it to export their Cloudflare config to disk. It is the **input producer** for the converter.
+- `backup/` — the bundled backup script (bash). The user runs it to export their Cloudflare config to disk. It is the **input producer** for the converter.
 - `converter/` — this skill: `SKILL.md` (this file) plus `scripts/`, `references/`, and the Terraform module under `references/modules/`. All conversion logic lives here.
 
 **There is no install step.** The scripts self-locate (bash via `dirname`, Python via `__file__`), so they run correctly from wherever the repo is cloned. Before running anything, establish three shell variables and use them in every command. This keeps script location, output location, and input location all absolute and independent of the current directory.
@@ -28,7 +28,7 @@ OUT="$(pwd)"                                    # output lands here (NOT inside 
 
 - **`$REPO`** — absolute path to the cloned repo. Every script is invoked as `python3 "$REPO/converter/scripts/X.py"` or `bash "$REPO/converter/scripts/X.sh"`. Never a relative path.
 - **`$OUT`** — absolute path to the working directory chosen above. All output (`cloudflare-to-aws-waf/`, `cloudflare-to-aws-cdn/`) is written under `$OUT`. Do NOT write output inside `$REPO`.
-- **`$CONFIG_PATH`** — absolute path to the user's CloudflareBackup output directory (see Step 2).
+- **`$CONFIG_PATH`** — absolute path to the user's backup output directory (see Step 2).
 - **Do not `cd` again after the initial `cd`** for the rest of the session. Output paths are passed as absolute `$OUT/...` so this is a safety net, not the primary guard — but staying put avoids surprises. When a command genuinely needs a different directory (e.g. `terraform`), wrap it in a subshell `( cd "$OUT/..." && ... )` so the working directory is restored automatically.
 
 ## Credential safety (HARD RULES — never violate)
@@ -41,7 +41,7 @@ The backup step requires a Cloudflare API Token or Global API Key. These are the
 
 ## Backup step (only if the user has no backup yet)
 
-If the user already has a CloudflareBackup output directory, skip straight to conversion. If they don't, guide them to produce one (without ever touching their credentials — see Credential safety above):
+If the user already has a backup output directory, skip straight to conversion. If they don't, guide them to produce one (without ever touching their credentials — see Credential safety above):
 
 1. `cd "$REPO/backup"`
 2. `cp config.example config`, then edit `config` to add their API Token (or Global API Key) and domains. Point them at `backup/README.md` for details. **You do not read or edit this file for them.**
@@ -113,7 +113,7 @@ Both pipelines always run end-to-end — there is no analyze-only mode. Each is 
 
 Do not read or analyze config files yourself — you only locate the correct directory and pass it to scripts.
 
-**If the user did not give a path**, ask them where their CloudflareBackup output is (the directory produced by the backup script). Do not guess.
+**If the user did not give a path**, ask them where their backup output is (the directory produced by the backup script). Do not guess.
 
 **Why this matters:** the scripts recursively glob **downward** from `$CONFIG_PATH` — WAF needs `account/IP-Lists.txt`, CDN needs `account/List-Items-redirect-*.txt` for bulk redirects. Those `account/` files live *outside* the zone directory. If you pass a zone subdir (a natural mistake), `account/` is above it and the glob finds nothing — WAF silently loses all IP lists and CDN silently loses all bulk redirects. So you must resolve to the true root first.
 
@@ -123,7 +123,7 @@ Do not read or analyze config files yourself — you only locate the correct dir
 1. If `P` contains an `account/` subdir → `P` is the backup root. Use it.
 2. Else if `P` contains `DNS.txt` directly → `P` is a *zone timestamp dir*. The root is `P/../..`. Verify `account/` exists there; if so, use that root.
 3. Else if `P` contains `<zone>/<timestamp>/DNS.txt` but no `account/` → walk up to 2 levels from `P` looking for a directory that contains `account/`; if found, use it.
-4. If no directory containing `account/` can be found near `P` → do NOT proceed. Tell the user the path doesn't look like a CloudflareBackup root, show what you found, and ask them to point at the directory that contains both `account/` and the zone folders.
+4. If no directory containing `account/` can be found near `P` → do NOT proceed. Tell the user the path doesn't look like a backup root, show what you found, and ask them to point at the directory that contains both `account/` and the zone folders.
 
 Store the resolved root as `$CONFIG_PATH` (absolute). **Always pass the resolved root to scripts — never a zone subdir.**
 

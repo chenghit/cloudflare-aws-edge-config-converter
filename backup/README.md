@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 Bash script to create comprehensive Cloudflare configuration backups using curl and the Cloudflare API.
 
-> Vendored from [chenghit/CloudflareBackup](https://github.com/chenghit/CloudflareBackup) (MIT-0, see `LICENSE`). This is the input producer for the converter — run it first to export your Cloudflare config, then point the converter at the output. For updates or issues with the backup tool itself, see the upstream repo.
+> Part of this repo (MIT-0, see `LICENSE`). This is the input producer for the converter — run it first to export your Cloudflare config, then point the converter at the output. Nothing else to install or clone.
 
 ## Requirements
 

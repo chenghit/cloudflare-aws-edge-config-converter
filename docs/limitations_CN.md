@@ -139,6 +139,25 @@ CloudFront path patterns 只支持 `*` 和 `?` 通配符——不支持 regex。
 | API Abuse Detection | Cloudflare 专有 ML 功能 | AWS WAF Bot Control + 自定义规则 |
 | SaaS / mTLS 配置 | 架构根本不同 | 需要手动设计 |
 
+### AWS WAF 硬上限与工具的处理方式
+
+AWS 对每个 WebACL 强制若干**不可提高**的上限（Service Quotas、Support 都不行）：
+
+| 上限 | 限制 | 工具如何处理 |
+|------|------|-------------|
+| 每 WebACL 速率规则数 | 10 | 超出的速率规则被打包进被引用的 **rule group**（每组 ≤4 条），不计入这 10 条。 |
+| 每 WebACL 引用语句数 | 50（IP set + regex set + rule group + **托管规则组**引用都计入） | 超出的 IP set 引用被打包进 rule group；WebACL 每个 group 只算 1 条引用。 |
+| 每 WebACL 的 WCU | 5000（超过 1500 产生额外费用） | 从组装好的模板精确计算。若某 WebACL 超过 5000，工具报告 `STATUS: BLOCKED`——打包无法降低，必须简化规则。 |
+| 每个 rule group | ≤4 速率规则、≤50 引用、≤5000 WCU | packer 填充 group 时遵守这些上限。 |
+
+packer 保留 Cloudflare 固定的阶段顺序（custom → rate → managed），并在规则移入 rule group 时把 label key 改写成正确形式。因此即使配置引用远超 50 个 IP set，默认输出仍是 **2 个 WebACL**——50 引用上限不再强制 per-host 拆分。只有当某 WebACL 的 WCU 超过 5000、或单条规则复杂到无法装入一个 rule group 时才无法部署（`STATUS: BLOCKED`，模板仍会写出供检查）。
+
+### 会改变的速率限制语义
+
+- **`mitigation_timeout`（封禁时长）会丢失。** Cloudflare 可在触发后固定封禁一段时间；AWS WAF 只在滑动窗口速率持续超限时封禁（速率下降后约 ≤30s 解封）。每条受影响的规则都会列在报告里——不会被静默丢弃。
+- **过低的阈值会被放大，不会被丢弃。** AWS 每个评估窗口（{60,120,300,600} 秒）最低速率是 10；低于此的 Cloudflare 速率会被放大到第一个合法窗口，兜底为 10/600s。略微宽松，报告中注明。
+- **计数器是 per-WebACL-实例的。** 一个 WebACL 挂到 N 个 CloudFront distribution 会跨它们共享一个计数器（符合 Cloudflare 的 zone-wide 语义）。工具不合并不同的速率规则（共享计数器会让一个跨路径分散请求的客户端以远低于各规则阈值的量被限流）。
+
 ## 通用限制
 
 ### 需要人工审查

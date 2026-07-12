@@ -198,26 +198,20 @@ aws cloudformation delete-stack \
 # Then manually delete the retained IP sets via AWS Console or CLI
 ```
 
-## Single Domain Exceeds 50 Reference Statements After Per-Domain Split
+## STATUS: BLOCKED — a WebACL exceeds an AWS hard cap
 
-**Problem**: After the pipeline auto-splits into per-domain WebACLs, a single domain still exceeds the 50 IP set + regex set reference limit per WebACL. The pipeline reports this domain in `FAILED_ITEMS`.
+**Problem**: The generate step reports `STATUS: BLOCKED` with `BLOCKED_ITEMS`. The template is still written (for inspection), but it will be **rejected at deploy** and must not be deployed as-is.
 
-**Why this is rare**: A single domain exceeding 50 references means that domain has 50+ rules each referencing a different IP set. Cloudflare Enterprise plan allows max 100 custom rules per zone, and typically fewer than 20-30 reference IP sets. This scenario is extremely unlikely in practice.
+**Note on the 50-reference and 10-rate-based-rule caps**: you should rarely see BLOCKED for these. A rule-group overflow packer automatically moves overflow IP-set references and rate-based rules into referenced rule groups, which don't count against the WebACL's 10-RBR / 50-reference caps (the WebACL pays just 1 reference per rule group). It also rewrites label keys to the correct cross-container form and recomputes each rule group's WCU. So a config that would once have needed a per-host split now fits in the default 2 WebACLs. The 50-ref → `--force-split` fallback described in older docs no longer exists.
 
-**Solutions** (in order of preference):
+**The two situations that genuinely BLOCK**:
 
-1. **Consolidate IP sets**: Merge multiple IP sets that serve the same purpose (e.g., combine several block lists into one). Fewer IP sets = fewer references.
+1. **A WebACL's WCU exceeds the 5000 hard cap.** WCU is the sum of every rule's cost (see [limitations](./limitations.md) for the model) plus each referenced rule group's capacity. This can't be reduced by packing — the rules are genuinely too expensive.
+   - **Fix**: simplify the offending WebACL's source Cloudflare rules — fewer `contains`/regex byte matches, fewer text transformations, fewer regex-pattern-set references — then re-run. Or move some hosts to a separate deployment with `--force-split`.
 
-2. **Request entity-level limit increase (not guaranteed)**: Try contacting AWS Support to request a higher reference limit for a specific WebACL. This is not documented as adjustable and approval is not guaranteed — it depends on your support plan and account relationship. Steps if approved:
-   - Deploy a minimal WebACL (default action only) using CloudFormation
-   - Provide the WebACL ARN to AWS Support and request a reference limit increase
-   - Once approved, re-deploy the full CloudFormation template to update the WebACL with all rules
-   - Note: this is per-WebACL, not account-wide. New WebACLs still default to 50.
+2. **A single rule is too complex to fit one rule group** (a lone rule whose own references/WCU exceed a rule group's limits, so it can't be offloaded).
+   - **Fix**: split that one rule in Cloudflare (e.g. break a giant OR of IP lists into several rules), then re-run.
 
-3. **Rule Group workaround**: Move IP set references into Rule Groups. The WebACL references the Rule Group (counts as 1 reference), and IP set references inside the Rule Group don't count toward the WebACL's limit. Caveats:
-   - Rule Groups also have a 50 reference limit internally — may need multiple Rule Groups
-   - Rule Groups require a fixed WCU capacity declaration at creation time
-   - Labels produced by WebACL-level rules are not visible inside Rule Groups — this breaks skip/scope-down logic if rules are split across layers
-   - Priority management becomes more complex
+`BLOCKED_ITEMS` names the specific WebACL/rule and the reason. After fixing the source, re-run the pipeline — do not hand-edit the template.
 
-The per-domain split approach handles the vast majority of real-world cases. These workarounds are escape hatches for extreme configurations.
+**Optional WCU reconcile before deploy**: `python3 converter/scripts/waf-verify-wcu.py <output_dir> --profile <aws-profile>` calls AWS `CheckCapacity` for each rule group and corrects the declared `Capacity` if AWS computes a different number (it only ever changes that integer, never rule logic). The local WCU is already exact, so this is a safety net — skip it if you have no profile.

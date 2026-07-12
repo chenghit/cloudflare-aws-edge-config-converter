@@ -139,6 +139,25 @@ Non-convertible items are **not silently dropped**. The pipeline:
 | API Abuse Detection | Cloudflare-specific ML feature | AWS WAF Bot Control + custom rules |
 | SaaS / mTLS configurations | Fundamentally different architecture | Manual design required |
 
+### AWS WAF hard caps and how the tool fits them
+
+AWS enforces several per-WebACL caps that **cannot** be raised (not even via Service Quotas or Support):
+
+| Cap | Limit | How the tool handles it |
+|-----|-------|-------------------------|
+| Rate-based rules per WebACL | 10 | Overflow rate-based rules are packed into referenced **rule groups** (≤4 each), which don't count against the 10. |
+| Reference statements per WebACL | 50 (IP-set + regex-set + rule-group + **managed-rule-group** references all count) | Overflow IP-set references are packed into rule groups; the WebACL pays 1 reference per group. |
+| WCU per WebACL | 5000 (over 1500 = extra charges) | Computed exactly from the assembled template. If a WebACL exceeds 5000 the tool reports `STATUS: BLOCKED` — it cannot be reduced by packing, so you must simplify the rules. |
+| Rate-based / rule-group | ≤4 rate-based rules, ≤50 references, ≤5000 WCU per group | The packer respects these when filling groups. |
+
+The packer preserves Cloudflare's fixed phase order (custom → rate → managed) and rewrites label keys to the correct form when a rule moves into a rule group. So the default output is **2 WebACLs** even for configs that reference far more than 50 IP sets — a per-host split is no longer forced by the 50-reference cap. A config is only undeployable (`STATUS: BLOCKED`, template still written for inspection) when a WebACL's WCU exceeds 5000 or a single rule is too complex to fit one rule group.
+
+### Rate-limit semantics that change
+
+- **`mitigation_timeout` (block duration) is lost.** Cloudflare can block a client for a fixed period after a breach; AWS WAF only blocks while the trailing-window rate stays over the limit (unblocks ~≤30s after it drops). Every affected rule is listed in the report — it is not silently dropped.
+- **Low thresholds are scaled up, never dropped.** AWS's minimum rate limit is 10 per evaluation window ({60,120,300,600}s); a Cloudflare rate below that is scaled to the first legal window, with a 10/600s fallback. Slightly more permissive, noted in the report.
+- **Counters are per-WebACL-instance.** One WebACL attached to N CloudFront distributions shares one counter across them (matches Cloudflare's zone-wide intent). The tool does not merge distinct rate rules (a shared counter would throttle a client spreading across paths at a fraction of each rule's intended threshold).
+
 ## General Limitations
 
 ### Manual review required

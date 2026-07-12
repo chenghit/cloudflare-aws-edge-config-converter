@@ -4,7 +4,7 @@
 
 使用 curl 和 Cloudflare API 全面备份 Cloudflare 配置的 Bash 脚本。
 
-> 来自 [chenghit/CloudflareBackup](https://github.com/chenghit/CloudflareBackup)（MIT-0，见 `LICENSE`），随转换器一起分发。它是转换器的输入来源——先运行它导出 Cloudflare 配置，再让转换器读取其输出。备份工具本身的更新或问题请见上游仓库。
+> 本仓库的一部分（MIT-0，见 `LICENSE`）。它是转换器的输入来源——先运行它导出 Cloudflare 配置，再让转换器读取其输出。无需额外安装或克隆。
 
 ## 环境要求
 

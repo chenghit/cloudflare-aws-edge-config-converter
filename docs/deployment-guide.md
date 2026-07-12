@@ -34,8 +34,10 @@ managed rule groups. CloudFormation handles resource ordering automatically.
 ### WAF notes
 
 - WAF resources with `Scope: CLOUDFRONT` must be in `us-east-1`.
-- **Legacy mode** (≤50 ref statements per WebACL): Two Web ACLs — `waf-website` (search engine labeling + Anti-DDoS challenge + always-on challenge) and `waf-api-file` (Anti-DDoS challenge disabled, block sensitivity MEDIUM).
-- **Per-domain mode** (auto-fallback when ref statements exceed 50 hard limit): One WebACL per proxied domain. All include search engine labeling, Anti-DDoS, and always-on challenge (Count mode). Customize per-domain after deployment — see the post-deployment checklist in `README_aws-waf-deployment.md`.
+- **Default: two Web ACLs** — `waf-website` (search engine labeling + Anti-DDoS challenge + always-on challenge) and `waf-api-file` (Anti-DDoS challenge disabled, block sensitivity MEDIUM). A rule-group overflow packer keeps each WebACL under AWS's hard per-WebACL caps (10 rate-based rules, 50 reference statements) by moving overflow into referenced rule groups — so exceeding 50 references no longer forces a per-host split.
+- **`--force-split`** generates one WebACL per proxied domain (host conditions stripped) if you want it for other reasons; it uses the same packer.
+- If a WebACL would exceed the 5000-WCU hard cap, or a single rule is too complex to fit one rule group, the generator still writes the template but reports `STATUS: BLOCKED` — do **not** deploy it; simplify the offending rules and re-run.
+- **Optional pre-deploy check**: `python3 converter/scripts/waf-verify-wcu.py <output_dir> --profile <aws-profile>` reconciles each rule group's declared `Capacity` against AWS `CheckCapacity`. The local WCU is already calculator-exact, so this is a safety net, not a required step; without a profile, deploy as-is.
 - All managed rules use Count mode for initial monitoring. Switch to Block after
   validating no false positives.
 - Check `README_aws-waf-deployment.md` (auto-generated) for rule-specific notes,

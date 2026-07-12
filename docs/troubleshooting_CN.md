@@ -198,26 +198,20 @@ aws cloudformation delete-stack \
 # 然后通过 AWS Console 或 CLI 手动删除保留的 IP set
 ```
 
-## 单域名在 Per-Domain 拆分后仍超过 50 引用语句限制
+## STATUS: BLOCKED — 某个 WebACL 超过 AWS 硬上限
 
-**问题**：Pipeline 自动拆分为 per-domain WebACL 后，某个域名仍然超过每个 WebACL 50 个 IP set + regex set 引用的限制。Pipeline 会在 `FAILED_ITEMS` 中报告该域名。
+**问题**：生成步骤报告 `STATUS: BLOCKED` 并带有 `BLOCKED_ITEMS`。模板仍会写出（供检查），但它会在**部署时被拒绝**，不能照原样部署。
 
-**为什么这种情况极少发生**：单域名超过 50 个引用意味着该域名有 50+ 条规则各自引用不同的 IP set。Cloudflare Enterprise 计划每个 zone 最多 100 条自定义规则，其中引用 IP set 的通常不超过 20-30 条。
+**关于 50 引用 / 10 速率规则上限**：这两项很少会导致 BLOCKED。rule-group overflow packer 会自动把超出的 IP set 引用和速率规则移入被引用的 rule group，而 rule group 内的引用不计入 WebACL 的 10 速率规则 / 50 引用上限（整个 rule group 只算 WebACL 的 1 条引用）。它还会把 label key 改写成正确的跨容器形式，并重新计算每个 rule group 的 WCU。所以过去需要 per-host 拆分的配置，现在能装进默认的 2 个 WebACL。旧文档里那个「引用超 50 → `--force-split` 回退」已不存在。
 
-**解决方案**（按优先级排序）：
+**真正会 BLOCK 的两种情况**：
 
-1. **合并 IP set**：将用途相同的多个 IP set 合并为一个（例如，将多个 block list 合并）。IP set 越少，引用越少。
+1. **某 WebACL 的 WCU 超过 5000 硬上限。** WCU 是每条规则的成本（模型见 [限制](./limitations_CN.md)）加上每个被引用 rule group 的容量之和。这无法靠打包降低——规则本身就是太贵了。
+   - **解决**：简化该 WebACL 的源 Cloudflare 规则——减少 `contains`/正则字节匹配、减少 text transformation、减少 regex-pattern-set 引用——然后重跑。或用 `--force-split` 把部分域名拆到单独部署。
 
-2. **尝试申请 entity-level 限制提升（不保证批准）**：尝试联系 AWS Support 申请提升特定 WebACL 的引用限制。官方文档未标注此限制可调整，能否批准取决于你的 support plan 和账号关系。如果批准，步骤如下：
-   - 用 CloudFormation 部署一个最小 WebACL（仅默认动作）
-   - 将 WebACL ARN 提供给 AWS Support，申请引用限制提升
-   - 批准后，重新部署完整的 CloudFormation 模板更新该 WebACL
-   - 注意：这是 per-WebACL 的，不是账号级别。新建的 WebACL 仍然默认 50。
+2. **单条规则复杂到无法装入一个 rule group**（某条规则自身的引用/WCU 超过一个 rule group 的上限，无法被移入）。
+   - **解决**：在 Cloudflare 里拆分那一条规则（例如把一个巨大的 IP 列表 OR 拆成几条规则），然后重跑。
 
-3. **Rule Group 方案**：将 IP set 引用放入 Rule Group。WebACL 引用 Rule Group（算 1 个引用），Rule Group 内部的 IP set 引用不计入 WebACL 的限制。注意事项：
-   - Rule Group 内部也有 50 引用限制，可能需要多个 Rule Group
-   - Rule Group 创建时需要声明固定的 WCU 容量
-   - WebACL 层规则产生的 label 在 Rule Group 内部不可见，会破坏 skip/scope-down 逻辑
-   - 优先级管理更加复杂
+`BLOCKED_ITEMS` 会指明具体的 WebACL/规则和原因。修复源配置后重跑 pipeline——不要手改模板。
 
-Per-domain 拆分方案能处理绝大多数真实场景。以上方案是极端配置的应急手段。
+**部署前可选的 WCU 核对**：`python3 converter/scripts/waf-verify-wcu.py <output_dir> --profile <aws-profile>` 会对每个 rule group 调用 AWS `CheckCapacity`，若 AWS 算出的数不同则修正声明的 `Capacity`（只改这个整数，绝不改规则逻辑）。本地 WCU 已经精确，所以这是安全网——没有 profile 就跳过。
