@@ -127,6 +127,120 @@
         "last_updated": "2026-04-16T12:03:10.188831Z",
         "ref": "00000000000000000000000000000017",
         "version": "1"
+      },
+      {
+        "action": "block",
+        "description": "block-country",
+        "enabled": true,
+        "expression": "(ip.src.country eq \"IR\")",
+        "id": "f4631395bfc269009933a71fdce119d7",
+        "last_updated": "2026-06-12T08:48:44.327877Z",
+        "ref": "f4631395bfc269009933a71fdce119d7",
+        "version": "2"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "phases": [
+            "http_ratelimit"
+          ],
+          "ruleset": "current"
+        },
+        "description": "office-ip-skip",
+        "enabled": true,
+        "expression": "(ip.src in $admin_access)",
+        "id": "ece408c74eef6257eb16dadfdcae34f5",
+        "last_updated": "2025-08-22T08:14:39.933305Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "ece408c74eef6257eb16dadfdcae34f5",
+        "version": "1"
+      },
+      {
+        "action": "block",
+        "description": "swap-whitelist-ip",
+        "enabled": true,
+        "expression": "(http.host eq \"web3-swap.example.com\" and not ip.src in {192.0.2.1 192.0.2.2 192.0.2.3 192.0.2.4 192.0.2.5 192.0.2.6 192.0.2.7})",
+        "id": "3be760170a84463255a13e1532fbd58d",
+        "last_updated": "2026-04-10T08:57:35.68562Z",
+        "ref": "3be760170a84463255a13e1532fbd58d",
+        "version": "3"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "phases": [
+            "http_ratelimit"
+          ],
+          "ruleset": "current"
+        },
+        "description": "nat-whitelist-ip",
+        "enabled": true,
+        "expression": "(ip.src eq 192.0.2.6)",
+        "id": "bbee22e70b8042ebd52380ebf350427a",
+        "last_updated": "2025-01-14T02:11:47.500962Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "bbee22e70b8042ebd52380ebf350427a",
+        "version": "1"
+      },
+      {
+        "action": "block",
+        "description": "xss-block",
+        "enabled": true,
+        "expression": "(http.request.uri contains \"<\")",
+        "id": "6f36001b15dcd52041a7be9d241aac8c",
+        "last_updated": "2024-07-10T11:21:21.699871Z",
+        "ref": "6f36001b15dcd52041a7be9d241aac8c",
+        "version": "3"
+      },
+      {
+        "action": "block",
+        "description": "admin-access-block",
+        "enabled": true,
+        "expression": "(http.host eq \"admin.example.com\" and not ip.src in $admin_access)",
+        "id": "37cde809f0546e6fb2aa973c9ebd5e44",
+        "last_updated": "2024-07-10T11:21:21.699871Z",
+        "ref": "37cde809f0546e6fb2aa973c9ebd5e44",
+        "version": "3"
+      },
+      {
+        "action": "block",
+        "description": "tradingview-limit-access",
+        "enabled": true,
+        "expression": "(http.host eq \"tradingview.example.com\" and not ip.src in $trading_white_ip)",
+        "id": "829972aa2f602ff770275f0b19a07da0",
+        "last_updated": "2024-07-10T11:21:21.699871Z",
+        "ref": "829972aa2f602ff770275f0b19a07da0",
+        "version": "3"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "ruleset": "current"
+        },
+        "description": "vault-public-access",
+        "enabled": false,
+        "expression": "(http.host eq \"vault.example.com\" and http.request.uri.path in {\"/service\" \"/\" \"/_nuxt/\" \"/favicon.ico \"}) or (http.host eq \"vault.example.com\" and http.request.uri.path matches \"^/(images|iconfont|_nuxt)/.*\")",
+        "id": "6ae7fd0d9b514030f96db10f271d2e87",
+        "last_updated": "2024-07-19T10:23:17.528672Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "6ae7fd0d9b514030f96db10f271d2e87",
+        "version": "8"
+      },
+      {
+        "action": "block",
+        "description": "vault-internal-access",
+        "enabled": false,
+        "expression": "(http.host eq \"vault.example.com\" and not ip.src in $admin_access and not ip.src in $front_end_ip)",
+        "id": "3261962ea300f8e0ebb8f985758a7e2d",
+        "last_updated": "2024-07-19T10:23:23.732281Z",
+        "ref": "3261962ea300f8e0ebb8f985758a7e2d",
+        "version": "5"
       }
     ],
     "source": "firewall_custom",

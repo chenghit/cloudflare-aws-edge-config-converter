@@ -201,6 +201,270 @@
         },
         "ref": "00000000000000000000000000000084",
         "version": "1"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "ruleset": "current"
+        },
+        "description": "generated from pagerules: 8d72380f3649db3499bce62aad584059",
+        "enabled": false,
+        "expression": "starts_with(http.request.full_uri, \"https://www.example.com/res/\") or starts_with(http.request.full_uri, \"http://www.example.com/res/\")",
+        "id": "d30613fba07a3cbe01e006bf5c489601",
+        "last_updated": "2024-03-20T06:55:23.655065Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "d30613fba07a3cbe01e006bf5c489601",
+        "version": "1"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "ruleset": "current"
+        },
+        "description": "generated from pagerules: 353b80e2afd927c47b144d024f866d94",
+        "enabled": false,
+        "expression": "starts_with(http.request.full_uri, \"https://m.example.com/\") or starts_with(http.request.full_uri, \"http://m.example.com/\")",
+        "id": "4c45d25a82121ed7089eb0a84bd85ce5",
+        "last_updated": "2024-03-20T06:55:23.655065Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "4c45d25a82121ed7089eb0a84bd85ce5",
+        "version": "1"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "ruleset": "current"
+        },
+        "description": "generated from pagerules: bbdab3c7314256f7449b896eda3787b6",
+        "enabled": false,
+        "expression": "starts_with(http.request.full_uri, \"https://file.example.com/\") or starts_with(http.request.full_uri, \"http://file.example.com/\")",
+        "id": "185f14cd47c32a152b8562498d9f252f",
+        "last_updated": "2024-03-20T06:55:23.655065Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "185f14cd47c32a152b8562498d9f252f",
+        "version": "1"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "ruleset": "current"
+        },
+        "description": "generated from pagerules: e1632707f8477fda3fab70c2beb2841f",
+        "enabled": false,
+        "expression": "starts_with(http.request.full_uri, \"https://static.example.com/\") or starts_with(http.request.full_uri, \"http://static.example.com/\")",
+        "id": "1a48fa7a922a6c952b7a8cf3401f207c",
+        "last_updated": "2024-03-20T06:55:23.655065Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "1a48fa7a922a6c952b7a8cf3401f207c",
+        "version": "1"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "ruleset": "current"
+        },
+        "description": "generated from pagerules: d53a162aeb054c90c5e909b491ea4978",
+        "enabled": false,
+        "expression": "starts_with(http.request.full_uri, \"https://socket.example.com/\") or starts_with(http.request.full_uri, \"http://socket.example.com/\")",
+        "id": "fbfcc6c55eb631514d411f5a4fe43d16",
+        "last_updated": "2024-03-20T06:55:23.655065Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "fbfcc6c55eb631514d411f5a4fe43d16",
+        "version": "1"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "ruleset": "current"
+        },
+        "description": "generated from pagerules: cd13027e8a1627bc1d573745ebddee79",
+        "enabled": false,
+        "expression": "starts_with(http.request.full_uri, \"https://api.example.com/\") or starts_with(http.request.full_uri, \"http://api.example.com/\")",
+        "id": "d653d5a889d4c245a53c317c065215e0",
+        "last_updated": "2024-03-20T06:55:23.655065Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "d653d5a889d4c245a53c317c065215e0",
+        "version": "1"
+      },
+      {
+        "action": "skip",
+        "action_parameters": {
+          "ruleset": "current"
+        },
+        "description": "generated from pagerules: b16b2585cd2586de00e3cdd4a2def7b9",
+        "enabled": false,
+        "expression": "starts_with(http.request.full_uri, \"https://quant.example.com/\") or starts_with(http.request.full_uri, \"http://quant.example.com/\")",
+        "id": "81af0d3efc002aedc7622d5244e5a090",
+        "last_updated": "2024-03-20T06:55:23.655065Z",
+        "logging": {
+          "enabled": true
+        },
+        "ref": "81af0d3efc002aedc7622d5244e5a090",
+        "version": "1"
+      },
+      {
+        "action": "execute",
+        "action_parameters": {
+          "id": "dd1a69ceb9c3fcf0439bc3bb5f5ae726",
+          "overrides": {
+            "rules": [
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "84cdd55149791edadfd8f2e524f34756"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "6270e007f9b986aa36d2352113bced49"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "0a86fe249818667ea7ec054d6343072f"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "1aeb9b1a35d86d12ba61df001ad9578b"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "03cbc6aa665b9a128c7271a808f461c5"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "ac4305bf44c8dd680ac8f7ad318769d0"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "62bc719cfe2a043d991b80e1aa374a25"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "ef732f26b72b97761de8c0cd885316cc"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "19dee8ced287968730d68dc7c832ca63"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "529a6cbfec5133a594f730edb5122d1e"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "3bdfd75b7db166fec334234ecac61b58"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "ac779eb5f7888292a340c07de18db118"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "dbea0f02ea91f8a5bc58519f57d2001f"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "a36f70ef92a07e627f2c5bae3858e543"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "7f303025f17a16f0e534a1ca5a40ddd8"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "561f23066b2f52a9c979b98982d2012d"
+              },
+              {
+                "action": "block",
+                "enabled": false,
+                "id": "38016379d53425dc27da749580887242"
+              },
+              {
+                "action": "log",
+                "enabled": false,
+                "id": "d21cda46e4082c363e9025d1c013e312"
+              }
+            ]
+          },
+          "version": "latest"
+        },
+        "enabled": true,
+        "expression": "true",
+        "id": "d83b39078c3631a7198720db0afc2b6d",
+        "last_updated": "2024-03-20T07:21:05.827492Z",
+        "ref": "d83b39078c3631a7198720db0afc2b6d",
+        "version": "2"
+      },
+      {
+        "action": "execute",
+        "action_parameters": {
+          "id": "b118cd61e3e89aa1ba432abc23fba86f",
+          "version": "latest"
+        },
+        "enabled": true,
+        "expression": "true",
+        "id": "5861acdb8e4b2f16c0de52b82b8cfb44",
+        "last_updated": "2024-03-20T06:55:23.655065Z",
+        "ref": "5861acdb8e4b2f16c0de52b82b8cfb44",
+        "version": "1"
+      },
+      {
+        "action": "execute",
+        "action_parameters": {
+          "id": "53e622579611064e3b021aec7ce851c8",
+          "overrides": {
+            "categories": [
+              {
+                "category": "paranoia-level-3",
+                "enabled": false
+              },
+              {
+                "category": "paranoia-level-4",
+                "enabled": false
+              }
+            ],
+            "rules": [
+              {
+                "action": "log",
+                "id": "2a07bb44dc626351b8fb8c7570b70bbe",
+                "score_threshold": 25
+              }
+            ]
+          },
+          "version": "latest"
+        },
+        "enabled": true,
+        "expression": "true",
+        "id": "acf5e9efc809a1dd49c6500141699831",
+        "last_updated": "2024-12-05T07:45:04.194431Z",
+        "ref": "acf5e9efc809a1dd49c6500141699831",
+        "version": "2"
       }
     ],
     "source": "firewall_managed",

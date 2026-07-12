@@ -23,6 +23,270 @@
         "type": "zone"
       },
       "created_on": "2025-12-15T06:43:25.28864221Z"
+    },
+    {
+      "id": "b20b3666c5945ade5790e57cb1636154",
+      "paused": false,
+      "modified_on": "2025-06-23T11:34:36.499868Z",
+      "allowed_modes": [
+        "whitelist",
+        "block",
+        "challenge",
+        "js_challenge",
+        "managed_challenge"
+      ],
+      "mode": "whitelist",
+      "notes": "origin server ip",
+      "configuration": {
+        "target": "ip",
+        "value": "192.0.2.8"
+      },
+      "scope": {
+        "id": "a022363eb5416ada3498bf0b571445de",
+        "name": "example.com",
+        "type": "zone"
+      },
+      "created_on": "2025-06-23T11:34:36.561908037Z"
+    },
+    {
+      "id": "241aff6210619bd6e85f1824f9f1cf54",
+      "paused": false,
+      "modified_on": "2025-06-23T11:34:23.729843Z",
+      "allowed_modes": [
+        "whitelist",
+        "block",
+        "challenge",
+        "js_challenge",
+        "managed_challenge"
+      ],
+      "mode": "whitelist",
+      "notes": "origin server ip",
+      "configuration": {
+        "target": "ip",
+        "value": "192.0.2.9"
+      },
+      "scope": {
+        "id": "a022363eb5416ada3498bf0b571445de",
+        "name": "example.com",
+        "type": "zone"
+      },
+      "created_on": "2025-06-23T11:34:23.740855497Z"
+    },
+    {
+      "id": "0d4bb18fc99d2ef059e939f89da96541",
+      "paused": false,
+      "modified_on": "2025-06-23T11:33:22.42178Z",
+      "allowed_modes": [
+        "whitelist",
+        "block",
+        "challenge",
+        "js_challenge",
+        "managed_challenge"
+      ],
+      "mode": "whitelist",
+      "notes": "origin server ip",
+      "configuration": {
+        "target": "ip",
+        "value": "192.0.2.10"
+      },
+      "scope": {
+        "id": "a022363eb5416ada3498bf0b571445de",
+        "name": "example.com",
+        "type": "zone"
+      },
+      "created_on": "2025-06-23T11:33:22.487827865Z"
+    },
+    {
+      "id": "d1008f0cf5979e32ca0b547f09e1cc2d",
+      "paused": false,
+      "modified_on": "2025-06-23T11:32:53.272356Z",
+      "allowed_modes": [
+        "whitelist",
+        "block",
+        "challenge",
+        "js_challenge",
+        "managed_challenge"
+      ],
+      "mode": "whitelist",
+      "notes": "origin server ip",
+      "configuration": {
+        "target": "ip",
+        "value": "192.0.2.11"
+      },
+      "scope": {
+        "id": "a022363eb5416ada3498bf0b571445de",
+        "name": "example.com",
+        "type": "zone"
+      },
+      "created_on": "2025-06-23T11:32:53.316854369Z"
+    },
+    {
+      "id": "f69ed5ed507752d3750b07f1d3093d7a",
+      "paused": false,
+      "modified_on": "2025-06-20T07:06:17.889131Z",
+      "allowed_modes": [
+        "whitelist",
+        "block",
+        "challenge",
+        "js_challenge",
+        "managed_challenge"
+      ],
+      "mode": "whitelist",
+      "notes": "wallet origin ip",
+      "configuration": {
+        "target": "ip",
+        "value": "192.0.2.12"
+      },
+      "scope": {
+        "id": "a022363eb5416ada3498bf0b571445de",
+        "name": "example.com",
+        "type": "zone"
+      },
+      "created_on": "2025-06-20T07:06:17.940957356Z"
+    },
+    {
+      "id": "bebfcec08525632f193f4daa7751c681",
+      "paused": false,
+      "modified_on": "2025-04-30T08:14:38.284201Z",
+      "allowed_modes": [
+        "whitelist",
+        "block",
+        "challenge",
+        "js_challenge",
+        "managed_challenge"
+      ],
+      "mode": "whitelist",
+      "notes": "office ip",
+      "configuration": {
+        "target": "ip",
+        "value": "192.0.2.13"
+      },
+      "scope": {
+        "id": "a022363eb5416ada3498bf0b571445de",
+        "name": "example.com",
+        "type": "zone"
+      },
+      "created_on": "2025-04-30T08:14:27.122066116Z"
+    },
+    {
+      "id": "9e3bd55c58316a217d54e3ed588e1c3c",
+      "paused": false,
+      "modified_on": "2025-02-11T09:37:13.77368Z",
+      "allowed_modes": [
+        "whitelist",
+        "block",
+        "challenge",
+        "js_challenge",
+        "managed_challenge"
+      ],
+      "mode": "whitelist",
+      "notes": "warp-others",
+      "configuration": {
+        "target": "ip",
+        "value": "192.0.2.14"
+      },
+      "scope": {
+        "id": "a022363eb5416ada3498bf0b571445de",
+        "name": "example.com",
+        "type": "zone"
+      },
+      "created_on": "2025-02-11T09:37:13.810486174Z"
+    },
+    {
+      "id": "a3202a6ce0d15d9cf2afdbba7c620a07",
+      "paused": false,
+      "modified_on": "2025-02-11T09:34:02.44662Z",
+      "allowed_modes": [
+        "whitelist",
+        "block",
+        "challenge",
+        "js_challenge",
+        "managed_challenge"
+      ],
+      "mode": "whitelist",
+      "notes": "warp-tech",
+      "configuration": {
+        "target": "ip",
+        "value": "192.0.2.15"
+      },
+      "scope": {
+        "id": "a022363eb5416ada3498bf0b571445de",
+        "name": "example.com",
+        "type": "zone"
+      },
+      "created_on": "2025-02-11T09:34:02.515451456Z"
+    },
+    {
+      "id": "b80cde49ec6509ac8da1442dc0b66033",
+      "paused": false,
+      "modified_on": "2020-11-11T09:38:34.179118Z",
+      "allowed_modes": [
+        "whitelist",
+        "block",
+        "challenge",
+        "js_challenge",
+        "managed_challenge"
+      ],
+      "mode": "whitelist",
+      "notes": "partner pool ip",
+      "configuration": {
+        "target": "ip",
+        "value": "192.0.2.16"
+      },
+      "scope": {
+        "id": "a022363eb5416ada3498bf0b571445de",
+        "name": "example.com",
+        "type": "zone"
+      },
+      "created_on": "2020-11-11T09:38:34.20956209Z"
+    },
+    {
+      "id": "0acf74eb0f349fbbb3c0a8d92dd7f46c",
+      "paused": false,
+      "modified_on": "2018-07-10T08:56:04.963131Z",
+      "allowed_modes": [
+        "whitelist",
+        "block",
+        "challenge",
+        "js_challenge",
+        "managed_challenge"
+      ],
+      "mode": "whitelist",
+      "notes": "partner ip",
+      "configuration": {
+        "target": "ip",
+        "value": "192.0.2.17"
+      },
+      "scope": {
+        "id": "a022363eb5416ada3498bf0b571445de",
+        "name": "example.com",
+        "type": "zone"
+      },
+      "created_on": "2018-07-10T08:56:04.964426279Z"
+    },
+    {
+      "id": "921cbbb52324840911e9fedd1df10def",
+      "paused": false,
+      "modified_on": "2018-06-07T09:58:44.231323Z",
+      "allowed_modes": [
+        "whitelist",
+        "block",
+        "challenge",
+        "js_challenge",
+        "managed_challenge"
+      ],
+      "mode": "whitelist",
+      "notes": "",
+      "configuration": {
+        "target": "ip",
+        "value": "192.0.2.18"
+      },
+      "scope": {
+        "id": "a022363eb5416ada3498bf0b571445de",
+        "name": "example.com",
+        "type": "zone"
+      },
+      "created_on": "2018-06-07T09:58:44.235220883Z"
     }
   ],
   "success": true,

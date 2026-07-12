@@ -11,7 +11,7 @@
         "action": "block",
         "description": "one-request-in-100-seconds",
         "enabled": true,
-        "expression": "(http.request.uri.path wildcard r\"/rate-limit/*\") or (http.request.uri.path wildcard r\"/rbr/*\") or (cf.verified_bot_category eq \"Monitoring \u0026 Analytics\")",
+        "expression": "(http.request.uri.path wildcard r\"/rate-limit/*\") or (http.request.uri.path wildcard r\"/rbr/*\") or (cf.verified_bot_category eq \"Monitoring & Analytics\")",
         "id": "00000000000000000000000000000025",
         "last_updated": "2025-12-17T08:28:18.708806Z",
         "ratelimit": {
@@ -44,6 +44,396 @@
         },
         "ref": "00000000000000000000000000000026",
         "version": "1"
+      },
+      {
+        "action": "log",
+        "description": "proxy-ip-log",
+        "enabled": true,
+        "expression": "(ip.src in $cf.open_proxies)",
+        "id": "6b9b4ea3e17a229856162067782360f9",
+        "last_updated": "2025-09-11T10:11:26.786574Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 10,
+          "period": 10,
+          "requests_per_period": 1000
+        },
+        "ref": "6b9b4ea3e17a229856162067782360f9",
+        "version": "3"
+      },
+      {
+        "action": "managed_challenge",
+        "description": "quant-access-sim",
+        "enabled": true,
+        "expression": "(http.host eq \"www.example.com\" and starts_with(http.request.uri.path, \"/res/demo_trading/api\"))",
+        "id": "4c26886d0f657513e70e7c00703f7322",
+        "last_updated": "2024-12-17T04:14:04.049221Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 60,
+          "period": 60,
+          "requests_per_period": 15000
+        },
+        "ref": "4c26886d0f657513e70e7c00703f7322",
+        "version": "3"
+      },
+      {
+        "action": "block",
+        "description": "wallet-limit-1",
+        "enabled": true,
+        "expression": "(http.host eq \"wallet.example.com\" and http.request.uri.path in {\"/res/wallets/wid\" \"/res/wallets/init\"})",
+        "id": "828645a39df5b109bde2a81a0ea95595",
+        "last_updated": "2025-12-08T04:00:28.362564Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 60,
+          "requests_per_period": 40,
+          "requests_to_origin": true
+        },
+        "ref": "828645a39df5b109bde2a81a0ea95595",
+        "version": "2"
+      },
+      {
+        "action": "managed_challenge",
+        "description": "frontend-limited",
+        "enabled": true,
+        "expression": "(http.request.uri.path eq \"/en/\") or (http.request.uri.path eq \"/en\")",
+        "id": "006d778c053f91ed536e20661a062a37",
+        "last_updated": "2025-02-03T20:06:29.015175Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 3600,
+          "period": 60,
+          "requests_per_period": 8
+        },
+        "ref": "006d778c053f91ed536e20661a062a37",
+        "version": "16"
+      },
+      {
+        "action": "managed_challenge",
+        "description": "domain-res-limit",
+        "enabled": true,
+        "expression": "(http.host in $domain_name and http.request.uri.path matches \"^/res/*\" and not starts_with(http.request.uri.path, \"/res/demo_trading/api\"))",
+        "id": "43b82a1ed4e4623b077955aaa408fb4c",
+        "last_updated": "2024-12-16T09:32:33.973891Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 60,
+          "requests_per_period": 1000
+        },
+        "ref": "43b82a1ed4e4623b077955aaa408fb4c",
+        "version": "12"
+      },
+      {
+        "action": "block",
+        "description": "www-assets-limit",
+        "enabled": true,
+        "expression": "(http.host in $domain_name and starts_with(http.request.uri.path, \"/assets/\"))",
+        "id": "3863c68ceeae5f149ffdbc8dadc39235",
+        "last_updated": "2024-05-31T11:07:06.278354Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 60,
+          "requests_per_period": 500
+        },
+        "ref": "3863c68ceeae5f149ffdbc8dadc39235",
+        "version": "3"
+      },
+      {
+        "action": "block",
+        "description": "www-nuxt-limit",
+        "enabled": true,
+        "expression": "(http.host matches \"www.example.(com|land|network|zone)\" and starts_with(http.request.uri.path, \"/_nuxt/\")) or (http.host in {\"www.lands.example\" \"www.spaces.example\" \"www.networks.example\"} and starts_with(http.request.uri.path, \"/_nuxt/\"))",
+        "id": "83cc72b8f105c508b723ee0fc1dd01b5",
+        "last_updated": "2024-05-31T11:14:52.521146Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 60,
+          "requests_per_period": 200,
+          "requests_to_origin": true
+        },
+        "ref": "83cc72b8f105c508b723ee0fc1dd01b5",
+        "version": "3"
+      },
+      {
+        "action": "block",
+        "description": "api-v1-market-limit",
+        "enabled": true,
+        "expression": "(http.host in $api_domain and starts_with(http.request.uri.path, \"/v1/market\"))",
+        "id": "b2ac040744a49448af7ad7a4c36f27a0",
+        "last_updated": "2024-11-26T07:13:03.266666Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 10,
+          "requests_per_period": 3000
+        },
+        "ref": "b2ac040744a49448af7ad7a4c36f27a0",
+        "version": "6"
+      },
+      {
+        "action": "block",
+        "description": "api-v2-market-limit",
+        "enabled": true,
+        "expression": "(http.host in $api_domain and starts_with(http.request.uri.path, \"/v2/spot/market\"))",
+        "id": "150e239283afebe6f908f9877a945ec9",
+        "last_updated": "2024-11-26T07:12:52.617998Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 10,
+          "requests_per_period": 3000
+        },
+        "ref": "150e239283afebe6f908f9877a945ec9",
+        "version": "6"
+      },
+      {
+        "action": "block",
+        "description": "api-future-v1-market-limit",
+        "enabled": true,
+        "expression": "(http.host in $api_domain and starts_with(http.request.uri.path, \"/perpetual/v1/market\"))",
+        "id": "0c8d1c30b95cc8e7e533258dcb4ac80e",
+        "last_updated": "2024-11-26T07:15:00.096583Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 10,
+          "requests_per_period": 3000
+        },
+        "ref": "0c8d1c30b95cc8e7e533258dcb4ac80e",
+        "version": "2"
+      },
+      {
+        "action": "block",
+        "description": "api-future-v2-market-limit",
+        "enabled": true,
+        "expression": "(http.host in $api_domain and starts_with(http.request.uri.path, \"/v2/futures/market\"))",
+        "id": "675e2ea8b12a3465f6bd1488d7bccb8e",
+        "last_updated": "2024-11-26T07:15:51.513916Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 10,
+          "requests_per_period": 3000
+        },
+        "ref": "675e2ea8b12a3465f6bd1488d7bccb8e",
+        "version": "2"
+      },
+      {
+        "action": "block",
+        "description": "domain-limit",
+        "enabled": true,
+        "expression": "(http.host in $domain_name)",
+        "id": "3e3eea70b5628b4f2a5773a66496e029",
+        "last_updated": "2025-02-04T01:57:49.54981Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 300,
+          "period": 60,
+          "requests_per_period": 1200
+        },
+        "ref": "3e3eea70b5628b4f2a5773a66496e029",
+        "version": "20"
+      },
+      {
+        "action": "managed_challenge",
+        "description": "wallet-res-wid-limit",
+        "enabled": true,
+        "expression": "(http.request.full_uri matches \"https://*.example.net/res/wallets/wid*\") or (http.request.full_uri matches \"https://*wallet.example.com/res/wallets/wid*\") or (http.request.full_uri matches \"https://wallet.example.com/res/wallets/wid*\")",
+        "id": "024e2fb622154243177c5857d0ac889b",
+        "last_updated": "2025-03-29T10:29:52.558012Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 60,
+          "requests_per_period": 10,
+          "requests_to_origin": true
+        },
+        "ref": "024e2fb622154243177c5857d0ac889b",
+        "version": "5"
+      },
+      {
+        "action": "managed_challenge",
+        "description": "wallet-res-init-limit",
+        "enabled": true,
+        "expression": "(http.request.full_uri matches \"https://*.example.net/res/wallets/init*\") or (http.request.full_uri matches \"https://*wallet.example.com/res/wallets/init*\") or (http.request.full_uri matches \"https://wallet.example.com/res/wallets/init*\")",
+        "id": "6469c71050cd9a5eb9d92e12475973ff",
+        "last_updated": "2025-03-29T10:29:29.697342Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 60,
+          "requests_per_period": 10,
+          "requests_to_origin": true
+        },
+        "ref": "6469c71050cd9a5eb9d92e12475973ff",
+        "version": "4"
+      },
+      {
+        "action": "managed_challenge",
+        "description": "wallet-res-hmackey-limit",
+        "enabled": true,
+        "expression": "(http.request.full_uri matches \"https://*.example.net/res/wallets/hmackey*\") or (http.request.full_uri matches \"https://*wallet.example.com/res/wallets/hmackey*\") or (http.request.full_uri matches \"https://wallet.example.com/res/wallets/hmackey*\")",
+        "id": "fdbfeefea4e8022e661c0a1fb5b61e64",
+        "last_updated": "2025-03-29T10:30:24.48999Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 60,
+          "requests_per_period": 10,
+          "requests_to_origin": true
+        },
+        "ref": "fdbfeefea4e8022e661c0a1fb5b61e64",
+        "version": "4"
+      },
+      {
+        "action": "managed_challenge",
+        "description": "wallet-res-msg-unread-limit",
+        "enabled": true,
+        "expression": "(http.request.full_uri matches \"https://*.example.net/res/wallets/msg/unread*\") or (http.request.full_uri matches \"https://*wallet.example.com/res/wallets/msg/unread*\") or (http.request.full_uri matches \"https://wallet.example.com/res/wallets/msg/unread*\")",
+        "id": "8525f181a6ab91ad82d493db8b420e21",
+        "last_updated": "2025-03-29T10:30:48.884338Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 60,
+          "requests_per_period": 10,
+          "requests_to_origin": true
+        },
+        "ref": "8525f181a6ab91ad82d493db8b420e21",
+        "version": "4"
+      },
+      {
+        "action": "managed_challenge",
+        "description": "wallet-allrpc-limit",
+        "enabled": true,
+        "expression": "(http.request.full_uri matches \"https://*.example.net/[bnb,ht,cet,avax,ftm,arb,op,base,sol]rpc\") or (http.request.full_uri matches \"https://*wallet.example.com/[bnb,ht,cet,avax,ftm,arb,op,base,sol]rpc\") or (http.request.full_uri matches \"https://wallet.example.com/[bnb,ht,cet,avax,ftm,arb,op,base,sol]rpc\")",
+        "id": "5f7759c9027024d8b533e09823aef561",
+        "last_updated": "2025-03-29T10:31:11.077666Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 10,
+          "requests_per_period": 100,
+          "requests_to_origin": true
+        },
+        "ref": "5f7759c9027024d8b533e09823aef561",
+        "version": "6"
+      },
+      {
+        "action": "managed_challenge",
+        "description": "explorer-door-limit",
+        "enabled": true,
+        "expression": "(http.host eq \"explorer.example.net\") or (http.host eq \"explorer.example.com\")",
+        "id": "1e6d7bca5c61fcf41288d543679c172c",
+        "last_updated": "2025-03-29T10:22:46.052044Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 60,
+          "requests_per_period": 50,
+          "requests_to_origin": true
+        },
+        "ref": "1e6d7bca5c61fcf41288d543679c172c",
+        "version": "4"
+      },
+      {
+        "action": "managed_challenge",
+        "description": "explorer-res-bsv-tx-limit",
+        "enabled": true,
+        "expression": "(http.host eq \"explorer.example.net\" and starts_with(http.request.uri.path, \"/res/bsv/transactions\")) or (http.host eq \"explorer.example.com\" and starts_with(http.request.uri.path, \"/res/bsv/transactions\"))",
+        "id": "43d510c672f97184e29be6512115605b",
+        "last_updated": "2024-05-29T08:12:26.925446Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 60,
+          "requests_per_period": 20,
+          "requests_to_origin": true
+        },
+        "ref": "43d510c672f97184e29be6512115605b",
+        "version": "3"
+      },
+      {
+        "action": "managed_challenge",
+        "description": "wallet-res-suggestion-limit",
+        "enabled": true,
+        "expression": "(http.request.full_uri matches \"https://*.example.net/res/wallets/suggestion*\") or (http.request.full_uri matches \"https://*wallet.example.com/res/wallets/suggestion*\") or (http.request.full_uri matches \"https://wallet.example.com/res/wallets/suggestion*\")",
+        "id": "0892b81bed6ed8496b1900c23734bc1b",
+        "last_updated": "2025-03-29T10:31:54.623848Z",
+        "ratelimit": {
+          "characteristics": [
+            "ip.src",
+            "cf.colo.id"
+          ],
+          "mitigation_timeout": 0,
+          "period": 60,
+          "requests_per_period": 10,
+          "requests_to_origin": true
+        },
+        "ref": "0892b81bed6ed8496b1900c23734bc1b",
+        "version": "2"
       }
     ],
     "source": "rate_limit",
