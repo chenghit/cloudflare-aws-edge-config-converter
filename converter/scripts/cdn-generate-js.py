@@ -879,8 +879,12 @@ def _generate_op_js(op, target="cff", indent="  "):
         if params.get("preserve_query_string"):
             raw_qs = "request.querystring" if target == "lambda" else "_qs(request.querystring)"
             loc_var = "__loc"
-            body = (f"var {loc_var} = {target_url}; "
-                    f"var __q = {raw_qs}; "
+            # `let` (block-scoped), not `var` (function-scoped): several redirect
+            # ops can land in one handler, and repeated `var __loc`/`var __q`
+            # trips the CloudFront console linter ("already defined"). Each op's
+            # `let` lives inside its own `if (...) { }` block, so no clash.
+            body = (f"let {loc_var} = {target_url}; "
+                    f"let __q = {raw_qs}; "
                     f"if (__q) {{ {loc_var} += ({loc_var}.indexOf('?') === -1 ? '?' : '&') + __q; }} "
                     f"return {{statusCode: {status}, headers: {{location: {{value: {loc_var}}}}}}};")
         else:
@@ -1061,12 +1065,16 @@ def _qs_helper_lines(indent="  "):
     """The `_qs` helper that rebuilds CFF's parsed querystring object into a raw
     string. Shared by the viewer-request and viewer-response handlers (a
     uri.query condition renders `_qs(request.querystring)` in either)."""
+    # Inner `for` loop, not `.forEach(function(){})`: a function defined inside
+    # the `for (var k in q)` loop that closes over `p`/`k` trips the CloudFront
+    # console linter ("functions declared within loops... confusing semantics").
+    # A plain nested loop has no closure and no warning.
     return [
         f"{indent}function _qs(q) {{",
         f"{indent}  var p = [];",
         f"{indent}  for (var k in q) {{",
         f"{indent}    if (q[k].multiValue) {{",
-        f"{indent}      q[k].multiValue.forEach(function(mv) {{ p.push(k + '=' + mv.value); }});",
+        f"{indent}      for (var i = 0; i < q[k].multiValue.length; i++) {{ p.push(k + '=' + q[k].multiValue[i].value); }}",
         f"{indent}    }} else {{",
         f"{indent}      p.push(k + '=' + q[k].value);",
         f"{indent}    }}",
@@ -1089,12 +1097,13 @@ def _cookie_str_helper_lines(indent="  "):
     not expose the raw Cookie header, so a `http.cookie contains "…"` match is
     run against this reconstruction. Pairs are `name=value` joined by '; ' (the
     Cookie header separator); duplicate-name cookies expand via multiValue."""
+    # Inner `for` loop, not `.forEach(function(){})` — same linter reason as _qs.
     return [
         f"{indent}function _cookieStr(c) {{",
         f"{indent}  var p = [];",
         f"{indent}  for (var k in c) {{",
         f"{indent}    if (c[k].multiValue) {{",
-        f"{indent}      c[k].multiValue.forEach(function(mv) {{ p.push(k + '=' + mv.value); }});",
+        f"{indent}      for (var i = 0; i < c[k].multiValue.length; i++) {{ p.push(k + '=' + c[k].multiValue[i].value); }}",
         f"{indent}    }} else {{",
         f"{indent}      p.push(k + '=' + c[k].value);",
         f"{indent}    }}",
