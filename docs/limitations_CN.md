@@ -136,8 +136,27 @@ CloudFront path patterns 只支持 `*` 和 `?` 通配符——不支持 regex。
 | 项目 | 原因 | 替代方案 |
 |------|--------|-------------|
 | Cloudflare Managed Rules (OWASP 等) | 用 AWS WAF 自己的 managed rule groups | AWS Managed Rules for WAF |
+| Cloudflare 托管 **List**（`$cf.*`） | Cloudflare 自己维护的 IP 情报，不可导出 | AWS managed rule groups（见下文） |
 | API Abuse Detection | Cloudflare 专有 ML 功能 | AWS WAF Bot Control + 自定义规则 |
 | SaaS / mTLS 配置 | 架构根本不同 | 需要手动设计 |
+
+### Cloudflare 托管 List（`$cf.*`）
+
+Cloudflare 提供 5 个**托管 IP List**——它自己维护的 IP 威胁情报源，在表达式里用 `ip.src in $cf.open_proxies` 这样引用。它们仅限 Enterprise、由 Cloudflare 维护、**无法导出**，所以没法在 AWS 侧重建成 IP set。引用了托管 List 的规则条件因此不可转换：
+
+| Cloudflare 托管 List | 最接近的 AWS 等价物 |
+|----------------------|---------------------|
+| `$cf.open_proxies` | Amazon IP reputation list / Anonymous IP list managed rule group |
+| `$cf.anonymizer` | Anonymous IP list managed rule group |
+| `$cf.vpn` | Anonymous IP list managed rule group |
+| `$cf.malware` | Amazon IP reputation list managed rule group |
+| `$cf.botnetcc` | Amazon IP reputation list managed rule group |
+
+工具对引用了托管 List 的规则的处理方式：
+
+- 该托管 List 条件会从规则里**丢弃**，并在转换报告里记录（带上面的 AWS 等价物）——不会被静默保留成空匹配或字面匹配。
+- 如果托管 List 只是规则的**一个分支**（如 `... and ip.src in $cf.vpn`），规则其余部分照常转换（该分支被剪掉，规则变成 *partial*）。
+- 如果它是某条**限速**规则的**全部**条件，限速会保留但变成无条件（限速永远可转换，只丢失托管 List 的 scope-down）。如果它是某条 **block/challenge** 自定义规则的全部条件，该规则会被丢弃——相应防护改由生成的 WebACL 已包含的 **Amazon IP reputation** 和 **Anti-DDoS** managed rule group 覆盖。请查看报告，如需更严格的覆盖，部署后再加上 **Anonymous IP list** managed rule group。
 
 ### AWS WAF 硬上限与工具的处理方式
 

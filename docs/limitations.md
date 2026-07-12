@@ -136,8 +136,27 @@ Non-convertible items are **not silently dropped**. The pipeline:
 | Item | Reason | Alternative |
 |------|--------|-------------|
 | Cloudflare Managed Rules (OWASP, etc.) | Use AWS WAF's own managed rule groups | AWS Managed Rules for WAF |
+| Cloudflare Managed **Lists** (`$cf.*`) | Cloudflare-curated IP intelligence, not exportable | AWS managed rule groups (see below) |
 | API Abuse Detection | Cloudflare-specific ML feature | AWS WAF Bot Control + custom rules |
 | SaaS / mTLS configurations | Fundamentally different architecture | Manual design required |
+
+### Cloudflare Managed Lists (`$cf.*`)
+
+Cloudflare provides five **Managed IP Lists** — curated IP threat-intelligence feeds you reference in expressions like `ip.src in $cf.open_proxies`. They are Enterprise-only, Cloudflare-maintained, and **cannot be exported**, so there is no way to recreate them as an AWS IP set. A rule condition that uses one is therefore non-convertible:
+
+| Cloudflare managed list | Closest AWS equivalent |
+|--------------------------|------------------------|
+| `$cf.open_proxies` | Amazon IP reputation list / Anonymous IP list managed rule group |
+| `$cf.anonymizer` | Anonymous IP list managed rule group |
+| `$cf.vpn` | Anonymous IP list managed rule group |
+| `$cf.malware` | Amazon IP reputation list managed rule group |
+| `$cf.botnetcc` | Amazon IP reputation list managed rule group |
+
+How the tool handles a rule that references one:
+
+- The managed-list condition is **dropped** from that rule and recorded in the conversion report with the AWS equivalent above — it is not silently kept as an empty or literal match.
+- If the managed list was **one branch** of the rule (e.g. `... and ip.src in $cf.vpn`), the rest of the rule still converts (the branch is pruned; the rule becomes *partial*).
+- If it was the **entire** condition of a *rate* rule, the rate limit is kept but becomes unconditional (rate limiting is always convertible; only the managed-list scope-down is lost). If it was the entire condition of a *block/challenge* custom rule, that rule is dropped — the protection is instead covered by the **Amazon IP reputation** and **Anti-DDoS** managed rule groups the generated WebACL already includes. Review the report and, if you want tighter coverage, add the **Anonymous IP list** managed rule group after deployment.
 
 ### AWS WAF hard caps and how the tool fits them
 
