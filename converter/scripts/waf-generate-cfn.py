@@ -704,6 +704,21 @@ def _flatten_statements(stmts, key):
     return flat
 
 
+def rule_conditions(rule):
+    """The condition tree to actually emit for a rule.
+
+    For a `partial` rule, `conditions` still holds the ORIGINAL (unpruned) tree
+    and `convertible_conditions` holds the pruned one — so we MUST use the pruned
+    tree, or non-convertible branches (e.g. `ip.src in $cf.open_proxies`, a
+    managed list) leak into the generated WAF. For `yes` rules there is no
+    pruned tree, so use `conditions`. (`no` rules are filtered out before here.)
+    A rate rule whose whole condition pruned away → None → unconditional rate
+    limit, which is the correct outcome."""
+    if rule.get("convertibility") == "partial":
+        return rule.get("convertible_conditions")
+    return rule.get("conditions")
+
+
 def conditions_to_statement(cond, ctx):
     """Recursively convert conditions tree to AWS WAF Statement JSON."""
     if "op" in cond:
@@ -734,6 +749,30 @@ def conditions_to_statement(cond, ctx):
     # IP set reference
     if field == "ip.src" and operator in ("in", "not_in"):
         return _build_ip_statement(value, ctx, cond)
+
+    # Named hostname list: `http.host in $name` → OR of exact host-header matches
+    # (same semantics as an inline `http.host in {"a" "b"}`). Custom lists only;
+    # `$cf.*` managed lists were already pruned as non-convertible upstream.
+    if field == "http.host" and operator in ("in", "not_in") \
+            and isinstance(value, str) and value.startswith("$"):
+        hostnames = ctx.get("hostname_lists", {}).get(value[1:])
+        if hostnames is not None:
+            if not hostnames:
+                ctx["warnings"].append(f"Hostname list '{value}' is empty — rule matches nothing")
+                return {"ByteMatchStatement": {
+                    "SearchString": "MISSING_HOSTNAME_LIST", "PositionalConstraint": "EXACTLY",
+                    "FieldToMatch": {"SingleHeader": {"Name": "host"}},
+                    "TextTransformations": [{"Priority": 0, "Type": "NONE"}]}}
+            stmt = _build_string_set_statement("http.host", hostnames,
+                                               [{"Priority": 0, "Type": "NONE"}], ctx)
+            if operator == "not_in":
+                return {"NotStatement": {"Statement": stmt}}
+            return stmt
+        ctx["warnings"].append(f"Hostname list '{value}' not found in ip_lists")
+        return {"ByteMatchStatement": {
+            "SearchString": "MISSING_HOSTNAME_LIST", "PositionalConstraint": "EXACTLY",
+            "FieldToMatch": {"SingleHeader": {"Name": "host"}},
+            "TextTransformations": [{"Priority": 0, "Type": "NONE"}]}}
 
     # Country match
     if field == "ip.src.country":
@@ -1134,6 +1173,7 @@ def generate(ir):
 
     ip_list_map = {}   # list_name → logical_id (for named lists)
     asn_lists = {}     # list_name → [asn_numbers] (for ASN lists)
+    hostname_lists = {}  # list_name → [hostnames] (for hostname lists)
     inline_ip_set_ids = {}  # ip_set_name → logical_id
     used_ids = set()
 
@@ -1151,6 +1191,8 @@ def generate(ir):
     for lst in ir.get("ip_lists", []):
         name = lst.get("name", "")
         conv = lst.get("conversion", "")
+        if conv == "hostname_set":
+            hostname_lists[name] = lst.get("items", [])
         if conv == "ip_set":
             v4 = lst.get("items_ipv4", [])
             v6 = lst.get("items_ipv6", [])
@@ -1227,7 +1269,8 @@ def generate(ir):
             continue
         ctx = {"refs": refs, "warnings": warnings,
                "rule_name": rule["name"], "ip_list_map": ip_list_map,
-               "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
+               "asn_lists": asn_lists, "hostname_lists": hostname_lists,
+               "inline_ip_set_ids": inline_ip_set_ids,
                "current_rule_ip_sets": rule.get("ip_sets", [])}
         stmt = conditions_to_statement(cond, ctx)
         aws_action = ACTION_MAP.get(rule.get("mode", "block"), {"Block": {}})
@@ -1243,12 +1286,13 @@ def generate(ir):
     for rule in ir.get("custom_rules", {}).get("rules", []):
         if rule.get("convertibility") == "no":
             continue
-        cond = rule.get("conditions") or rule.get("convertible_conditions")
+        cond = rule_conditions(rule)
         if not cond:
             continue
         ctx = {"refs": refs, "warnings": warnings,
                "rule_name": rule["name"], "ip_list_map": ip_list_map,
-               "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
+               "asn_lists": asn_lists, "hostname_lists": hostname_lists,
+               "inline_ip_set_ids": inline_ip_set_ids,
                "current_rule_ip_sets": rule.get("ip_sets", [])}
         stmt = conditions_to_statement(cond, ctx)
 
@@ -1287,11 +1331,12 @@ def generate(ir):
     for rule in ir.get("rate_limiting_rules", {}).get("rules", []):
         if rule.get("convertibility") == "no":
             continue
-        cond = rule.get("conditions") or rule.get("convertible_conditions")
+        cond = rule_conditions(rule)
 
         ctx = {"refs": refs, "warnings": warnings,
                "rule_name": rule["name"], "ip_list_map": ip_list_map,
-               "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
+               "asn_lists": asn_lists, "hostname_lists": hostname_lists,
+               "inline_ip_set_ids": inline_ip_set_ids,
                "current_rule_ip_sets": rule.get("ip_sets", [])}
 
         rate_stmt = {
@@ -1463,10 +1508,13 @@ def generate_split(split_ir):
 
     ip_list_map = {}
     asn_lists = {}
+    hostname_lists = {}
 
     for lst in split_ir.get("ip_lists", []):
         name = lst.get("name", "")
         conv = lst.get("conversion", "")
+        if conv == "hostname_set":
+            hostname_lists[name] = lst.get("items", [])
         if conv == "ip_set":
             v4 = lst.get("items_ipv4", [])
             v6 = lst.get("items_ipv6", [])
@@ -1595,7 +1643,8 @@ def generate_split(split_ir):
                 continue
             ctx = {"refs": refs, "warnings": warnings,
                    "rule_name": rule["name"], "ip_list_map": ip_list_map,
-                   "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
+                   "asn_lists": asn_lists, "hostname_lists": hostname_lists,
+               "inline_ip_set_ids": inline_ip_set_ids,
                    "current_rule_ip_sets": rule.get("ip_sets", [])}
             stmt = conditions_to_statement(cond, ctx)
             aws_action = ACTION_MAP.get(rule.get("mode", "block"), {"Block": {}})
@@ -1610,12 +1659,13 @@ def generate_split(split_ir):
         for rule in domain_data.get("custom_rules", []):
             if rule.get("convertibility") == "no":
                 continue
-            cond = rule.get("conditions") or rule.get("convertible_conditions")
+            cond = rule_conditions(rule)
             if not cond:
                 continue
             ctx = {"refs": refs, "warnings": warnings,
                    "rule_name": rule["name"], "ip_list_map": ip_list_map,
-                   "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
+                   "asn_lists": asn_lists, "hostname_lists": hostname_lists,
+               "inline_ip_set_ids": inline_ip_set_ids,
                    "current_rule_ip_sets": rule.get("ip_sets", [])}
             stmt = conditions_to_statement(cond, ctx)
 
@@ -1648,10 +1698,11 @@ def generate_split(split_ir):
         for rule in domain_data.get("rate_limiting_rules", []):
             if rule.get("convertibility") == "no":
                 continue
-            cond = rule.get("conditions") or rule.get("convertible_conditions")
+            cond = rule_conditions(rule)
             ctx = {"refs": refs, "warnings": warnings,
                    "rule_name": rule["name"], "ip_list_map": ip_list_map,
-                   "asn_lists": asn_lists, "inline_ip_set_ids": inline_ip_set_ids,
+                   "asn_lists": asn_lists, "hostname_lists": hostname_lists,
+               "inline_ip_set_ids": inline_ip_set_ids,
                    "current_rule_ip_sets": rule.get("ip_sets", [])}
             rate_stmt = {"RateBasedStatement": {
                 "Limit": rule.get("aws_limit", 100),

@@ -36,7 +36,28 @@ NON_CONVERTIBLE_AWS_EQUIV = {
     "ssl": "CloudFront viewer protocol policy",
     "http.request.version": "CloudFront Function",
     "ip.src.continent": "CloudFront Function with country-to-continent mapping",
+    # Cloudflare MANAGED IP Lists (referenced as a VALUE like `ip.src in $cf.xxx`,
+    # not a field). The full set per Cloudflare's Managed Lists doc — all 5 are IP
+    # lists; there are no managed hostname/ASN lists. AWS has no importable
+    # equivalent, so the closest AWS managed rule group is noted per list. Any
+    # `$cf.*` value is still caught by is_managed_list_value() regardless of this
+    # table, so an unlisted future name is treated as non-convertible too (it just
+    # gets the generic "No direct equivalent" note).
+    "$cf.open_proxies": "AWS WAF Amazon IP reputation list / Anonymous IP list managed rule group",
+    "$cf.anonymizer": "AWS WAF Anonymous IP list managed rule group",
+    "$cf.vpn": "AWS WAF Anonymous IP list managed rule group",
+    "$cf.malware": "AWS WAF Amazon IP reputation list managed rule group",
+    "$cf.botnetcc": "AWS WAF Amazon IP reputation list managed rule group",
 }
+
+
+def is_managed_list_value(value):
+    """A Cloudflare MANAGED list, referenced as a VALUE (e.g. `ip.src in
+    $cf.open_proxies`). These are Cloudflare-curated lists with no importable
+    AWS equivalent — a rule using one is non-convertible (the closest AWS
+    substitute is a managed rule group, surfaced via NON_CONVERTIBLE_AWS_EQUIV).
+    Custom lists (`$block_list_1`) are convertible and are NOT matched here."""
+    return isinstance(value, str) and value.startswith("$cf.")
 
 
 def _extract_fields(cond):
@@ -52,12 +73,21 @@ def _extract_fields(cond):
         f = cond.get("field", "")
         if f:
             fields.add(f)
+        # A managed-list VALUE (e.g. `ip.src in $cf.open_proxies`) makes the leaf
+        # non-convertible even though its FIELD (ip.src) is fine. Surface the
+        # list token as a pseudo-field so the prune/report machinery treats it
+        # like any other non-convertible field (keyed in NON_CONVERTIBLE_AWS_EQUIV).
+        if is_managed_list_value(cond.get("value")):
+            fields.add(cond["value"])
     return fields
 
 
 def is_non_convertible(field):
-    """Check if a field is non-convertible."""
+    """Check if a field (or managed-list pseudo-field like `$cf.open_proxies`)
+    is non-convertible."""
     if field in NON_CONVERTIBLE_FIELDS:
+        return True
+    if is_managed_list_value(field):  # `$cf.*` managed list used as a value
         return True
     if field.startswith("cf.") and field not in NON_CONVERTIBLE_FIELDS:
         return True
@@ -109,6 +139,10 @@ def _prune_non_convertible(cond):
     field = cond.get("field", "")
     if is_non_convertible(field):
         return None, {field}
+    # Leaf whose VALUE is a managed list (`ip.src in $cf.open_proxies`) — prune it
+    # and report the list token (not the field, which is convertible on its own).
+    if is_managed_list_value(cond.get("value")):
+        return None, {cond["value"]}
     return cond, set()
 
 

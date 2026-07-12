@@ -122,7 +122,26 @@ def process_ip_lists(config_path):
             continue
 
         if kind == "hostname":
-            result.append({"name": name, "kind": kind, "conversion": "out_of_scope"})
+            # Hostname lists ARE convertible: `http.host in $list` → an OR of
+            # exact host-header matches (same as an inline `http.host in {...}`).
+            if num_items == 0:
+                result.append({"name": name, "kind": kind, "conversion": "empty"})
+                continue
+            items_path = find_list_items(config_path, "hostname", name)
+            if not items_path:
+                result.append({
+                    "name": name, "kind": kind, "conversion": "hostname_set",
+                    "items": [], "_warning": f"List-Items-hostname-{name}.txt not found"
+                })
+                continue
+            items = read_json_result(items_path)
+            # Cloudflare hostname list items: {"hostname": {"url_hostname": "x"}}
+            hostnames = [it["hostname"]["url_hostname"] for it in items
+                         if isinstance(it.get("hostname"), dict) and it["hostname"].get("url_hostname")]
+            result.append({
+                "name": name, "kind": kind, "conversion": "hostname_set",
+                "items": hostnames
+            })
             continue
 
         if kind == "ip":
@@ -244,10 +263,19 @@ def process_ip_access_rules(config_path):
                                    "value": "{" + " ".join(addresses) + "}"}
             if v4 or v6:
                 entry["ip_sets"] = []
+                set_names = []
                 if v4:
-                    entry["ip_sets"].append({"name": f"{entry['name']}-ipv4", "addresses": v4})
+                    n = f"{entry['name']}-ipv4"
+                    entry["ip_sets"].append({"name": n, "addresses": v4})
+                    set_names.append(n)
                 if v6:
-                    entry["ip_sets"].append({"name": f"{entry['name']}-ipv6", "addresses": v6})
+                    n = f"{entry['name']}-ipv6"
+                    entry["ip_sets"].append({"name": n, "addresses": v6})
+                    set_names.append(n)
+                # Annotate the leaf so the generator can resolve the inline set to
+                # its IP-set resource(s) — the expression parser does this for
+                # custom/rate rules, but IP-access conditions are built by hand.
+                entry["conditions"]["_ip_set_names"] = set_names
 
         elif target == "country":
             entry["conditions"] = {"field": "ip.src.country", "operator": "eq",
