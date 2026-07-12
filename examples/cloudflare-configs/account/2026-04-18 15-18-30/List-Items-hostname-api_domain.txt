@@ -1,0 +1,23 @@
+{
+  "result": [
+    {
+      "id": "000000000000000000000000000000c9",
+      "hostname": {
+        "url_hostname": "api-loadtest.example.com"
+      },
+      "created_on": "2026-04-18T07:10:00Z",
+      "modified_on": "2026-04-18T07:10:00Z"
+    },
+    {
+      "id": "000000000000000000000000000000ca",
+      "hostname": {
+        "url_hostname": "gsquery.example.com"
+      },
+      "created_on": "2026-04-18T07:10:00Z",
+      "modified_on": "2026-04-18T07:10:00Z"
+    }
+  ],
+  "success": true,
+  "errors": [],
+  "messages": []
+}

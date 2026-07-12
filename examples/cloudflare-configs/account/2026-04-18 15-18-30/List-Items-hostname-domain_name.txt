@@ -1,0 +1,23 @@
+{
+  "result": [
+    {
+      "id": "000000000000000000000000000000c7",
+      "hostname": {
+        "url_hostname": "www.example.com"
+      },
+      "created_on": "2026-04-18T07:10:00Z",
+      "modified_on": "2026-04-18T07:10:00Z"
+    },
+    {
+      "id": "000000000000000000000000000000c8",
+      "hostname": {
+        "url_hostname": "test.example.com"
+      },
+      "created_on": "2026-04-18T07:10:00Z",
+      "modified_on": "2026-04-18T07:10:00Z"
+    }
+  ],
+  "success": true,
+  "errors": [],
+  "messages": []
+}

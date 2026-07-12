@@ -80,6 +80,51 @@
       "num_referencing_filters": 0,
       "created_on": "2026-04-18T07:08:33Z",
       "modified_on": "2026-04-18T07:09:02Z"
+    },
+    {
+      "id": "000000000000000000000000000000a6",
+      "name": "admin_access",
+      "kind": "ip",
+      "num_items": 3,
+      "num_referencing_filters": 0,
+      "created_on": "2026-04-18T07:10:00Z",
+      "modified_on": "2026-04-18T07:10:00Z"
+    },
+    {
+      "id": "000000000000000000000000000000a7",
+      "name": "trading_white_ip",
+      "kind": "ip",
+      "num_items": 2,
+      "num_referencing_filters": 0,
+      "created_on": "2026-04-18T07:10:00Z",
+      "modified_on": "2026-04-18T07:10:00Z"
+    },
+    {
+      "id": "000000000000000000000000000000a8",
+      "name": "front_end_ip",
+      "kind": "ip",
+      "num_items": 2,
+      "num_referencing_filters": 0,
+      "created_on": "2026-04-18T07:10:00Z",
+      "modified_on": "2026-04-18T07:10:00Z"
+    },
+    {
+      "id": "000000000000000000000000000000a9",
+      "name": "domain_name",
+      "kind": "hostname",
+      "num_items": 2,
+      "num_referencing_filters": 0,
+      "created_on": "2026-04-18T07:10:00Z",
+      "modified_on": "2026-04-18T07:10:00Z"
+    },
+    {
+      "id": "000000000000000000000000000000aa",
+      "name": "api_domain",
+      "kind": "hostname",
+      "num_items": 2,
+      "num_referencing_filters": 0,
+      "created_on": "2026-04-18T07:10:00Z",
+      "modified_on": "2026-04-18T07:10:00Z"
     }
   ],
   "success": true,
