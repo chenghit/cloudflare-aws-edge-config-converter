@@ -529,8 +529,15 @@ def _rewrite_stmt(stmt, producers, own):
         return _label_match_node(key, prods, own)  # terminal
     for cont in ("AndStatement", "OrStatement"):
         if cont in stmt:
-            return {cont: {"Statements": [_rewrite_stmt(s, producers, own)
-                                          for s in stmt[cont]["Statements"]]}}
+            children = [_rewrite_stmt(s, producers, own)
+                        for s in stmt[cont]["Statements"]]
+            # A rewritten child may itself be a same-type container: a bare
+            # LabelMatch with multiple producing containers expands to an OR, and
+            # if it sat directly inside an OR that would be OR-in-OR — which AWS
+            # REJECTS at deploy (INVALID_NESTED_STATEMENT). Flatten same-type
+            # direct children back to siblings (same rule as _flatten_statements).
+            children = _flatten_statements(children, cont)
+            return {cont: {"Statements": children}}
     if "NotStatement" in stmt:
         return {"NotStatement": {"Statement": _rewrite_stmt(
             stmt["NotStatement"]["Statement"], producers, own)}}
