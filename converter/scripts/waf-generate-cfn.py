@@ -386,14 +386,35 @@ def _pack_block(rules, direct_rbr_budget, direct_ref_budget, managed_wcu,
     placed in source order, so a producer group/rule always precedes the
     consumers that depend on it.
 
-    Strategy (greedy): keep rules DIRECT while the block's direct budget (RBR +
-    refs, counting 1 ref per group created) allows; when direct budget is
-    exhausted, push whole rules into groups. `role_aware` (custom block) segments
-    into maximal same-role runs first and NEVER packs across a role boundary — a
-    group holds only skip-label producers or only consumers (see
-    _rule_is_producer). The rate block is single-role (all RBR consumers), so it
-    packs without role segmentation.
-    """
+    Strategy (MINIMAL packing): keep EVERYTHING at WebACL-direct level by default;
+    only move rules into groups when the block would exceed a hard cap (10 RBR /
+    50 refs), and only enough to get back under. Groups are built from maximal
+    same-role RUNS (role_aware=custom block) so a group never straddles a role
+    boundary — all skip-label producers or all consumers (see _rule_is_producer);
+    a run's group ref sits at the run's SOURCE slot so producers precede consumers.
+    The rate block is single-role (RBR consumers) — no role segmentation.
+
+    Never create a group that doesn't pay for itself: a group costs the WebACL 1
+    ref, so grouping a run of R refs saves R-1 refs. We group the runs that save
+    the most, stopping as soon as the block fits. So a lone 1-ref rule is never
+    grouped (0 savings), but a lone 21-ref rule IS (saves 20)."""
+    # RBR overflow is split at RULE granularity (not whole-run): keep the first
+    # `direct_rbr_budget` RBR direct, peel the rest into overflow. RBR rules carry
+    # ~0 refs, so this is orthogonal to the ref-driven run grouping below. (Only
+    # the rate block has RBR; role_aware custom block has none, so this is a
+    # no-op there.) 12 RBR → 10 direct + [2 peeled → 1 group].
+    rbr_overflow = []
+    if not role_aware and direct_rbr_budget < sum(1 for r in rules if _rule_is_rbr(r)):
+        kept, seen_rbr = [], 0
+        for r in rules:
+            if _rule_is_rbr(r):
+                seen_rbr += 1
+                if seen_rbr > direct_rbr_budget:
+                    rbr_overflow.append(r)
+                    continue
+            kept.append(r)
+        rules = kept
+
     # Segment into runs. role_aware: maximal same-role runs. else: one run.
     if role_aware:
         runs = []
@@ -406,52 +427,67 @@ def _pack_block(rules, direct_rbr_budget, direct_ref_budget, managed_wcu,
     else:
         runs = [(None, list(rules))] if rules else []
 
-    # First pass: everything direct. If it already fits, done (no groups).
-    total_rbr = sum(1 for r in rules if _rule_is_rbr(r))
-    total_refs = sum(_count_refs_in_stmt(r.get("Statement", {})) for r in rules)
-    if total_rbr <= direct_rbr_budget and total_refs <= direct_ref_budget:
-        return [{"kind": "direct", "rule": r} for r in rules], None
-
-    # Overflow strategy (per run, source order preserved; groups built from ONE
-    # run so never straddle a role boundary → never mix skip producers with
-    # consumers). The two budgets pull opposite ways, so route each rule to where
-    # it's CHEAPEST on the WebACL's ref budget:
-    #   - RBR rules: keep DIRECT up to the RBR budget (they cost RBR, ~0 refs);
-    #     RBR beyond the budget goes to a group.
-    #   - ref-bearing non-RBR rules: GROUP them — N such rules share 1 group = 1
-    #     ref, vs N refs if kept direct. This is the big saver (e.g. 60 IP-set
-    #     refs → 2 groups = 2 refs).
-    #   - 0-ref non-RBR rules: keep DIRECT (grouping saves no refs and burns a
-    #     group slot).
-    # 12 RBR → 10 direct + 2 grouped (1 group). 60 ref-rules → 0 direct + 2 groups.
-    slots = []
-    d_rbr = 0
+    # Per-run cost. `grouped` decides placement; start all-direct.
+    run_meta = []
     for role, run in runs:
-        direct_rules, group_rules = [], []
-        for r in run:
-            is_rbr = _rule_is_rbr(r)
-            refs = _count_refs_in_stmt(r.get("Statement", {}))
-            if is_rbr and d_rbr < direct_rbr_budget:
-                direct_rules.append(r); d_rbr += 1
-            elif is_rbr or refs > 0:
-                group_rules.append(r)          # overflow RBR, or any ref-bearing rule
-            else:
-                direct_rules.append(r)         # 0-ref non-RBR — cheap to keep direct
-        for r in direct_rules:
-            slots.append({"kind": "direct", "rule": r})
-        if group_rules:
-            grp, over = _binpack_run(group_rules, managed_wcu)
-            if over:
-                return None, over
-            slots.extend({"kind": "group", "rules": g} for g in grp)
+        rbr = sum(1 for r in run if _rule_is_rbr(r))
+        refs = sum(_count_refs_in_stmt(r.get("Statement", {})) for r in run)
+        run_meta.append({"role": role, "run": run, "rbr": rbr, "refs": refs,
+                         "grouped": False})
 
-    # Verify the WebACL-level budget is actually met (direct refs + 1/group,
-    # direct RBR). If not, the config genuinely can't fit — report over-limit.
-    direct_refs = sum(_count_refs_in_stmt(s["rule"].get("Statement", {}))
-                      for s in slots if s["kind"] == "direct")
-    n_groups = sum(1 for s in slots if s["kind"] == "group")
-    if d_rbr > direct_rbr_budget or direct_refs + n_groups > direct_ref_budget:
-        return None, "cannot peel enough rules to fit direct caps"
+    def _binpacked(m):
+        """The groups a grouped run splits into (cached), or (None, over)."""
+        if "groups" not in m:
+            g, over = _binpack_run(m["run"], managed_wcu)
+            m["groups"], m["over"] = g, over
+        return m["groups"], m["over"]
+
+    def _block_fits():
+        d_rbr = sum(m["rbr"] for m in run_meta if not m["grouped"])
+        d_refs = sum(m["refs"] for m in run_meta if not m["grouped"])
+        n_groups = len(rbr_overflow_groups)  # RBR-overflow group(s) always count
+        for m in run_meta:
+            if m["grouped"]:
+                g, over = _binpacked(m)
+                if over:
+                    return False, over
+                n_groups += len(g)
+        return (d_rbr <= direct_rbr_budget
+                and d_refs + n_groups <= direct_ref_budget), None
+
+    # The peeled RBR overflow is always grouped (bin-packed ≤4 RBR/group).
+    if rbr_overflow:
+        rbr_overflow_groups, over = _binpack_run(rbr_overflow, managed_wcu)
+        if over:
+            return None, over
+    else:
+        rbr_overflow_groups = []
+
+    # Group runs until the block fits, most-ref-savings first (a run of R refs
+    # saves R-1 by grouping). A lone low-ref run is never grouped (0 savings), so
+    # no pointless single-rule groups.
+    while True:
+        ok, over = _block_fits()
+        if over:
+            return None, over
+        if ok:
+            break
+        candidates = [m for m in run_meta if not m["grouped"] and m["refs"] > 1]
+        if not candidates:
+            return None, "cannot peel enough rules to fit direct caps"
+        best = max(candidates, key=lambda m: m["refs"])
+        best["grouped"] = True
+
+    # Build ordered slots in SOURCE order; RBR-overflow group(s) go last (rate
+    # block, after the direct RBR).
+    slots = []
+    for m in run_meta:
+        if not m["grouped"]:
+            slots.extend({"kind": "direct", "rule": r} for r in m["run"])
+        else:
+            g, _ = _binpacked(m)
+            slots.extend({"kind": "group", "rules": grp} for grp in g)
+    slots.extend({"kind": "group", "rules": grp} for grp in rbr_overflow_groups)
     return slots, None
 
 
