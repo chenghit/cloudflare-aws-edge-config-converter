@@ -5,9 +5,17 @@ Reads waf_ir.json and outputs a CloudFormation JSON template containing
 IP sets, regex pattern sets, and two WebACL resources.
 
 Usage:
-    python3 waf-generate-cfn.py <output_dir>
+    python3 waf-generate-cfn.py <output_dir> [--split | --force-no-split]
 
-Exit codes: 0 = OK, 2 = fatal error, 3 = ref count exceeded (auto fallback to split).
+The rule-group overflow packer keeps each WebACL under AWS's hard caps (10
+rate-based rules, 50 reference statements) by offloading overflow into referenced
+rule groups, so the 50-ref limit no longer forces a per-host split. A config can
+still be undeployable if a WebACL's WCU exceeds 5000 or a single rule is too big
+to fit one rule group — those are reported as STATUS: BLOCKED (the template is
+still written so the user can inspect it, then simplify + re-run).
+
+Exit codes: 0 = OK or BLOCKED (template written either way), 2 = fatal (no
+deliverable, e.g. stack exceeds the CloudFormation resource limit).
 """
 import copy, json, sys, os, re, math
 
@@ -1424,18 +1432,28 @@ def generate(ir):
     # WCU and ref counts are computed from the FINAL assembled resources (each
     # WebACL's own effective WCU = its direct rules + the capacity of every rule
     # group it references). The packer already fit RBR/refs under the per-WebACL
-    # caps or reported over_limits; here we surface WCU + any packer over-limits.
+    # caps (rule-group overflow) or reported over_limits; the 50-ref cap can no
+    # longer be exceeded here. We split findings into:
+    #   errors        — FATAL: no point delivering (stack too big to even write)
+    #   blocked       — deliver the CFN, but it WON'T deploy as-is (WCU>5000, or a
+    #                   single rule too big to split); user must simplify + re-run
+    # This matches the decision: always deliver + signal loudly, never silently
+    # succeed and never hard-fail-without-output for an over-limit the user can act on.
 
     errors = []
+    blocked = []
     max_wcu_total = 0
     for wl, wr in webacl_effective_wcu(resources).items():
         max_wcu_total = max(max_wcu_total, wr)
         if wr > MAX_WCU:
-            errors.append(f"WebACL {wl}: WCU {wr} exceeds maximum {MAX_WCU}")
+            blocked.append(f"WebACL {wl}: WCU {wr} exceeds the {MAX_WCU} hard cap — "
+                           f"cannot deploy. Reduce rule complexity in this WebACL's "
+                           f"source rules, then re-run.")
         elif wr > WARN_WCU:
             warnings.append(f"WebACL {wl}: WCU {wr} exceeds {WARN_WCU} (extra charges apply)")
     for over in over_limits:
-        errors.append(f"WebACL {over.get('webacl','?')}: {over['reason']}")
+        blocked.append(f"WebACL {over.get('webacl','?')}: {over['reason']} — cannot "
+                       f"deploy. Simplify the offending rule, then re-run.")
     if len(resources) > MAX_STACK_RESOURCES:
         errors.append(f"Stack resources {len(resources)} exceeds maximum {MAX_STACK_RESOURCES}")
 
@@ -1456,7 +1474,7 @@ def generate(ir):
     }
 
     wcu.total = max_wcu_total  # report the highest per-WebACL WCU
-    return template, wcu, refs, warnings, errors
+    return template, wcu, refs, warnings, errors, blocked
 
 
 def generate_split(split_ir):
@@ -1576,6 +1594,7 @@ def generate_split(split_ir):
     exceeded_domains = []
     domain_ref_counts = {}  # domain → ref count for quota reporting
     over_limits = []        # packer over-limit reports (per domain)
+    blocked = []            # deliverable-but-won't-deploy findings (WCU>5000, etc.)
 
     for domain, domain_data in split_ir.get("domains", {}).items():
         # A throwaway tracker/refs — conditions_to_statement needs them, but the
@@ -1747,11 +1766,18 @@ def generate_split(split_ir):
                 seen_warnings.add(w)
                 warnings.append(f"Domain {domain}: {w}")
 
+        # WCU over the hard cap → deliverable but blocked (user must simplify).
+        if domain_total_wcu > MAX_WCU:
+            blocked.append(f"Domain {domain}: WCU {domain_total_wcu} exceeds the "
+                           f"{MAX_WCU} hard cap — cannot deploy. Simplify this "
+                           f"domain's rules, then re-run.")
         # The packer offloads RBR/ref overflow into rule groups; a residual
-        # over-limit (a single rule too big to split) is surfaced per domain.
+        # over-limit (a single rule too big to split) blocks that domain.
         if over:
             over["domain"] = domain
             over_limits.append(over)
+            blocked.append(f"Domain {domain}: {over['reason']} — cannot deploy. "
+                           f"Simplify the offending rule, then re-run.")
             exceeded_domains.append(f"{domain}: {over['reason']}")
 
     # ── Clean up unreferenced IP sets ────────────────────────────────────────
@@ -1769,12 +1795,7 @@ def generate_split(split_ir):
 
     # ── Quota validation ─────────────────────────────────────────────────────
 
-    # All domains exceeded — fatal
-    if exceeded_domains and len(exceeded_domains) == len(split_ir.get("domains", {})):
-        errors = [f"All {len(exceeded_domains)} domains exceed {MAX_REF_STATEMENTS} ref statement limit"]
-    else:
-        errors = []
-
+    errors = []
     num_webacls = sum(1 for r in resources.values() if r["Type"] == "AWS::WAFv2::WebACL")
     num_ip_sets = sum(1 for r in resources.values() if r["Type"] == "AWS::WAFv2::IPSet")
     if num_webacls > 80:
@@ -1800,7 +1821,8 @@ def generate_split(split_ir):
         "Outputs": outputs,
     }
 
-    return template, max_wcu, max_wcu_domain, warnings, errors, exceeded_domains, dedup, domain_ref_counts
+    return (template, max_wcu, max_wcu_domain, warnings, errors, exceeded_domains,
+            dedup, domain_ref_counts, blocked)
 
 
 # ── WAFv2 API throttle mitigation ─────────────────────────────────────────────
@@ -1964,7 +1986,8 @@ def main():
             sys.exit(1)
         with open(split_path) as f:
             split_ir = json.load(f)
-        template, max_wcu_val, max_wcu_domain, warnings, errors, exceeded_domains, dedup, domain_ref_counts = generate_split(split_ir)
+        (template, max_wcu_val, max_wcu_domain, warnings, errors, exceeded_domains,
+         dedup, domain_ref_counts, blocked) = generate_split(split_ir)
         wcu_display = f"WCU={max_wcu_val} (max, {max_wcu_domain})"
     else:
         ir_path = os.path.join(output_dir, "waf_ir.json")
@@ -1973,7 +1996,7 @@ def main():
             sys.exit(1)
         with open(ir_path) as f:
             ir = json.load(f)
-        template, wcu, refs, warnings, errors = generate(ir)
+        template, wcu, refs, warnings, errors, blocked = generate(ir)
         max_wcu_val = wcu.total
         wcu_display = f"WCU={wcu.total}"
         exceeded_domains = []
@@ -1983,11 +2006,21 @@ def main():
     # Count resources for metadata
     num_ip_sets = sum(1 for r in template["Resources"].values() if r["Type"] == "AWS::WAFv2::IPSet")
 
-    # Write metadata for downstream scripts (readme)
-    meta = {"mode": mode, "dedup": dedup, "ip_sets_total": num_ip_sets}
-    if mode == "legacy":
-        meta["ref_count_per_webacl"] = refs.count
-    else:
+    # Write metadata for downstream scripts (readme). Ref counts are the ACTUAL
+    # post-pack WebACL reference-statement totals (direct IP/regex/rule-group refs
+    # that count against the 50 cap) read from the assembled template — NOT the
+    # pre-pack raw count, which the packer offloads into rule groups. These are
+    # always ≤50 now; the 50-ref cap can no longer force a split.
+    webacl_ref_counts = {
+        r["Properties"]["Name"]: sum(_count_refs_in_stmt(x.get("Statement", {}))
+                                     for x in r["Properties"]["Rules"])
+        for r in template["Resources"].values()
+        if r["Type"] == "AWS::WAFv2::WebACL"}
+    meta = {"mode": mode, "dedup": dedup, "ip_sets_total": num_ip_sets,
+            "ref_counts_per_webacl": webacl_ref_counts,
+            "max_ref_per_webacl": max(webacl_ref_counts.values(), default=0),
+            "blocked_count": len(blocked), "blocked_items": blocked}
+    if mode != "legacy":
         meta["ref_counts_per_domain"] = domain_ref_counts
     meta_path = os.path.join(output_dir, "waf_metadata.json")
     with open(meta_path, "w") as f:
@@ -2015,55 +2048,53 @@ def main():
             seen.add(w)
             print(f"  WARN: {w}", file=sys.stderr)
 
-    # Handle ref count exceeded in legacy mode
-    ref_exceeded = any("Reference statements" in e for e in errors)
-    if ref_exceeded and mode == "legacy":
-        if force_no_split:
-            # Default behavior — downgrade to warning, add POST_ACTION for LLM
-            ref_count = next((int(e.split()[2]) for e in errors if "Reference statements" in e), 0)
-            for e in errors:
-                if "Reference statements" in e:
-                    print(f"  WARN: {e}", file=sys.stderr)
-            errors = [e for e in errors if "Reference statements" not in e]
-            # Store for POST_ACTION output
-            meta["ref_exceeded"] = ref_count
-        else:
-            # --split mode would have been used; this path shouldn't be reached
-            ref_count = next((int(e.split()[2]) for e in errors if "Reference statements" in e), 0)
-            print(f"\n---RESULT---\nSPEC: 1\nSTATUS: PARTIAL\n"
-                  f"REF_COUNT: {ref_count}\nREF_LIMIT: {MAX_REF_STATEMENTS}")
-            sys.exit(3)
-
+    # Fatal errors (e.g. stack too big to even write) — no deliverable, stop.
     if errors:
         for e in errors:
             print(f"  ERROR: {e}", file=sys.stderr)
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: ERROR\nERRORS: {len(errors)}")
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
+              f"ERRORS: {len(errors)}\n"
+              f"CONTEXT: {'; '.join(errors)}")
         sys.exit(2)
 
-    # Handle split mode partial (some domains exceeded ref limit).
-    # Exit 0 so pipeline.sh run_step doesn't treat it as failure.
-    # PARTIAL status in ---RESULT--- tells orchestrator about skipped domains.
-    if exceeded_domains:
-        failed_items = "\n".join(f"  {d}" for d in exceeded_domains)
-        print(f"OK (partial): {num_resources} resources, {num_webacls} WebACLs, "
-              f"{num_ip_sets} IP sets, {wcu_display}")
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: PARTIAL\n"
-              f"TEMPLATE_COUNT: {template_files['count']}\nTEMPLATES: {','.join(template_files['files'])}\n"
-              f"TEMPLATE_SIZE: {compact_size}\n"
-              f"RESOURCES: {num_resources}\nWEBACLS: {num_webacls}\n"
-              f"IP_SETS: {num_ip_sets}\nWCU: {max_wcu_val}\nMODE: {mode}\n"
-              f"SUCCEEDED: {num_webacls}\nFAILED: {len(exceeded_domains)}\n"
-              f"FAILED_ITEMS:\n{failed_items}")
-        return  # exit 0
+    # The template is written either way. `blocked` = findings that make it
+    # UNDEPLOYABLE as-is but that the user can fix (WCU>5000, a single rule too
+    # big to split). We still deliver the CFN + a loud BLOCKED signal so the user
+    # can inspect it, clean up the source, and re-run — never silently succeed,
+    # never hard-fail-without-output. `common_tail` carries the artifact facts
+    # shared by every terminal status.
+    common_tail = (f"TEMPLATE_COUNT: {template_files['count']}\n"
+                   f"TEMPLATES: {','.join(template_files['files'])}\n"
+                   f"TEMPLATE_SIZE: {compact_size}\n"
+                   f"RESOURCES: {num_resources}\nWEBACLS: {num_webacls}\n"
+                   f"IP_SETS: {num_ip_sets}\nWCU: {max_wcu_val}\nMODE: {mode}")
+
+    if blocked:
+        for b in blocked:
+            print(f"  BLOCKED: {b}", file=sys.stderr)
+        items = "\n".join(f"  {b}" for b in blocked)
+        print(f"BLOCKED: {num_resources} resources, {num_webacls} WebACLs, "
+              f"{num_ip_sets} IP sets, {wcu_display} — template written but NOT deployable as-is")
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: BLOCKED\n{common_tail}\n"
+              f"BLOCKED_COUNT: {len(blocked)}\nBLOCKED_ITEMS:\n{items}\n"
+              f"ACTION: FIX\n"
+              f"CONTEXT: The CloudFormation was generated but will be REJECTED at "
+              f"deploy time by the item(s) above (AWS hard caps). Do NOT deploy as-is. "
+              f"Reduce the offending WebACL/rule complexity in the source Cloudflare "
+              f"config (or split affected hosts), then re-run the pipeline.")
+        return  # exit 0 — pipeline completes; BLOCKED status carries the signal
 
     print(f"OK: {num_resources} resources, {num_webacls} WebACLs, "
           f"{num_ip_sets} IP sets, {wcu_display}")
-    result_block = (f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\n"
-          f"TEMPLATE_COUNT: {template_files['count']}\nTEMPLATES: {','.join(template_files['files'])}\n"
-          f"TEMPLATE_SIZE: {compact_size}\n"
-          f"RESOURCES: {num_resources}\nWEBACLS: {num_webacls}\n"
-          f"IP_SETS: {num_ip_sets}\nWCU: {max_wcu_val}\nMODE: {mode}")
-    print(result_block)
+    # WCU is computed by a calculator proven exact vs CheckCapacity, so this is a
+    # safety-net note, not a required step. VERIFY_WCU_CMD lets an agent/user
+    # optionally reconcile rule-group Capacity against AWS before deploying.
+    print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\n{common_tail}\n"
+          f"VERIFY_WCU_CMD: python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'waf-verify-wcu.py')} {output_dir} --profile <aws-profile>\n"
+          f"VERIFY_WCU_NOTE: Optional pre-deploy check. Local WCU is calculator-exact; "
+          f"run this only to reconcile rule-group Capacity against AWS CheckCapacity "
+          f"(needs an AWS profile). Without a profile, deploy as-is — Capacity can "
+          f"only ever be slightly high, which still deploys.")
 
 
 if __name__ == "__main__":

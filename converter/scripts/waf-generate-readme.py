@@ -73,36 +73,16 @@ def main():
     ip_sets_total = meta.get("ip_sets_total", 0)
     compact_size = meta.get("compact_size", 0)
 
-    # WCU display
-    if mode == "legacy":
-        wcu_val = meta.get("ref_count_per_webacl", 0)  # not WCU, but we need WCU from IR
-    ref_count_display = ""
-    if mode == "legacy":
-        ref_count_display = f"{meta.get('ref_count_per_webacl', 0)}/50 per WebACL"
-    else:
-        domain_refs = meta.get("ref_counts_per_domain", {})
-        if domain_refs:
-            max_ref = max(domain_refs.values())
-            ref_count_display = f"{max_ref}/50 max per WebACL"
+    # Actual post-pack reference-statement count per WebACL (overflow refs are
+    # offloaded into rule groups, so this is always ≤50 — the cap can't force a
+    # split anymore).
+    max_ref = meta.get("max_ref_per_webacl", 0)
+    ref_count_display = f"{max_ref}/50 max per WebACL" if max_ref else ""
 
     lines = [
         "# AWS WAF CloudFormation Deployment Guide",
         "",
     ]
-
-    # Add prominent warning if IP set references exceed 50
-    ref_exceeded = meta.get("ref_exceeded")
-    if ref_exceeded:
-        lines += [
-            "> ⚠️ **WARNING: This WebACL references "
-            f"{ref_exceeded} IP sets (AWS limit: 50). "
-            "Deployment will fail with this configuration.**",
-            ">",
-            "> Options:",
-            "> 1. Contact AWS Sales",
-            "> 2. Re-run conversion with `--force-split` to split into per-domain WebACLs",
-            "",
-        ]
 
     lines += [
         "## Overview",
@@ -129,55 +109,33 @@ def main():
         f"| WebACLs | {len(webacl_names)} | 100 per region | Soft limit, can request increase |",
     ]
 
-    if mode == "legacy":
-        ref_count = meta.get("ref_count_per_webacl", 0)
-        lines.append(f"| Ref statements (per WebACL) | {ref_count} | 50 | **Hard limit** — both WebACLs share the same rules |")
-    else:
-        domain_refs = meta.get("ref_counts_per_domain", {})
-        if domain_refs:
-            max_ref = max(domain_refs.values())
-            max_domain = [d for d, c in domain_refs.items() if c == max_ref][0]
-            lines.append(f"| Ref statements (max per WebACL) | {max_ref} | 50 | **Hard limit** — highest: {max_domain} |")
+    webacl_refs = meta.get("ref_counts_per_webacl", {})
+    if webacl_refs:
+        max_ref = meta.get("max_ref_per_webacl", 0)
+        max_name = max(webacl_refs, key=webacl_refs.get)
+        lines.append(f"| Ref statements (max per WebACL) | {max_ref} | 50 | "
+                     f"**Hard limit** — highest: {max_name}. Overflow auto-packed "
+                     f"into rule groups to stay ≤50 |")
 
     lines += [
         "",
     ]
 
-    # Per-WebACL detail (collapsible for large configs)
-    if mode == "legacy":
-        ref_count = meta.get("ref_count_per_webacl", 0)
+    # Per-WebACL detail (collapsible for large configs). Counts are the actual
+    # post-pack direct reference statements per WebACL (always ≤50).
+    if webacl_refs:
         lines += [
             "<details>",
             "<summary>Per-WebACL reference statement detail</summary>",
             "",
             "| WebACL | Ref Statements | Status |",
             "|--------|---------------|--------|",
-            f"| waf-website | {ref_count}/50 | {'⚠️ Near limit' if ref_count > 40 else '✅ OK'} |",
-            f"| waf-api-file | {ref_count}/50 | {'⚠️ Near limit' if ref_count > 40 else '✅ OK'} |",
-            "",
-            "</details>",
-            "",
         ]
-    else:
-        domain_refs = meta.get("ref_counts_per_domain", {})
-        if domain_refs:
-            lines += [
-                "<details>",
-                "<summary>Per-WebACL reference statement detail</summary>",
-                "",
-                "| WebACL (domain) | Ref Statements | Status |",
-                "|-----------------|---------------|--------|",
-            ]
-            for domain in sorted(domain_refs):
-                count = domain_refs[domain]
-                if count > 50:
-                    status = "❌ Exceeded — WebACL not created"
-                elif count > 40:
-                    status = "⚠️ Near limit"
-                else:
-                    status = "✅ OK"
-                lines.append(f"| {domain} | {count}/50 | {status} |")
-            lines += ["", "</details>", ""]
+        for name in sorted(webacl_refs):
+            count = webacl_refs[name]
+            status = "⚠️ Near limit" if count > 40 else "✅ OK"
+            lines.append(f"| {name} | {count}/50 | {status} |")
+        lines += ["", "</details>", ""]
 
     lines += [
         "## Prerequisites",
@@ -449,10 +407,31 @@ def main():
         ]
 
     lines += [
-        "- **IP set + regex set references per WebACL**: 50 (**hard limit**, cannot be increased via Service Quotas).",
+        "- **Reference statements per WebACL**: 50 (**hard limit** — counts IP-set + "
+        "regex-set + rule-group + AWS-managed-rule-group references). Overflow (IP-set "
+        "refs and rate-based rules) is automatically offloaded into referenced rule "
+        "groups, so a WebACL stays ≤50 without a per-host split.",
+        "- **Rate-based rules per WebACL**: 10 (**hard limit**). Overflow is packed into "
+        "rule groups (≤4 rate-based rules each), which don't count against this 10.",
+        "- **WCU per WebACL**: 5000 (**hard limit**). Over 1500 incurs extra charges. If a "
+        "WebACL exceeds 5000 the tool reports `STATUS: BLOCKED` — simplify rules and re-run.",
         "- **IP sets per account per region**: 100 (soft limit, can request increase).",
         "- **WebACLs per account per region**: 100 (soft limit, can request increase).",
         "- **Rate-based rules**: AWS WAF minimum rate limit is 10 requests per evaluation window.",
+        "",
+        "### Optional: verify WCU against AWS before deploying",
+        "",
+        "The generated rule-group `Capacity` values come from a local calculator that is "
+        "exact against AWS `CheckCapacity`. To reconcile them against your account before "
+        "deploying (needs an AWS profile), run:",
+        "",
+        "```bash",
+        "python3 waf-verify-wcu.py <output_dir> --profile <your-aws-profile>",
+        "```",
+        "",
+        "It only ever corrects the integer `Capacity` field (never rule logic) and refreshes "
+        "managed-rule-group WCU numbers. Without a profile, deploy as-is — a rule group's "
+        "declared `Capacity` can only ever be slightly high, which still deploys.",
         "",
     ]
 

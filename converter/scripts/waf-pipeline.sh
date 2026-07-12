@@ -95,28 +95,34 @@ fi
 run_step "Generate README" \
     python3 "$SCRIPTS_DIR/waf-generate-readme.py" "$OUTPUT_DIR"
 
-# Check if ref count exceeded (from metadata)
-REF_EXCEEDED=""
+# Surface an over-limit BLOCKED state from the generator, if any. The generator
+# always writes the template but sets a marker when it won't deploy as-is
+# (WCU>5000, or a rule too big to pack). The packer keeps refs/RBR under the
+# hard caps, so the old "50-ref → --force-split" fallback is gone.
+BLOCKED=""
 if command -v jq &>/dev/null && [ -f "$OUTPUT_DIR/waf_metadata.json" ]; then
-    REF_EXCEEDED=$(jq -r '.ref_exceeded // empty' "$OUTPUT_DIR/waf_metadata.json" 2>/dev/null)
+    BLOCKED=$(jq -r '.blocked_count // empty' "$OUTPUT_DIR/waf_metadata.json" 2>/dev/null)
 fi
 
 echo ""
 echo "---RESULT---"
 echo "SPEC: 1"
-echo "STATUS: OK"
+if [ -n "$BLOCKED" ] && [ "$BLOCKED" != "0" ]; then
+    echo "STATUS: BLOCKED"
+else
+    echo "STATUS: OK"
+fi
 echo "OUTPUT_DIR: $OUTPUT_DIR"
 echo "TEMPLATE: $OUTPUT_DIR/waf-cloudformation.json"
-if [ -n "$REF_EXCEEDED" ]; then
-    echo "POST_ACTION: Do BOTH of the following, in order:"
-    echo "  1. PRINT this WARNING to the user exactly as-is:"
-    echo "     ⚠️  WARNING: AWS WAF IP set reference limit exceeded — deployment WILL FAIL as-is."
-    echo "     This WebACL references $REF_EXCEEDED IP sets, but AWS WAF allows at most 50 IP set references per WebACL."
-    echo "     Deploying the generated CloudFormation template without changes will fail at create/update time."
-    echo "     To fix, choose ONE:"
-    echo "       a. Request an AWS WAF quota increase (contact AWS Sales/Support)."
-    echo "       b. Re-run the conversion with --force-split to split into per-domain WebACLs (each stays under the 50-reference limit)."
-    echo "  2. If user language is not English, translate README_aws-waf-deployment.md to user language and save as README_aws-waf-deployment_{lang}.md"
+if [ -n "$BLOCKED" ] && [ "$BLOCKED" != "0" ]; then
+    echo "POST_ACTION: PRINT this WARNING to the user exactly as-is, then STOP (do not deploy):"
+    echo "  ⚠️  WARNING: the generated WebACL exceeds an AWS hard cap and WILL be rejected at deploy."
+    echo "  See BLOCKED_ITEMS in the generate step's ---RESULT--- for which WebACL/rule and why."
+    echo "  Fix: reduce that WebACL's rule complexity (or split the affected hosts) in the source"
+    echo "  Cloudflare config, then re-run this pipeline. The template was written for inspection only."
 else
-    echo "POST_ACTION: If user language is not English, translate README_aws-waf-deployment.md to user language and save as README_aws-waf-deployment_{lang}.md"
+    echo "POST_ACTION: Before deploying, you MAY reconcile rule-group WCU against AWS with:"
+    echo "  python3 $SCRIPTS_DIR/waf-verify-wcu.py $OUTPUT_DIR --profile <aws-profile>"
+    echo "  (Optional — local WCU is calculator-exact. It only corrects the Capacity integer, never rule logic.)"
+    echo "  If user language is not English, translate README_aws-waf-deployment.md to user language and save as README_aws-waf-deployment_{lang}.md"
 fi

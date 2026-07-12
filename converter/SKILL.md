@@ -63,10 +63,11 @@ If the user already has a CloudflareBackup output directory, skip straight to co
 | `waf-validate-ir.py` | Python | Round-trip validation + consistency checks |
 | `waf-split-by-host.py` | Python | Split IR by domain — strip host conditions, re-derive scope-down |
 | `waf-generate-cfn.py` | Python | IR JSON → CloudFormation template (legacy or per-domain WebACLs) |
+| `waf-verify-wcu.py` | Python | Optional pre-deploy: reconcile rule-group Capacity vs AWS CheckCapacity (needs a profile) |
 
 **No LLM subagents are used in the WAF pipeline.** All analysis, validation, and generation is deterministic Python.
 
-**Default mode**: Legacy (1-2 WebACLs, no split). If IP set references exceed 50, the pipeline continues and outputs a `POST_ACTION` warning for the user. Use `--force-split` to generate per-domain WebACLs instead.
+**Default mode**: Legacy (2 WebACLs, no per-host split). A rule-group overflow packer keeps each WebACL under AWS's hard caps (10 rate-based rules, 50 reference statements) by offloading overflow into referenced rule groups — so exceeding 50 refs no longer forces a split. `--force-split` (per-domain WebACLs) remains available if a user wants it for other reasons. A config is only undeployable when a WebACL's WCU exceeds 5000 or a single rule is too big to fit one rule group; the generator then emits `STATUS: BLOCKED` (template still written for inspection) — surface it and tell the user to simplify + re-run.
 
 ### CDN Pipeline
 
@@ -200,8 +201,10 @@ No LLM subagents are used. All stages are Python scripts invoked via `execute_ba
 
    Parse the `---RESULT---` block:
    - `STATUS: OK` → proceed to Step 4.
-   - `STATUS: ERROR` → report the `CONTEXT` field to the user and stop.
+   - `STATUS: BLOCKED` → the template WAS written but exceeds an AWS hard cap (see `BLOCKED_ITEMS`: WCU>5000, or a rule too big to pack) and will be rejected at deploy. Report `BLOCKED_ITEMS`/`CONTEXT` to the user, tell them to simplify the named WebACL/rule (or split affected hosts) and re-run. Do NOT present it as ready to deploy.
+   - `STATUS: FATAL` / `STATUS: ERROR` → report the `CONTEXT` field to the user and stop.
    - `POST_ACTION` field → if present, follow the instruction. Multi-line values use 2-space indented continuation lines. If the instruction says "exactly as-is", print the content verbatim without translation or modification. A single `POST_ACTION` may instruct multiple steps (e.g. print a warning AND translate the README for non-English users) — perform all of them.
+   - `VERIFY_WCU_CMD` field → an OPTIONAL pre-deploy WCU reconciliation (needs an AWS profile). Mention it to the user as available; only run it if they provide a profile. Local WCU is calculator-exact, so skipping it is safe.
 
 ---
 

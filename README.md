@@ -65,9 +65,9 @@ Not all Cloudflare features have CloudFront equivalents. Non-convertible items a
 
 Your AI agent reads `converter/SKILL.md` and acts as an orchestrator that runs deterministic Python scripts for both WAF and CDN pipelines.
 
-**WAF pipeline** (all Python, zero LLM): analyze IP lists → analyze custom rules → analyze rate limits → merge → validate → generate CloudFormation → **auto-fallback to per-domain split if ref limit exceeded**
+**WAF pipeline** (all Python, zero LLM): analyze IP lists → analyze custom rules → analyze rate limits → merge → validate → generate CloudFormation (**rule-group overflow packer keeps each WebACL under AWS's hard caps**)
 
-The WAF pipeline first tries legacy mode (2 WebACLs). If IP set reference statements exceed the per-WebACL hard limit of 50, it automatically falls back to per-domain WebACLs (one per proxied domain). In per-domain mode, host-specific rules are placed only in the relevant domain's WebACL, and host conditions are stripped (redundant when a WebACL serves one domain). Each WebACL includes search engine labeling (Googlebot/Bingbot/YandexBot), Anti-DDoS with search engine exclusion, and an always-on challenge rule (Count mode — user activates after review).
+The WAF pipeline generates 2 WebACLs (website + api). A rule-group overflow packer keeps each WebACL under AWS's hard per-WebACL caps — 10 rate-based rules and 50 reference statements — by offloading overflow into referenced rule groups (which don't count against those caps). So exceeding 50 references no longer forces a per-host split. `--force-split` (one WebACL per proxied domain, with host conditions stripped) remains available if you want it for other reasons. Each WebACL includes search engine labeling (Googlebot/Bingbot/YandexBot), Anti-DDoS with search engine exclusion, and an always-on challenge rule (Count mode — user activates after review). A config is only undeployable if a WebACL's WCU exceeds the 5000 hard cap or a single rule is too complex to fit one rule group; the tool then reports `STATUS: BLOCKED` (template still written for inspection).
 
 **CDN pipeline** (0 LLM stages + 10 Python scripts): **parse DNS + generate scope (Python)** → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → **generate shared policies (Python)** → **generate per-domain Terraform scaffold (Python)** → **generate per-domain test scripts (Python)** → **generate per-domain JS (Python)** → **validate JS (Python)**
 
@@ -203,7 +203,7 @@ The tool generates a `data "aws_acm_certificate"` lookup that finds your existin
 - **IP set + regex set references per WebACL**: 50 (**hard limit**, cannot be increased via Service Quotas)
 - **WebACLs per account per region**: 100 (soft limit)
 
-The pipeline first tries legacy mode (2 WebACLs). If reference statements exceed the per-WebACL hard limit of 50, it automatically falls back to per-domain WebACLs and enables cross-rule IP set deduplication when inline IP sets exceed 100. The generated deployment README includes a Quota Usage section showing actual consumption vs limits. See [Why CloudFormation](./docs/why-cloudformation.md) for details.
+The pipeline generates 2 WebACLs and uses a rule-group overflow packer to keep each under the 10-rate-based-rule and 50-reference-statement hard limits (overflow goes into referenced rule groups, which don't count against those caps). Cross-rule IP set deduplication kicks in when inline IP sets exceed 100. The generated deployment README includes a Quota Usage section showing actual consumption vs limits. See [Why CloudFormation](./docs/why-cloudformation.md) for details.
 
 </details>
 

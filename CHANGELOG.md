@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-07-12
+
+### WAF converter: rule-group overflow packer, exact WCU, and a unified over-limit signal
+
+A pass over the WAF pipeline so it fits AWS's hard per-WebACL caps without a per-host WebACL explosion, and reports the truth about deployability. Every AWS fact below was confirmed with dual subagents AND a live CloudFormation deploy on a real account (the deploy caught four bugs the green test suite missed).
+
+**Rule-group overflow packer** (`waf-generate-cfn.py`)
+- AWS caps a WebACL at 10 rate-based rules and 50 reference statements (both non-adjustable). Instead of splitting per host (100 domains → 100 WebACLs), overflow rate-based rules and IP-set refs are offloaded into referenced **rule groups** — which escape both caps (a rule group holds ≤4 RBR / ≤50 refs, and the WebACL pays just 1 reference for the whole group). The 22-RBR / 57-ref example now fits in 2 WebACLs. Confirmed live: RBR-in-group and refs-in-group don't count against the WebACL's 10/50.
+- Cloudflare phase order (custom → rate → managed, contiguous) and label semantics are preserved: a block's rule-group refs sit right after that block's direct rules, and every `LabelMatchStatement` is rewritten to the correct form — **bare** key when the producer is in the consumer's own container, the producer's fully-qualified `awswaf:${AWS::AccountId}:rulegroup|webacl:<name>:<label>` (via `Fn::Sub`, portable) when cross-container, OR-combined when a label is produced in several containers. A self-container prefix is invalid and is never emitted (that was a live deploy rejection). Wired into both `generate()` and `generate_split()`.
+
+**Exact WCU** (`compute_rules_wcu` / `compute_rule_wcu`)
+- The WCU calculator is now a flat recursive statement-sum matching AWS's model, including the modifiers that were missing: ByteMatch 2-or-10 by positional constraint, text-transforms +10 per non-NONE entry per statement, AllQueryArguments +10, JsonBody ×2, IPSet ForwardedIP-ANY +4, RBR +30/custom-key + scope-down. **RuleLabels** cost is pooled per container as `ceil(total_labels/5)` (AWS sums `0.2`/label across the whole batch, one ceiling at the end) — not per-rule; getting this wrong under-declared a rule group's Capacity and failed the deploy. Triple-verified: AWS worked example (15), a mixed ruleset (real CheckCapacity 727), and live WebACL Capacity matching the calculator exactly (2190 / 2149 / 1404).
+
+**Managed rule groups count toward the 50-ref cap**
+- Corrected a wrong assumption: AWS managed rule groups are NOT free against the 50-reference limit (live: 45 IP refs + 5 managed = 50 ok, 46 + 5 = 51 rejected). `_count_refs_in_stmt` now counts all four reference types (IP-set, regex-set, own-rule-group, managed-rule-group), and the packer reserves budget for the managed refs.
+
+**Serial throttle mitigation**
+- WAFv2's write API is 1 TPS; the previous "batches of 5 in parallel + rely on CFN retries" still throttled and rolled back on 55 IP sets. Switched to a fully serial `DependsOn` chain so CloudFormation creates resources one at a time.
+
+**Unified over-limit signal + optional WCU verify**
+- The old "refs > 50 → auto-fallback to `--force-split`" path is gone (the packer makes it unreachable) — removed from the generator, pipeline, README generator, SKILL.md, and README.md. A config is now undeployable only when a WebACL's WCU exceeds 5000 or a single rule is too big to fit one rule group; the generator then **still writes the template** and emits `STATUS: BLOCKED` (exit 0) with the specific WebACL/reason, so the user can inspect it, simplify the source, and re-run — never a silent success, never a hard-fail-without-output. Truly fatal cases (stack over the CloudFormation resource limit) stay `STATUS: FATAL`.
+- New `waf-verify-wcu.py <out> --profile <p>`: an OPTIONAL pre-deploy step that reconciles each rule group's declared `Capacity` against AWS `CheckCapacity` (using a throwaway IP set + regex set as ref stand-ins). It rewrites **only** the integer `Capacity` — a hash of the group's `Rules` before/after guarantees zero logic change — and refreshes the managed-rule-group WCU table via `DescribeManagedRuleGroup`. Local WCU is already calculator-exact, so this is a safety net, not a required step; without a profile, deploy as-is (a rule group's Capacity can only ever be slightly high, which still deploys).
+
+Verified: the full example deploys to `CREATE_COMPLETE` (65 resources, 2 WebACLs) and one per-domain split WebACL deploys too, both with AWS-computed Capacity matching the converter exactly; `waf-verify-wcu.py` is a clean no-op on the generated template; regression suites for the WCU calculator and the packer (bare/FQN/OR label keys, phase order, cap fitting) all pass.
+
 ## 2026-07-11
 
 ### CDN converter: per-host model hardening, origin fidelity, viewer-CFF-only, and conditional cache bypass
