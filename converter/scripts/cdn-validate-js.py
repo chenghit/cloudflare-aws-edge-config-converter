@@ -329,10 +329,54 @@ def main():
             f"('Post-Deployment: S3 Bucket Policy'). Tell the user this is required. "
             f"(S3 website-endpoint origins instead need public read access — no OAC.)")
 
+    # Build the DEPLOY_SUMMARY from cdn_summary.json (written by cdn-finalize +
+    # cdn-generate-js). This is the LAST thing the agent sees for the CDN
+    # pipeline, so every deploy concern must be here — intermediate step RESULTs
+    # get diluted by later steps (esp. report translation).
+    summary_lines = []
+    try:
+        with open(os.path.join(output_dir, "cdn_summary.json")) as f:
+            _s = json.load(f)
+    except Exception:
+        _s = {}
+    if _s:
+        summary_lines.append(f"Domains: {_s.get('domains','?')}, unique policies: "
+                             f"{_s.get('total_policies','?')}, CFF: {_s.get('cff_dedup','?')}, "
+                             f"KVS stores: {_s.get('kvs_total','?')}")
+        if _s.get("non_convertible_items"):
+            summary_lines.append(f"{_s['non_convertible_items']} non-convertible item(s) — "
+                                 f"see conversion_report.md.")
+        if _s.get("skipped_domains"):
+            summary_lines.append(f"SKIPPED domains: {', '.join(_s['skipped_domains'])}")
+        for w in _s.get("warnings", []):
+            summary_lines.append(f"QUOTA/WARNING — {w}")
+    # ACM is the hardest prerequisite: the generated Terraform reads each cert via
+    # `data "aws_acm_certificate"` (or an explicit ARN), so `terraform plan`
+    # FAILS immediately if the cert isn't already ISSUED in us-east-1. This is a
+    # deploy blocker for EVERY CDN deployment — always surface it, first.
+    summary_lines.append("PRE-DEPLOY BLOCKER — ACM certificates MUST exist and be ISSUED in "
+                         "us-east-1 (N. Virginia) BEFORE `terraform apply`, one covering every "
+                         "custom domain (a `*.apex` wildcard works). CloudFront only accepts "
+                         "us-east-1 certs; the Terraform looks them up via a data source, so a "
+                         "missing/pending/wrong-region cert fails `terraform plan` outright. "
+                         "Provision + validate them first.")
+    if _s.get("s3_oac_bucket_policy_required"):
+        summary_lines.append("PRE-DEPLOY ACTION — S3-origin domains need a manual S3 bucket "
+                             "policy for the CloudFront OAC (else 403); policy JSON in "
+                             "conversion_report.md. See POST_ACTION.")
+    deploy_summary = ("\nDEPLOY_SUMMARY:\n" + "\n".join(f"  {l}" for l in summary_lines)) \
+        if summary_lines else ""
+
     if fail_count == 0:
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nDOMAINS: {len(results)}\nPASSED: {pass_count}\n"
-              f"POST_ACTION: If user language is not English, translate conversion_report.md to user language and save as conversion_report_{{lang}}.md"
-              f"{s3_step}")
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nDOMAINS: {len(results)}\nPASSED: {pass_count}"
+              f"{deploy_summary}\n"
+              f"POST_ACTION: Do ALL of the following, in order:"
+              f"\n  1. REPORT the full DEPLOY_SUMMARY above to the user — every line — as the CDN completion summary."
+              f"\n  2. Before ANY `terraform apply`, confirm with the user that ACM certificates are"
+              f" already ISSUED in us-east-1 for every custom domain (see the PRE-DEPLOY BLOCKER line)."
+              f" If not, tell them to provision + validate them first — apply will fail otherwise."
+              f"{s3_step}"
+              f"\n  3. If user language is not English, translate conversion_report.md to that language as conversion_report_{{lang}}.md.")
     else:
         failed_items = "\n".join(
             f"  {r['hostname']}: {', '.join(c['name'] + '=' + c['status'] for c in r['checks'] if c['status'] == 'FAIL')}"

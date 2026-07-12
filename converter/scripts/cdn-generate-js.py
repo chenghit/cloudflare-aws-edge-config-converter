@@ -1822,6 +1822,43 @@ if __name__ == "__main__":
     elif actual_count > 80:
         print(f"  WARN: CFF count {actual_count} approaching default quota 100.", file=sys.stderr)
 
+    # KVS quota check (POST-dedup — the real number of aws_cloudfront_key_value_store
+    # resources). = shared groups (each shared by ≥2 domains) + standalone stores
+    # (a domain whose KVS content is unique). cdn-finalize can't compute this (dedup
+    # happens here), so it must be checked here, NOT counted per-host there.
+    kvs_standalone = sum(1 for san in kvs_hashes if san not in shared_kvs_domains)
+    kvs_total = len(shared_kvs_groups) + kvs_standalone
+    kvs_warn = None
+    if kvs_total > 50:
+        kvs_warn = (f"{kvs_total} KeyValueStores exceed default quota 50 (SOFT). "
+                    f"Request a quota increase via Service Quotas before deploying.")
+    elif kvs_total > 40:
+        kvs_warn = f"{kvs_total} KeyValueStores approaching default quota 50 (SOFT)."
+    if kvs_warn:
+        print(f"  WARN: {kvs_warn}", file=sys.stderr)
+
+    # Augment cdn_summary.json (written by cdn-finalize) with post-dedup CFF/KVS
+    # counts + any CFF/KVS quota warning, so the last step (cdn-validate-js) can
+    # summarize them in the final ---RESULT---.
+    summary_path = os.path.join(output_dir, "cdn_summary.json")
+    try:
+        with open(summary_path) as f:
+            _summary = json.load(f)
+    except Exception:
+        _summary = {}
+    _summary["cff_total"] = actual_count
+    _summary["cff_dedup"] = f"{original_count} -> {actual_count}"
+    _summary["kvs_total"] = kvs_total
+    _extra = list(_summary.get("warnings", []))
+    if actual_count > 100:
+        _extra.append(f"{actual_count} CloudFront Functions exceed the default quota 100 "
+                      f"(raise via AWS Support, or deploy a subset of domains).")
+    if kvs_warn:
+        _extra.append(kvs_warn)
+    _summary["warnings"] = _extra
+    with open(summary_path, "w") as f:
+        json.dump(_summary, f, indent=2, ensure_ascii=False)
+
     # ── Report ───────────────────────────────────────────────────────────────
 
     ok_count = len(all_vr)
@@ -1830,7 +1867,8 @@ if __name__ == "__main__":
     if fail_count == 0:
         print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nDOMAINS: {ok_count}\nGENERATED: {ok_count}\n"
               f"CFF_TOTAL: {actual_count}\nCFF_SHARED: {len(written_shared)}\n"
-              f"CFF_INDEPENDENT: {indep_count}\nCFF_DEDUP_RATIO: {original_count} -> {actual_count}")
+              f"CFF_INDEPENDENT: {indep_count}\nCFF_DEDUP_RATIO: {original_count} -> {actual_count}\n"
+              f"KVS_TOTAL: {kvs_total}")
     elif ok_count > 0:
         failed_items = "\n".join(f"  {h}: {s} — {d}" for h, s, d in failed)
         print(f"\n---RESULT---\nSPEC: 1\nSTATUS: PARTIAL\nSUCCEEDED: {ok_count}\nFAILED: {fail_count}\n"

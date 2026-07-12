@@ -9,7 +9,15 @@ Usage:
 
 Exit codes: 0 = OK, 1 = error.
 """
-import json, sys, os
+import json, sys, os, hashlib
+
+
+def custom_orp_hash(headers):
+    """Stable 8-char id for a custom-ORP header set. MUST match the identical
+    helper in cdn-generate-shared-policies.py so this data-source name lines up
+    with the resource name generated there. Sorted so order can't change it."""
+    key = ",".join(sorted(headers))
+    return hashlib.sha256(key.encode()).hexdigest()[:8]
 
 
 def load_ir(final_dir, hostname):
@@ -149,8 +157,11 @@ def _orp_reference(beh, orp_headers, san):
         # custom_orp forwards all viewer headers (incl. Host) + CloudFront-*
         # headers + all cookies/query strings. A Host override still works: the
         # CFF updateRequestOrigin(hostHeader=…) sets the origin Host regardless.
-        # A resource reference (unquoted HCL).
-        return f"aws_cloudfront_origin_request_policy.custom_orp_{san}.id"
+        # SHARED across domains with the same header set (deduped in
+        # cdn-generate-shared-policies) and referenced here by a data source —
+        # 54 identical per-domain resources used to blow the 20 custom-ORP quota.
+        h = custom_orp_hash(orp_headers)
+        return f"data.aws_cloudfront_origin_request_policy.custom_orp_{h}.id"
     # Managed policy referenced by its fixed ID as a STRING literal (quoted) —
     # not a resource/data reference.
     return f'"{_MANAGED_ORP_ALL_VIEWER}"'
@@ -247,44 +258,15 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
         w('}')
         w('')
 
-    # Custom ORP for geo/device headers
+    # Custom ORP for geo/device headers — SHARED, deduped by header set in
+    # cdn-generate-shared-policies (terraform/shared). Referenced here by a data
+    # source so 54 domains with the same header set share ONE ORP resource
+    # instead of each creating an identical one (which blew the 20 custom-ORP
+    # account quota). apply order: shared/ before domains/ (same as cache/RHP).
     if orp_headers:
-        desc_parts = []
-        geo_h = [h for h in orp_headers if 'Country' in h or 'City' in h or 'Latitude' in h or 'Longitude' in h or 'Region' in h or 'Postal' in h or 'Metro' in h]
-        dev_h = [h for h in orp_headers if 'Mobile' in h or 'Desktop' in h or 'Tablet' in h or 'SmartTV' in h or 'IOS' in h or 'Android' in h]
-        if geo_h:
-            desc_parts.append('geo')
-        if dev_h:
-            desc_parts.append('device')
-        if not desc_parts:
-            desc_parts.append('CloudFront')
-        desc = ' + '.join(desc_parts) + ' headers'
-        w(f'resource "aws_cloudfront_origin_request_policy" "custom_orp_{san}" {{')
-        w(f'  name    = "cfcdn-orp-custom-{san}"')
-        w(f'  comment = "Custom ORP for {hostname} - forwards {desc} to origin"')
-        w('')
-        w('  headers_config {')
-        w('    header_behavior = "allViewerAndWhitelistCloudFront"')
-        w('    headers {')
-        w(f'      items = {hcl_list_strings(orp_headers)}')
-        w('    }')
-        w('  }')
-        w('')
-        # Cloudflare is a reverse proxy: by default it forwards the FULL request
-        # (all cookies, all query strings) to origin. CloudFront strips anything
-        # not in the cache key unless an ORP forwards it, so forward all to match
-        # Cloudflare. This is independent of the cache KEY (the cache policy,
-        # which controls hit/miss) — forwarding "all" here does not hurt the
-        # cache hit ratio. (A rule that strips query strings from the origin
-        # request is a Cloudflare URL-Rewrite transform, converted separately as
-        # a CFF request.querystring rewrite — not an ORP setting.)
-        w('  cookies_config {')
-        w('    cookie_behavior = "all"')
-        w('  }')
-        w('')
-        w('  query_strings_config {')
-        w('    query_string_behavior = "all"')
-        w('  }')
+        h = custom_orp_hash(orp_headers)
+        w(f'data "aws_cloudfront_origin_request_policy" "custom_orp_{h}" {{')
+        w(f'  name = "cfcdn-orp-custom-{h}"')
         w('}')
         w('')
 

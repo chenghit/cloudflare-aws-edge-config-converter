@@ -9,7 +9,7 @@ Usage:
 
 Exit codes: 0 = OK, 1 = error.
 """
-import json, sys, os
+import json, sys, os, hashlib, glob
 
 
 def hcl_id(pid):
@@ -21,6 +21,77 @@ def hcl_list(items):
         return "[]"
     sorted_items = sorted(items)
     return "[" + ", ".join(f'"{i}"' for i in sorted_items) + "]"
+
+
+def custom_orp_hash(headers):
+    """Stable 8-char id for a custom-ORP header set. MUST match the identical
+    helper in cdn-generate-tf-scaffold.py so the resource name (here) and the
+    data-source name (there) line up. Sorted so order can't change the hash."""
+    key = ",".join(sorted(headers))
+    return hashlib.sha256(key.encode()).hexdigest()[:8]
+
+
+def _orp_desc(headers):
+    """Human comment for a custom ORP, from the header set."""
+    geo = any(k in h for h in headers
+              for k in ("Country", "City", "Latitude", "Longitude", "Region", "Postal", "Metro"))
+    dev = any(k in h for h in headers
+              for k in ("Mobile", "Desktop", "Tablet", "SmartTV", "IOS", "Android"))
+    parts = [p for p, on in (("geo", geo), ("device", dev)) if on] or ["CloudFront"]
+    return " + ".join(parts) + " headers"
+
+
+def gen_custom_orp(headers):
+    """Generate ONE shared custom origin request policy for a header set.
+
+    Custom ORPs forward native CloudFront-* headers (e.g. CloudFront-Viewer-
+    Country) that a cache policy can't carry. They were previously emitted
+    per-domain in tf-scaffold — 54 identical copies blew the account's 20
+    custom-ORP quota. Deduped here by header-set content: distributions sharing
+    a header set reference one shared ORP (quota: 1 of 20, and up to 100
+    distributions may reference the same ORP)."""
+    h = custom_orp_hash(headers)
+    lines = []
+    w = lines.append
+    w(f'resource "aws_cloudfront_origin_request_policy" "custom_orp_{h}" {{')
+    w(f'  name    = "cfcdn-orp-custom-{h}"')
+    w(f'  comment = "Shared custom ORP — forwards {_orp_desc(headers)} to origin"')
+    w('')
+    w('  headers_config {')
+    w('    header_behavior = "allViewerAndWhitelistCloudFront"')
+    w('    headers {')
+    w(f'      items = {hcl_list(headers)}')
+    w('    }')
+    w('  }')
+    w('')
+    # Cloudflare is a reverse proxy — forwards the full request to origin by
+    # default. Match that: forward all cookies + query strings (independent of
+    # the cache KEY, which the cache policy controls).
+    w('  cookies_config {')
+    w('    cookie_behavior = "all"')
+    w('  }')
+    w('')
+    w('  query_strings_config {')
+    w('    query_string_behavior = "all"')
+    w('  }')
+    w('}')
+    return "\n".join(lines)
+
+
+def collect_custom_orp_headersets(output_dir):
+    """Scan all final IRs for distinct required_orp_headers sets. Returns a dict
+    {hash8: sorted_headers_list}, one entry per unique non-empty header set."""
+    final_dir = os.path.join(output_dir, "ir", "final")
+    sets = {}
+    for jf in glob.glob(os.path.join(final_dir, "*.json")):
+        with open(jf) as f:
+            ir = json.load(f)
+        headers = set()
+        for b in ir.get("cache_behaviors", []):
+            headers.update(b.get("required_orp_headers", []))
+        if headers:
+            sets[custom_orp_hash(headers)] = sorted(headers)
+    return sets
 
 
 # ── Cache policy ─────────────────────────────────────────────────────────────
@@ -402,7 +473,11 @@ def main():
             pass
 
     policies = manifest.get("policies", {})
-    if not policies:
+    # Shared custom ORPs (native CloudFront-* header forwarding), deduped by
+    # header-set content — separate from the manifest's forward-config ORPs.
+    custom_orps = collect_custom_orp_headersets(output_dir)
+
+    if not policies and not custom_orps:
         with open(out_path, "w") as f:
             f.write("# No shared policies — all domains use AWS managed policies.\n")
         print("OK: no policies to generate")
@@ -437,6 +512,10 @@ def main():
             else:
                 skipped_pids.add(pid)
 
+    # Shared custom ORPs (one per distinct header set)
+    for h in sorted(custom_orps):
+        sections.append(gen_custom_orp(custom_orps[h]))
+
     sections.append(gen_outputs(policies, skipped_pids))
 
     with open(out_path, "w") as f:
@@ -445,7 +524,7 @@ def main():
     total = sum(counts.values())
     print(f"OK: {out_path} → {total} resources "
           f"({counts['cache_policy']} cache, {counts['origin_request_policy']} ORP, "
-          f"{counts['response_headers_policy']} RHP)")
+          f"{counts['response_headers_policy']} RHP) + {len(custom_orps)} shared custom ORP")
 
 
 if __name__ == "__main__":

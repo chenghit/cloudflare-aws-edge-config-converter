@@ -541,6 +541,13 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         ir["metadata"]["kvs_data"].append({"key": kvs_key, "value": content})
         # Fall through to viewer_request_ops placement below
 
+    if rtype == "cache_setting":
+        # status_code_ttl (per-status-code edge cache duration) has no CloudFront
+        # equivalent — record it once, before the rule fans out to behaviors.
+        if "status_code_ttl" in result.get("params", {}):
+            _mark_status_code_ttl_non_convertible(ir, result)
+            result["params"].pop("status_code_ttl", None)
+
     if rtype == "cache_setting" and result.get("params", {}).get("bypass"):
         # Cache bypass = "don't serve this from cache; always go to origin".
         # CloudFront can't conditionally skip the cache at request time, so:
@@ -778,9 +785,48 @@ def _apply_cache_setting(beh, result):
     cp = beh["cache_policy"]
 
     if "edge_ttl_override" in params:
-        cp["ttl"]["default"] = params["edge_ttl_override"]
+        # override_origin means CloudFront must cache for exactly this long
+        # regardless of origin headers — min=default=max is the only way to
+        # force a fixed TTL. Leaving min/max at their behavior defaults let a
+        # >86400s override exceed max_ttl, which CloudFront's create API rejects.
+        ttl = params["edge_ttl_override"]
+        cp["ttl"]["min"] = ttl
+        cp["ttl"]["default"] = ttl
+        cp["ttl"]["max"] = ttl
     if "edge_ttl_respect_origin" in params:
         pass  # default behavior
+
+    # browser_ttl (override_origin): Cloudflare forces the max-age in the
+    # Cache-Control header sent to the VIEWER, independent of the edge TTL. A
+    # viewer-response CFF replicates this faithfully — response.headers is
+    # writable there, the value is forced unconditionally (unlike a
+    # response-headers policy in override mode, which only fires when the origin
+    # already sent Cache-Control), and the CFF stays scoped to THIS behavior's
+    # path. Emitted as a set_response_header op so it reuses the normal codegen.
+    # Caveat: viewer-response CFF does not run for 4xx/5xx CloudFront-generated
+    # responses, so error responses won't carry the forced max-age — acceptable,
+    # browser_ttl is about how long normal content lives in the browser cache.
+    if "browser_ttl_override" in params:
+        max_age = params["browser_ttl_override"]
+        already = any(
+            op.get("cf_source_rule") == result.get("cf_source_rule")
+            and op.get("params", {}).get("name") == "cache-control"
+            for op in beh["viewer_response_ops"]
+        )
+        if not already:
+            # scope drives which behaviors get the CFF (tf-scaffold #123). A
+            # zone-wide browser_ttl (no path field) lands on the default behavior
+            # and MUST run on every behavior → scope='all'; a path-scoped one
+            # runs only on its own behavior.
+            beh["viewer_response_ops"].append({
+                "type": "set_response_header",
+                "cf_source_rule": result.get("cf_source_rule", ""),
+                "description": f"{result.get('description', '')}: browser_ttl override",
+                "condition": result.get("condition"),
+                "raw_expression": result.get("raw_expression"),
+                "params": {"name": "cache-control", "value": f"max-age={max_age}"},
+                "scope": _op_scope(beh["path_pattern"], result, result.get("condition")),
+            })
 
     if "cache_key_qs" in params:
         cp["cache_key"]["query_strings"] = params["cache_key_qs"]
@@ -901,6 +947,29 @@ def _mark_cache_non_convertible(ir, result, expr=None):
     })
 
 
+def _mark_status_code_ttl_non_convertible(ir, result):
+    """Record status_code_ttl (per-status-code edge cache duration) as
+    non-convertible. Recorded ONCE per rule on the default behavior.
+
+    Cloudflare's edge_ttl.status_code_ttl sets different EDGE cache TTLs per HTTP
+    status code / range (e.g. 200→1h, 404→1s, 5xx→0s). CloudFront can't:
+    - a cache policy's min/default/max TTL is status-code-agnostic;
+    - Custom Error Responses cover only 4xx/5xx, with a MINIMUM (not exact) TTL,
+      and never 2xx.
+    CFF can't help either — it controls response headers, not CloudFront's edge
+    caching decision. So this is genuinely non-convertible.
+    """
+    ir["cache_behaviors"][0]["non_convertible"].append({
+        "cf_source_rule": result.get("cf_source_rule", ""),
+        "description": f"{result.get('description', '')}: status_code_ttl",
+        "reason": ("Cloudflare sets different edge cache TTLs per response status "
+                   "code. CloudFront cache-policy TTL is status-code-agnostic, and "
+                   "Custom Error Responses only cover 4xx/5xx with a minimum-TTL "
+                   "(not exact, not 2xx). Handle per-status caching at the origin "
+                   "via Cache-Control."),
+    })
+
+
 # Cloudflare default cached extensions (~70 types)
 # Source: https://developers.cloudflare.com/cache/concepts/default-cache-behavior/
 CLOUDFLARE_DEFAULT_CACHED_EXTENSIONS = {
@@ -967,7 +1036,12 @@ def _process_default_cache_behavior(ir, hostname, domain_config, origin_content,
         for ext, ttl in sorted(custom_ttl_map.items()):
             ext_path = f"*.{ext}"
             beh = find_or_create_behavior(ir, ext_path, domain_config, origin_content)
+            # override_origin forces this exact TTL — min=default=max, same
+            # reasoning as _apply_cache_setting (a >86400s value would otherwise
+            # exceed the behavior's default max_ttl and fail CloudFront's API).
+            beh["cache_policy"]["ttl"]["min"] = ttl
             beh["cache_policy"]["ttl"]["default"] = ttl
+            beh["cache_policy"]["ttl"]["max"] = ttl
 
         # L@E with empty map — handles remaining ~70 extensions at default 7200s
         ir["metadata"]["lambda_edge"]["origin_response"] = {
@@ -1057,11 +1131,27 @@ def _condition_is_pure_extension(condition):
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
+def _result(status, code, **fields):
+    """Emit a SCRIPT_STANDARDS ---RESULT--- block on stdout, then exit.
+
+    Multi-line values (FAILED_ITEMS) are passed pre-formatted with two-space
+    continuation lines. Exit codes keep the existing pipeline contract:
+    0=OK, 1=PARTIAL (retry failed), 2=FATAL.
+    """
+    print("\n---RESULT---")
+    print("SPEC: 1")
+    print(f"STATUS: {status}")
+    for k, v in fields.items():
+        print(f"{k}: {v}")
+    sys.exit(code)
+
+
 def main():
     if len(sys.argv) < 3:
         print("Usage: cdn-preprocess.py <config_path> <output_dir> [--domain DOMAIN]",
               file=sys.stderr)
-        sys.exit(2)
+        _result("FATAL", 2, ACTION="FIX",
+                CONTEXT="Usage: cdn-preprocess.py <config_path> <output_dir> [--domain DOMAIN]")
 
     config_path = os.path.expanduser(sys.argv[1])
     output_dir = os.path.expanduser(sys.argv[2])
@@ -1075,7 +1165,9 @@ def main():
     scope_path = os.path.join(output_dir, "domain_scope.json")
     if not os.path.exists(scope_path):
         print(f"ERROR: {scope_path} not found", file=sys.stderr)
-        sys.exit(2)
+        _result("FATAL", 2, ACTION="FIX",
+                CONTEXT=f"domain_scope.json not found at {scope_path}. Run Stage 1 "
+                        "(cdn-parse-dns.py) first.")
     with open(scope_path) as f:
         domain_scope = json.load(f)
 
@@ -1085,14 +1177,16 @@ def main():
         if not domains:
             print(f"ERROR: domain {single_domain} not found in domain_scope.json",
                   file=sys.stderr)
-            sys.exit(2)
+            _result("FATAL", 2, ACTION="FIX",
+                    CONTEXT=f"--domain {single_domain} is not in domain_scope.json")
 
     # Find zone directory
     zone_dir = find_zone_dir(config_path)
     if not zone_dir:
         print(f"ERROR: no zone directory with DNS.txt found under {config_path}",
               file=sys.stderr)
-        sys.exit(2)
+        _result("FATAL", 2, ACTION="FIX",
+                CONTEXT=f"No zone directory with DNS.txt found under {config_path}")
 
     # Load all rule files (once)
     all_rules = {}
@@ -1155,11 +1249,26 @@ def main():
         print(f"Failed domains: {', '.join(failed)}")
 
     if success == 0:
-        sys.exit(2)
+        # Nothing converted — every domain raised. Each has a
+        # {hostname}.error.json in the accumulator with the traceback.
+        failed_items = "\n".join(f"  {h}: see {h}.error.json" for h in failed)
+        _result("FATAL", 2, ACTION="FIX", FAILED=len(failed),
+                FAILED_ITEMS="\n" + failed_items if failed_items else "",
+                CONTEXT=f"All {total} domains failed preprocessing — likely a bad "
+                        "config path or a pipeline bug, not a per-domain issue.")
     elif failed:
-        sys.exit(1)
+        # Retry command mirrors SKILL.md Stage 3: re-run with --domain for the
+        # failed subset; if retry also fails, mark those SKIPPED and continue.
+        retry_domains = ",".join(failed)
+        failed_items = "\n".join(f"  {h}: see {h}.error.json" for h in failed)
+        _result("PARTIAL", 1, SUCCEEDED=success, FAILED=len(failed),
+                FAILED_ITEMS="\n" + failed_items,
+                ACTION="RETRY_FAILED",
+                COMMAND=f'python3 cdn-preprocess.py "{config_path}" "{output_dir}" '
+                        f'--domain {retry_domains}')
     else:
-        sys.exit(0)
+        _result("OK", 0, DOMAINS=total, PROCESSED=success,
+                OUTPUT_DIR=acc_dir)
 
 
 if __name__ == "__main__":

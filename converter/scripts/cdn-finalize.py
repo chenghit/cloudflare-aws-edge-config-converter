@@ -379,9 +379,22 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         t = entry["type"]
         if t in policy_counts:
             policy_counts[t] += 1
+    # Shared custom ORPs (native CloudFront-* header forwarding) are ALSO
+    # aws_cloudfront_origin_request_policy resources and count against the same
+    # 20/account quota. They're generated in cdn-generate-shared-policies (deduped
+    # by header set), not in the manifest — count distinct header sets here so the
+    # quota check (and the final ---RESULT--- warning) reflects the real total.
+    # Was a bug: 54 hosts each got an identical custom ORP → hit the 20 cap.
+    custom_orp_sets = {
+        tuple(sorted({h for b in ir["cache_behaviors"]
+                      for h in b.get("required_orp_headers", [])}))
+        for ir in all_irs
+    }
+    custom_orp_sets.discard(())  # domains with no native-header need
+    policy_counts["origin_request_policy"] += len(custom_orp_sets)
     for ptype, label in [
         ("cache_policy", "Custom cache policies per account"),
-        ("origin_request_policy", "Custom origin request policies per account"),
+        ("origin_request_policy", "Custom origin request policies per account (incl. shared custom ORPs)"),
         ("response_headers_policy", "Custom response headers policies per account"),
     ]:
         _quota_warn(policy_counts[ptype], 20, False, label)
@@ -419,12 +432,13 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         hostname = ir["metadata"]["hostname"]
         _quota_warn(len(ir["cache_behaviors"]), 75, False, f"{hostname}: cache behaviors")
 
-    # Per-account totals the pipeline can know: one distribution per proxied
-    # host (SOFT: 500), one KVS store per host that needs KVS (SOFT: 50).
+    # Per-account totals the pipeline can know here: one distribution per proxied
+    # host (SOFT: 500). NOTE: the KVS-store quota is NOT checked here — KVS is
+    # content-hash DEDUPED in Stage 8 (cdn-generate-js), so the real store count
+    # (shared groups + standalone) is only known there, and that's where the 50
+    # SOFT quota is checked. Counting per-host here (one KVS per host needing it)
+    # would grossly over-report (e.g. 54 hosts → 2 actual stores) — a false alarm.
     _quota_warn(len(all_irs), 500, False, "Distributions per account (one per proxied host)")
-    kvs_domains = sum(1 for ir in all_irs
-                      if any(ir["metadata"].get("kvs_requirements", {}).values()))
-    _quota_warn(kvs_domains, 50, False, "KeyValueStores per account (one per host needing KVS)")
 
     # CFF count quota (default 100) is checked post-dedup in Stage 8 (generate-js),
     # which reports the actual deduped CFF_TOTAL. This quota is NOT in Service
@@ -601,22 +615,62 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "",
         "Verify credentials work: `aws sts get-caller-identity`",
         "",
-        "### 2. Deploy shared policies",
+        "### 2. Prerequisite — ACM certificates (REQUIRED before any apply)",
+        "",
+        "Every distribution's `viewer_certificate` is resolved from an ACM certificate "
+        "via a Terraform `data` source. The certificate MUST already exist and be "
+        "**ISSUED** before you run `terraform apply`, or `terraform plan` fails immediately.",
+        "",
+        "- **Region: us-east-1 (N. Virginia)** — CloudFront only accepts certs from there, "
+        "regardless of where your origins live.",
+        "- One cert must cover **every** custom domain being deployed. A `*.<apex>` wildcard "
+        "(e.g. `*.example.com`) covers all subdomains; add the apex itself as a SAN if you "
+        "deploy the apex too.",
+        "- The cert must be validated (DNS or email) to reach status ISSUED — a PENDING "
+        "cert will NOT be found by the data source.",
+        "",
+        "Check what you have:",
         "```bash",
-        "cd cloudflare-to-aws-cdn/terraform/shared",
-        "terraform init -upgrade && terraform apply",
+        "aws acm list-certificates --region us-east-1 \\",
+        "  --query \"CertificateSummaryList[].{Domain:DomainName,Status:Status}\" --output table",
         "```",
         "",
-        "### 3. Deploy each domain",
+        "### 3. One-time — enable the Terraform provider plugin cache",
         "",
-        "Use `terraform init -upgrade` (not just `terraform init`) to avoid provider "
-        "checksum mismatch errors when deploying multiple domains sequentially.",
+        "Each domain is a separate Terraform root. WITHOUT a shared plugin cache, every "
+        "`terraform init` re-downloads the ~800 MB AWS provider — for dozens of domains "
+        "that is hours of wasted download and disk. Configure the cache ONCE:",
+        "```bash",
+        "mkdir -p ~/.terraform.d/plugin-cache",
+        "cat > ~/.terraformrc <<'EOF'",
+        'plugin_cache_dir = "$HOME/.terraform.d/plugin-cache"',
+        "EOF",
+        "```",
+        "The provider then downloads once and every later `terraform init` links it from "
+        "the cache (seconds, not minutes).",
+        "",
+        "### 4. Deploy shared policies",
+        "",
+        "Shared policies (cache / origin-request / response-headers, incl. the shared "
+        "custom ORP) MUST be applied FIRST — each domain looks them up by name via a data "
+        "source, so they must exist before any domain applies.",
+        "```bash",
+        "cd cloudflare-to-aws-cdn/terraform/shared",
+        "terraform init && terraform apply",
+        "```",
+        "",
+        "### 5. Deploy each domain",
+        "",
+        "With the plugin cache enabled (step 3), plain `terraform init` reuses the cached "
+        "provider. Do NOT use `-upgrade` in the per-domain loop — it forces a network "
+        "re-check of the registry on every domain and is the usual cause of init hangs on "
+        "a slow connection. The committed `.terraform.lock.hcl` already pins the version.",
         "",
         "To deploy **all** domains:",
         "```bash",
         "for d in cloudflare-to-aws-cdn/terraform/domains/*/; do",
         '  echo "Deploying $(basename $d)..."',
-        "  (cd \"$d\" && terraform init -upgrade && terraform apply -auto-approve)",
+        "  (cd \"$d\" && terraform init && terraform apply -auto-approve)",
         "done",
         "```",
         "",
@@ -624,18 +678,22 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "```bash",
         "for d in cdn_example_com api_example_com; do",
         '  echo "Deploying $d..."',
-        "  (cd \"cloudflare-to-aws-cdn/terraform/domains/$d\" && terraform init -upgrade && terraform apply -auto-approve)",
+        "  (cd \"cloudflare-to-aws-cdn/terraform/domains/$d\" && terraform init && terraform apply -auto-approve)",
         "done",
         "```",
         "",
     ]
 
     if domains_with_kvs:
-        step_kvs = 4
+        step_kvs = 6
         lines += [
             f"### {step_kvs}. Seed KVS data",
             "",
-            "**Requires `boto3`**: `pip install boto3` (not included in stdlib).",
+            "**Requires `boto3` with the CRT extra**: `pip install 'boto3[crt]'` "
+            "(quote it — the brackets are shell globs otherwise). The CloudFront "
+            "KeyValueStore data-plane API requires SigV4a signing, which needs the "
+            "`botocore[crt]` (AWS Common Runtime) dependency the CRT extra pulls in. "
+            "Plain `pip install boto3` will fail seeding with a signing/credential error.",
             "",
             "Run `seed-kvs.py` for each domain **after its `terraform apply` succeeds**. "
             "The script reads the KVS ARN from `terraform output` — it will fail if "
@@ -649,7 +707,7 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
             "",
         ]
 
-    step_n = 5 if domains_with_kvs else 4
+    step_n = 7 if domains_with_kvs else 6
     lines += [
         f"### {step_n}. Validate deployment",
         "",
@@ -723,7 +781,21 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "Error: the cached package for registry.terraform.io/hashicorp/aws does not match any of the checksums recorded in the dependency lock file",
         "```",
         "",
-        "Fix: use `terraform init -upgrade` to re-download the provider.",
+        "Fix (once): `terraform init -upgrade` in that one domain to re-record the lock, "
+        "then go back to plain `terraform init` for the rest. Do NOT put `-upgrade` in the "
+        "deploy loop — with the plugin cache enabled (deploy step 3) it forces a registry "
+        "re-check on every domain and is the usual cause of init hangs.",
+        "",
+        "### `terraform init` hangs for minutes on each domain",
+        "",
+        "Almost always `-upgrade` in the loop (a network registry re-check per domain) "
+        "and/or a missing plugin cache re-downloading the ~800 MB provider each time. "
+        "Fix: enable the plugin cache (deploy step 3) and drop `-upgrade` from the loop.",
+        "",
+        "### `seed-kvs.py` fails with a signing / NoCredentialProviders / SigV4a error",
+        "",
+        "The CloudFront KeyValueStore data API needs SigV4a signing (AWS Common Runtime). "
+        "Fix: `pip install 'boto3[crt]'` (quote it). Plain `boto3` lacks the CRT signer.",
         "",
         "### `seed-kvs.py` fails with `KVS ARN must be a valid ARN`",
         "",
@@ -800,7 +872,20 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "",
     ]
 
-    return "\n".join(lines) + "\n"
+    # Summary facts for the pipeline's final ---RESULT--- (the last step,
+    # cdn-validate-js, reads cdn_summary.json and surfaces these to the user, so
+    # deploy concerns aren't buried in the report / diluted by later steps).
+    total_nc = sum(len(b.get("non_convertible", []))
+                   for ir in all_irs for b in ir.get("cache_behaviors", []))
+    summary = {
+        "domains": len(all_irs),
+        "total_policies": len(manifest),
+        "non_convertible_items": total_nc,
+        "warnings": all_warnings,               # quota + shadow + limit warnings
+        "s3_oac_bucket_policy_required": has_s3,  # every S3 origin needs a manual bucket policy
+        "skipped_domains": [sd.get("hostname", "?") for sd in skipped_domains],
+    }
+    return "\n".join(lines) + "\n", summary
 
 
 def main():
@@ -873,12 +958,18 @@ def main():
         json.dump(manifest_out, f, indent=2, ensure_ascii=False)
     print(f"OK: dedup_manifest.json → {len(manifest)} unique policies")
 
-    # Step 7: Write conversion report
-    report = generate_report(all_irs, manifest, all_shadow_warnings, skipped_domains)
+    # Step 7: Write conversion report + machine-readable deploy summary
+    report, summary = generate_report(all_irs, manifest, all_shadow_warnings, skipped_domains)
     report_path = os.path.join(output_dir, "conversion_report.md")
     with open(report_path, "w") as f:
         f.write(report)
     print(f"OK: conversion_report.md written")
+    # cdn-generate-js (Stage 8) augments this with post-dedup CFF/KVS counts;
+    # cdn-validate-js (last step) reads it for the final summary ---RESULT---.
+    summary_path = os.path.join(output_dir, "cdn_summary.json")
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+    print(f"OK: cdn_summary.json written")
 
     # Summary
     shared_count = sum(1 for v in manifest.values() if v["count"] > 1)
