@@ -220,6 +220,310 @@ def compute_rule_wcu(rule, managed_wcu=None):
     return compute_statement_wcu(rule.get("Statement", {}), managed_wcu)
 
 
+# ── Rule-group overflow packing ───────────────────────────────────────────────
+# AWS WAF WebACL hard caps: 10 rate-based rules and 50 reference statements
+# (IP-set / regex-set / rule-group refs) DIRECTLY in a WebACL — both
+# non-adjustable. EMPIRICALLY CONFIRMED (live, 2026-07-12): moving overflow rules
+# into a referenced custom RuleGroup escapes BOTH caps — RBR-in-group don't count
+# against the WebACL's 10, IP-set-refs-in-group don't count against the 50; the
+# WebACL only pays 1 reference slot per rule-group reference. A rule group holds
+# ≤4 RBR, ≤50 refs, ≤5000 WCU. So a rule group is a general OVERFLOW CONTAINER.
+#
+# Correctness rules the packer must preserve:
+#  1. CLOUDFLARE PHASE ORDER: custom-rule → rate-rule → managed-rule blocks stay
+#     contiguous and in that order (Cloudflare evaluates the phases in that order;
+#     interleaving would change semantics). We pack WITHIN a single block, and a
+#     block's overflow rule-group references are placed right after that block's
+#     direct rules — so the whole block (direct rules + its rule groups) still
+#     evaluates before the next block. Order within a block is preserved.
+#  2. LABELS: nearly every rule touches a label (skip rules PRODUCE
+#     skip:{phase}/skip:all_remaining_custom_rules; custom/rate/managed rules
+#     CONSUME them via NOT-LabelMatch), so we can't avoid packing label rules.
+#     Instead: a label's fully-qualified name bakes in its PRODUCER's container
+#     (awswaf:<acct>:webacl:<name>:<label> vs :rulegroup:<name>:<label>), and an
+#     unqualified LabelMatchStatement.Key resolves against the CONSUMER's own
+#     container. So after packing we REWRITE every LabelMatchStatement.Key to the
+#     producer's fully-qualified form via Fn::Sub with ${AWS::AccountId}
+#     (confirmed live: CloudFormation substitutes the real account id, template
+#     stays portable). Producer-before-consumer evaluation order is preserved
+#     because a block's rule groups sit after that block's direct producers.
+
+RULE_GROUP_MAX_RBR = 4          # AWS hard cap: rate-based rules per rule group
+RULE_GROUP_MAX_REFS = 50        # AWS hard cap: reference statements per rule group
+RULE_GROUP_WCU_BUDGET = 4500    # 5000 ceiling minus safety margin (user decision)
+
+
+def _rule_is_rbr(rule):
+    return "RateBasedStatement" in rule.get("Statement", {})
+
+
+def _iter_label_match_statements(stmt):
+    """Yield every LabelMatchStatement dict in a statement tree (for key rewrite)."""
+    if not isinstance(stmt, dict):
+        return
+    if "LabelMatchStatement" in stmt:
+        yield stmt["LabelMatchStatement"]
+    if "AndStatement" in stmt:
+        for s in stmt["AndStatement"]["Statements"]:
+            yield from _iter_label_match_statements(s)
+    if "OrStatement" in stmt:
+        for s in stmt["OrStatement"]["Statements"]:
+            yield from _iter_label_match_statements(s)
+    if "NotStatement" in stmt:
+        yield from _iter_label_match_statements(stmt["NotStatement"]["Statement"])
+    if "RateBasedStatement" in stmt and "ScopeDownStatement" in stmt["RateBasedStatement"]:
+        yield from _iter_label_match_statements(stmt["RateBasedStatement"]["ScopeDownStatement"])
+    if "ManagedRuleGroupStatement" in stmt and "ScopeDownStatement" in stmt["ManagedRuleGroupStatement"]:
+        yield from _iter_label_match_statements(stmt["ManagedRuleGroupStatement"]["ScopeDownStatement"])
+
+
+def _rule_produced_labels(rule):
+    """Custom label names a rule ADDS (RuleLabels). Empty for non-producers."""
+    return [l["Name"] for l in rule.get("RuleLabels", [])]
+
+
+def _count_refs_in_stmt(stmt):
+    """Count reference statements (IP-set / regex-set) in a statement tree."""
+    if not isinstance(stmt, dict):
+        return 0
+    if "IPSetReferenceStatement" in stmt or "RegexPatternSetReferenceStatement" in stmt:
+        return 1
+    if "AndStatement" in stmt:
+        return sum(_count_refs_in_stmt(s) for s in stmt["AndStatement"]["Statements"])
+    if "OrStatement" in stmt:
+        return sum(_count_refs_in_stmt(s) for s in stmt["OrStatement"]["Statements"])
+    if "NotStatement" in stmt:
+        return _count_refs_in_stmt(stmt["NotStatement"]["Statement"])
+    if "RateBasedStatement" in stmt and "ScopeDownStatement" in stmt["RateBasedStatement"]:
+        return _count_refs_in_stmt(stmt["RateBasedStatement"]["ScopeDownStatement"])
+    return 0
+
+
+def _pack_block(rules, direct_rbr_budget, direct_ref_budget, managed_wcu):
+    """Split ONE ordered rule block into (direct, [groups]) so the block's direct
+    RBR ≤ direct_rbr_budget and direct refs ≤ direct_ref_budget.
+
+    Peels a contiguous TAIL of the block into rule groups (order preserved: the
+    peeled rules keep their relative order and the groups sit after the block's
+    direct rules). Each group ≤4 RBR, ≤50 refs, ≤WCU budget. Returns
+    (direct_rules, [group_rule_lists], over_reason|None). `over_reason` is set if
+    a single rule alone exceeds a group cap (can't be split further).
+    """
+    def _binpack(overflow):
+        """Pack an ordered overflow list into groups (≤4 RBR, ≤50 refs, ≤WCU).
+        Returns (groups, over_reason|None)."""
+        groups, cur, c_rbr, c_refs, c_wcu = [], [], 0, 0, 0
+        for r in overflow:
+            r_rbr = 1 if _rule_is_rbr(r) else 0
+            r_refs = _count_refs_in_stmt(r.get("Statement", {}))
+            r_wcu = compute_rule_wcu(r, managed_wcu)
+            if r_rbr > RULE_GROUP_MAX_RBR or r_refs > RULE_GROUP_MAX_REFS or r_wcu > 5000:
+                return None, "a single rule exceeds a rule group's own caps"
+            if cur and (c_rbr + r_rbr > RULE_GROUP_MAX_RBR
+                        or c_refs + r_refs > RULE_GROUP_MAX_REFS
+                        or c_wcu + r_wcu > RULE_GROUP_WCU_BUDGET):
+                groups.append(cur)
+                cur, c_rbr, c_refs, c_wcu = [], 0, 0, 0
+            cur.append(r)
+            c_rbr += r_rbr; c_refs += r_refs; c_wcu += r_wcu
+        if cur:
+            groups.append(cur)
+        return groups, None
+
+    rbr_total = sum(1 for r in rules if _rule_is_rbr(r))
+    ref_total = sum(_count_refs_in_stmt(r.get("Statement", {})) for r in rules)
+    if rbr_total <= direct_rbr_budget and ref_total <= direct_ref_budget:
+        return rules, [], None
+
+    # Peel a contiguous tail into rule groups. This is chicken-and-egg for refs:
+    # each rule group we create ALSO consumes 1 of the block's direct ref budget,
+    # so peeling more can create another group and shift the target. Converge by
+    # peeling one more rule at a time until the DIRECT side fits BOTH:
+    #   direct_rbr ≤ direct_rbr_budget
+    #   direct_refs + num_groups ≤ direct_ref_budget   (group refs counted)
+    split = len(rules)
+    groups = []
+    while split > 0:
+        rem = rules[:split]
+        overflow = rules[split:]
+        rem_rbr = sum(1 for r in rem if _rule_is_rbr(r))
+        rem_refs = sum(_count_refs_in_stmt(r.get("Statement", {})) for r in rem)
+        if overflow:
+            groups, over = _binpack(overflow)
+            if over:
+                return rem, [], over
+        else:
+            groups = []
+        if (rem_rbr <= direct_rbr_budget
+                and rem_refs + len(groups) <= direct_ref_budget):
+            return rem, groups, None
+        split -= 1
+
+    return [], [], "cannot peel enough rules to fit direct caps"
+
+
+def pack_webacl_rules(webacl_name, custom_block, rate_block, header_rules,
+                      trailer_rules, managed_rules, unique_id, resources,
+                      managed_wcu=None):
+    """Assemble one WebACL's final ordered rule list, packing per-block overflow
+    into referenced rule groups, preserving Cloudflare phase order and label
+    semantics.
+
+    Blocks (in Cloudflare phase order):
+      header_rules   – injected, run first (anti-DDoS, search-engine), never packed
+      custom_block   – converted custom rules (http_request_firewall_custom)
+      rate_block     – converted rate rules (http_ratelimit)
+      trailer_rules  – injected (always-on-challenge), never packed
+      managed_rules  – managed rule groups (http_request_firewall_managed), never packed
+
+    Returns (ordered_rules, warnings, over_limit). ordered_rules have final
+    Priorities assigned. Rule group resources are added to `resources`; every
+    LabelMatchStatement.Key across the whole WebACL is rewritten to its producer's
+    fully-qualified form. over_limit is None or a dict {reason, ...}.
+    """
+    warnings = []
+
+    # Only IP-set / regex-set / rule-group references consume the 50-ref budget;
+    # RBR consume the 10-RBR budget. Injected header/trailer + managed rules are
+    # never packed — count what they consume up front.
+    fixed_refs = sum(_count_refs_in_stmt(r.get("Statement", {}))
+                     for r in header_rules + trailer_rules + managed_rules)
+    fixed_rbr = sum(1 for r in header_rules + trailer_rules + managed_rules if _rule_is_rbr(r))
+
+    rbr_budget = MAX_RATE_RULES - fixed_rbr       # RBR only ever come from rate rules
+    ref_budget = MAX_REF_STATEMENTS - fixed_refs  # shared across custom + rate blocks
+
+    # Pack the custom block first (custom rules aren't RBR, so give it 0 RBR
+    # budget — it never needs any — and the full ref budget). _pack_block already
+    # accounts for each rule group costing 1 ref, so its result fits ref_budget.
+    cd, cg, cover = _pack_block(custom_block, 0, ref_budget, managed_wcu)
+    if cover:
+        return (_finalize(header_rules, cd, cg, [], [], trailer_rules,
+                          managed_rules, webacl_name, unique_id, resources, warnings),
+                warnings, {"reason": cover, "webacl": webacl_name})
+
+    # Rate block gets the RBR budget and the ref budget left after the custom
+    # block's direct refs + its rule-group refs.
+    custom_used_refs = (sum(_count_refs_in_stmt(r.get("Statement", {})) for r in cd)
+                        + len(cg))
+    rate_ref_budget = ref_budget - custom_used_refs
+    rd, rg, rover = _pack_block(rate_block, rbr_budget, rate_ref_budget, managed_wcu)
+    if rover:
+        return (_finalize(header_rules, cd, cg, rd, rg, trailer_rules, managed_rules,
+                          webacl_name, unique_id, resources, warnings),
+                warnings, {"reason": rover, "webacl": webacl_name})
+
+    if cg or rg:
+        moved = sum(len(g) for g in cg) + sum(len(g) for g in rg)
+        warnings.append(
+            f"WebACL '{webacl_name}': moved {moved} overflow rule(s) into "
+            f"{len(cg) + len(rg)} rule group(s) to fit the 10-RBR / 50-ref direct caps")
+
+    ordered = _finalize(header_rules, cd, cg, rd, rg, trailer_rules, managed_rules,
+                        webacl_name, unique_id, resources, warnings)
+    return ordered, warnings, None
+
+
+def _make_rule_group(block_name, gi, group_rules, unique_id, resources, managed_wcu):
+    """Create an AWS::WAFv2::RuleGroup resource for a packed group; return
+    (logical_id, rule_group_name, reference_rule). Rules are re-prioritized
+    from 0 within the group (order preserved)."""
+    base = f"{block_name}-overflow-{gi}"
+    rg_name = sanitize_rule_name(base)
+    lid = unique_id(f"RG{sanitize_logical_id(base)}")
+    g_rules = []
+    for pi, r in enumerate(group_rules):
+        rc = copy.deepcopy(r)
+        rc["Priority"] = pi
+        g_rules.append(rc)
+    capacity = sum(compute_rule_wcu(r, managed_wcu) for r in group_rules)
+    resources[lid] = {"Type": "AWS::WAFv2::RuleGroup", "Properties": {
+        "Name": rg_name, "Scope": "CLOUDFRONT", "Capacity": capacity,
+        "Rules": g_rules,
+        "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                             "MetricName": rg_name}}}
+    ref_rule = {
+        "Name": sanitize_rule_name(f"{base}-ref"),
+        "OverrideAction": {"None": {}},
+        "Statement": {"RuleGroupReferenceStatement": {"ARN": {"Fn::GetAtt": [lid, "Arn"]}}},
+        "VisibilityConfig": {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True,
+                             "MetricName": sanitize_rule_name(f"{base}ref")}}
+    return lid, rg_name, ref_rule
+
+
+def _rewrite_label_keys(all_placements, webacl_name):
+    """Rewrite every LabelMatchStatement.Key to its PRODUCER's fully-qualified
+    form. `all_placements` is a list of (rule, container_kind, container_name):
+    container_kind is 'webacl' or 'rulegroup'. A label produced by a rule in
+    container C must be matched with awswaf:<acct>:C:<label>. We use Fn::Sub so
+    CloudFormation fills the real account id at deploy (template stays portable).
+
+    Unqualified consumer keys resolve against the CONSUMER's own container, which
+    silently breaks if producer and consumer differ — so we make EVERY key fully
+    qualified (user decision). If a label has no known producer among placements,
+    leave the key unqualified (defensive: an externally/managed-produced label)."""
+    # Map produced label name → (container_kind, container_name) of its producer.
+    producer = {}
+    for rule, kind, cname in all_placements:
+        for lbl in _rule_produced_labels(rule):
+            producer.setdefault(lbl, (kind, cname))
+
+    for rule, _kind, _cname in all_placements:
+        for lm in _iter_label_match_statements(rule.get("Statement", {})):
+            key = lm.get("Key")
+            if not isinstance(key, str):
+                continue  # already rewritten (Fn::Sub dict) or non-literal
+            prod = producer.get(key)
+            if not prod:
+                continue  # unknown producer — leave as-is
+            pkind, pname = prod
+            lm["Key"] = {"Fn::Sub": f"awswaf:${{AWS::AccountId}}:{pkind}:{pname}:{key}"}
+
+
+def _finalize(header_rules, custom_direct, custom_groups, rate_direct, rate_groups,
+              trailer_rules, managed_rules, webacl_name, unique_id, resources, warnings):
+    """Materialize rule groups, rewrite label keys to fully-qualified producer
+    form, assemble the final ordered rule list, and assign sequential priorities.
+    Order: header → custom-direct → custom-group-refs → rate-direct →
+    rate-group-refs → trailer → managed (Cloudflare phase order preserved)."""
+    # Build rule group resources; collect (rule, container_kind, container_name)
+    # placements for label rewrite BEFORE priorities are stamped.
+    placements = []
+    for r in header_rules:
+        placements.append((r, "webacl", webacl_name))
+    for r in custom_direct:
+        placements.append((r, "webacl", webacl_name))
+
+    custom_refs, rate_refs = [], []
+    for gi, g in enumerate(custom_groups, 1):
+        lid, rg_name, ref = _make_rule_group(f"{webacl_name}-custom", gi, g,
+                                             unique_id, resources, None)
+        custom_refs.append(ref)
+        for r in resources[lid]["Properties"]["Rules"]:
+            placements.append((r, "rulegroup", rg_name))
+    for r in rate_direct:
+        placements.append((r, "webacl", webacl_name))
+    for gi, g in enumerate(rate_groups, 1):
+        lid, rg_name, ref = _make_rule_group(f"{webacl_name}-rate", gi, g,
+                                             unique_id, resources, None)
+        rate_refs.append(ref)
+        for r in resources[lid]["Properties"]["Rules"]:
+            placements.append((r, "rulegroup", rg_name))
+    for r in trailer_rules + managed_rules:
+        placements.append((r, "webacl", webacl_name))
+
+    # Rewrite label keys in place across every placement (WebACL rules AND rules
+    # now living inside rule groups).
+    _rewrite_label_keys(placements, webacl_name)
+
+    # Assemble final order + assign WebACL-level priorities.
+    ordered = (list(header_rules) + list(custom_direct) + custom_refs
+               + list(rate_direct) + rate_refs + list(trailer_rules) + list(managed_rules))
+    for p, r in enumerate(ordered):
+        r["Priority"] = p
+    return ordered
+
+
 class RefCounter:
     """Count reference statements and track which IP set logical IDs are referenced.
     AWS WAF hard limit: 50 reference statements per WebACL.
