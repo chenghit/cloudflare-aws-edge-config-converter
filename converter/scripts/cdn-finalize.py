@@ -339,8 +339,12 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         # AWS measures the store size in BYTES, so encode to UTF-8 — a char count
         # under-reports multi-byte content (IDN hosts, non-Latin paths), which
         # could let a real >5 MB store slip under the HARD-limit gate below.
-        total_bytes = sum(len(e.get("key", "").encode("utf-8"))
-                          + len(e.get("value", "").encode("utf-8")) + 20
+        # str(...) first: a value can be a non-str (a Cloudflare error-page
+        # `content` that's a JSON array/object is stored uncoerced), and the old
+        # len() tolerated that — .encode() alone would AttributeError on a list.
+        def _nbytes(v):
+            return len(str(v).encode("utf-8"))
+        total_bytes = sum(_nbytes(e.get("key", "")) + _nbytes(e.get("value", "")) + 20
                           for e in kvs_data)
         # Continent/EU mappings add ~3KB
         kvs_req = ir["metadata"].get("kvs_requirements", {})
@@ -354,9 +358,12 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         # QUOTA-REDESIGN blocker (the data must be split across stores or shrunk),
         # NOT a "request a quota increase". The estimate is approximate, so a
         # 4–5 MB store is flagged as approaching (it may cross 5 MB once seeded).
-        # Display uses .2f so a 4.97 MB store doesn't render "5.0 MB" while
-        # landing in the sub-5 MB "approaching" tier (a self-contradictory msg).
-        est_mb = total_bytes / 1_000_000
+        # Display FLOORS to 2 decimals (integer math, no round-up): a sub-5 MB
+        # store can never render "5.00 MB" while landing in the "approaching"
+        # tier (4,996,000 B → "4.99 MB", not the self-contradictory "5.00 MB" a
+        # plain :.2f round would give). The >5 MB branch is unaffected — it only
+        # fires when the byte count genuinely exceeds the cap.
+        est_mb = (total_bytes // 10_000) / 100
         if total_bytes > 5_000_000:
             all_warnings.append(
                 f"{QUOTA_REDESIGN} — KVS for {hostname}: estimated {est_mb:.2f} MB exceeds the "

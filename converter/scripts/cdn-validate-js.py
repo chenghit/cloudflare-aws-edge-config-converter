@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdn_expr_parser import QUOTA_RAISE, QUOTA_REDESIGN
+from cdn_expr_parser import QUOTA_RAISE, QUOTA_REDESIGN, load_summary_or_fatal
 
 CFF_SIZE_LIMIT = 10240
 LAMBDA_SIZE_LIMIT = 1_048_576  # 1 MB
@@ -342,23 +342,18 @@ def main():
     # every deploy concern — including a deploy-blocking QUOTA-REDESIGN — and
     # still print STATUS: OK. Fail LOUD instead: a hidden hard-limit breach is
     # far worse than a noisy stop.
+    # Shape-validate via the shared loader (dict + warnings-is-list). A malformed
+    # summary — literal null, a list, or {"warnings": null/"str"} — would else
+    # crash the _s.get / warnings iteration below with no result block, or (for a
+    # string warnings) silently drop a QUOTA-REDESIGN blocker and print OK. Fail
+    # LOUD instead: a hidden hard-limit breach is far worse than a noisy stop.
     summary_lines = []
-    summary_path = os.path.join(output_dir, "cdn_summary.json")
-    try:
-        with open(summary_path) as f:
-            _s = json.load(f)
-        # A valid-JSON-but-not-an-object payload (e.g. literal `null`) parses
-        # fine yet carries no deploy summary — treat it like an unreadable file,
-        # not a silent empty dict, or `redesign`'s _s.get(...) below would throw
-        # AttributeError with no result block.
-        if not isinstance(_s, dict):
-            raise ValueError(f"expected a JSON object, got {type(_s).__name__}")
-    except Exception as e:
+    _s, _ctx = load_summary_or_fatal(output_dir)
+    if _ctx is not None:
         print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
-              f"CONTEXT: cdn_summary.json missing or unreadable ({e}) — it carries the "
-              f"deploy summary and any quota blockers. Re-run Stage 5 (cdn-finalize) and "
-              f"Stage 8 (cdn-generate-js) before this step. Refusing to report STATUS: OK "
-              f"without it.")
+              f"CONTEXT: {_ctx} — it carries the deploy summary and any quota blockers. "
+              f"Re-run Stage 5 (cdn-finalize) and Stage 8 (cdn-generate-js) before this "
+              f"step. Refusing to report STATUS: OK without it.")
         sys.exit(2)
     if _s:
         summary_lines.append(f"Domains: {_s.get('domains','?')}, unique policies: "
@@ -373,8 +368,9 @@ def main():
         # action tag (QUOTA-RAISE = raise the quota then deploy; QUOTA-REDESIGN =
         # HARD limit, deploy blocked until the source is redesigned). Pass them
         # through verbatim — do NOT re-prefix — so the tag reaches the agent.
+        _tags = (QUOTA_RAISE, QUOTA_REDESIGN)
         for w in _s.get("warnings", []):
-            summary_lines.append(w if w.startswith("QUOTA-") else f"QUOTA/WARNING — {w}")
+            summary_lines.append(w if w.startswith(_tags) else f"QUOTA/WARNING — {w}")
     # Any HARD-limit breach makes the config undeployable as-is (no quota bump
     # exists) — surface it as a distinct deploy blocker the agent must not skip.
     redesign = [w for w in _s.get("warnings", []) if w.startswith(QUOTA_REDESIGN)]

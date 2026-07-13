@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from cdn_expr_parser import (parse_expression_full, parse_dynamic_expression,
                              CF_FIELD_MAP, iter_condition_children,
-                             CACHE_BYPASS_HEADER, QUOTA_RAISE)
+                             CACHE_BYPASS_HEADER, QUOTA_RAISE, load_summary_or_fatal)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -1875,15 +1875,17 @@ if __name__ == "__main__":
     # QUOTA-REDESIGN hard-limit breach — then write the truncated dict back,
     # silently hiding a deploy blocker. So fail LOUD instead of failing open.
     summary_path = os.path.join(output_dir, "cdn_summary.json")
-    try:
-        with open(summary_path) as f:
-            _summary = json.load(f)
-    except Exception as e:
+    # Shape-validate via the shared loader (dict + warnings-is-list). A non-dict
+    # or malformed summary here would otherwise crash on the item assignments
+    # below, OR explode a string `warnings` into chars and write it back to disk
+    # (line ~1907), permanently erasing a Stage-5 QUOTA-REDESIGN blocker. Fail
+    # LOUD on stdout instead — starting fresh would hide a deploy blocker.
+    _summary, _ctx = load_summary_or_fatal(output_dir)
+    if _ctx is not None:
         print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
-              f"CONTEXT: cdn_summary.json missing or unreadable ({e}). It is written by "
-              f"cdn-finalize (Stage 5); re-run Stage 5 before Stage 8. Refusing to "
-              f"continue — starting fresh would erase Stage-5 warnings (incl. any "
-              f"deploy-blocking QUOTA-REDESIGN).")
+              f"CONTEXT: {_ctx}. It is written by cdn-finalize (Stage 5); re-run Stage 5 "
+              f"before Stage 8. Refusing to continue — starting fresh would erase Stage-5 "
+              f"warnings (incl. any deploy-blocking QUOTA-REDESIGN).")
         sys.exit(2)
     _summary["cff_total"] = actual_count
     _summary["cff_dedup"] = f"{original_count} -> {actual_count}"
