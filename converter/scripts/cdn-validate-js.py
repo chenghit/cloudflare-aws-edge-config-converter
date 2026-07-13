@@ -384,30 +384,38 @@ def main():
                          "us-east-1 certs; the Terraform looks them up via a data source, so a "
                          "missing/pending/wrong-region cert fails `terraform plan` outright. "
                          "Provision + validate them first.")
-    if _s.get("s3_oac_bucket_policy_required"):
+    # Gate on the SAME local signal (s3_step, from s3_hosts) that gates the
+    # POST_ACTION step below — one source of truth, so the "See POST_ACTION"
+    # reference can never dangle (the two used to be driven by separate signals:
+    # the summary flag here vs s3_hosts there, which could disagree).
+    if s3_step:
         summary_lines.append("PRE-DEPLOY ACTION — S3-origin domains need a manual S3 bucket "
                              "policy for the CloudFront OAC (else 403); policy JSON in "
                              "conversion_report.md. See POST_ACTION.")
 
-    # Multi-line field values are LISTS — emit_result owns the KEY: header and the
-    # two-space indent, so no caller hand-formats continuation lines.
+    # POST_ACTION is a scalar: first line is the mandatory-and-ordered directive,
+    # then dynamically-numbered steps as continuation lines (emit_result indents
+    # them). Built ONCE and used on every terminal path — OK, BLOCKED, and ERROR
+    # — so the report/ACM/S3 directives are relayed with the same rigor whether
+    # or not a domain failed JS validation.
+    steps = [
+        "REPORT the full DEPLOY_SUMMARY above to the user — every line — as the CDN completion summary."
+        " QUOTA-RAISE line(s) mean the conversion is correct but deploy is blocked until the user"
+        " requests that quota increase; relay each one so the user can raise it before applying.",
+        "Before ANY `terraform apply`, confirm with the user that ACM certificates are"
+        " already ISSUED in us-east-1 for every custom domain (see the PRE-DEPLOY BLOCKER line)."
+        " If not, tell them to provision + validate them first — apply will fail otherwise.",
+    ]
+    if s3_step:
+        steps.append(s3_step)
+    steps.append(
+        "If user language is not English, translate conversion_report.md to that language as conversion_report_{lang}.md.")
+    # Number them here so every step (incl. the S3 one) is numbered and the count
+    # is correct regardless of which optional steps are present.
+    post_action = "Do ALL of the following, in order:\n" + "\n".join(
+        f"{i}. {s}" for i, s in enumerate(steps, 1))
+
     if fail_count == 0:
-        # POST_ACTION only applies on the deployable (OK/BLOCKED) path. It's a
-        # scalar whose first line is the mandatory-and-ordered directive; the
-        # numbered steps follow as continuation lines (emit_result indents them).
-        steps = [
-            "1. REPORT the full DEPLOY_SUMMARY above to the user — every line — as the CDN completion summary."
-            " QUOTA-RAISE line(s) mean the conversion is correct but deploy is blocked until the user"
-            " requests that quota increase; relay each one so the user can raise it before applying.",
-            "2. Before ANY `terraform apply`, confirm with the user that ACM certificates are"
-            " already ISSUED in us-east-1 for every custom domain (see the PRE-DEPLOY BLOCKER line)."
-            " If not, tell them to provision + validate them first — apply will fail otherwise.",
-        ]
-        if s3_step:
-            steps.append(s3_step)
-        steps.append(
-            "3. If user language is not English, translate conversion_report.md to that language as conversion_report_{lang}.md.")
-        post_action = "Do ALL of the following, in order:\n" + "\n".join(steps)
         fields = {"DOMAINS": len(results), "PASSED": pass_count,
                   "DEPLOY_SUMMARY": summary_lines}
         if redesign:
@@ -449,12 +457,11 @@ def main():
                 "raised. Independent of the JS failures above — even after those are fixed, "
                 "do NOT deploy until the source is redesigned. Report this to the user.")
         fields["DEPLOY_SUMMARY"] = summary_lines
-        # The DEPLOY_SUMMARY S3 line says "See POST_ACTION"; that step is a real
-        # post-apply requirement regardless of the JS failures, so emit it here
-        # too (else the reference dangles and the S3 bucket policy is dropped → 403
-        # on the domains that DID pass and get deployed).
-        if s3_step:
-            fields["POST_ACTION"] = "After fixing the failed domain(s) and deploying:\n" + s3_step
+        # Same POST_ACTION as the OK/BLOCKED paths: even with a domain failing JS
+        # validation, the ACM/quota/S3 directives (and any "See POST_ACTION"
+        # reference in DEPLOY_SUMMARY) must be relayed with equal rigor for the
+        # domains that DID pass and will be deployed once the failures are fixed.
+        fields["POST_ACTION"] = post_action
         emit_result("ERROR", **fields)
 
 

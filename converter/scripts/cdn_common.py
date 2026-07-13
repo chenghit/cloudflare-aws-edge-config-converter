@@ -42,11 +42,16 @@ def emit_result(status, *, exit_after=True, exit_code=None, **fields):
     is rendered by TYPE, so callers never hand-format continuation lines (the
     exact source of the "non-indented line becomes a garbage key" bugs this
     module exists to kill):
-      - scalar (str/int/…)  → `KEY: value` on one line.
+      - scalar (str/int/…)  → `KEY: value`; a single-line value stays on one
+                              line, and a value that itself spans multiple lines
+                              (e.g. a multi-line POST_ACTION directive) has every
+                              continuation two-space indented.
       - list/tuple of str   → `KEY:` then each item as a two-space-indented
                               continuation line (FAILED_ITEMS, BLOCKED_ITEMS,
                               DEPLOY_SUMMARY). emit_result owns the newline and
                               the indent; the caller just passes the items.
+    Either way every physical line after `KEY:` is indented, so no caller input
+    (including an embedded '\n') can produce a line the agent misreads as a key.
 
     exit_after=False emits but returns (OK paths that keep running). exit_code
     overrides the STATUS→code mapping when a caller needs a specific code.
@@ -99,13 +104,15 @@ def load_summary_or_fatal(output_dir):
     if not isinstance(summary, dict):
         return None, (f"cdn_summary.json is not a JSON object "
                       f"(got {type(summary).__name__})")
-    # `warnings` is optional, but if the KEY is present its value must be a list
-    # of strings. Gate on presence (`"warnings" in summary`), NOT on `is not
-    # None` — an explicit null is exactly the malformed case to reject (it would
-    # crash the readers' list()/for-in), not a value to wave through.
-    if "warnings" in summary:
-        warnings = summary["warnings"]
-        if not (isinstance(warnings, list) and all(isinstance(w, str) for w in warnings)):
-            return None, ("cdn_summary.json 'warnings' must be a list of strings "
-                          "(a malformed value can hide a deploy blocker)")
+    # The list-of-string fields the readers iterate or ', '.join — validate every
+    # one, so a malformed element can't crash a reader with no ---RESULT--- block.
+    # Gate on presence, NOT on `is not None`: an explicit null is exactly the
+    # malformed case to reject (it would crash list()/for-in/join), not a value
+    # to wave through.
+    for field in ("warnings", "skipped_domains"):
+        if field in summary:
+            value = summary[field]
+            if not (isinstance(value, list) and all(isinstance(x, str) for x in value)):
+                return None, (f"cdn_summary.json '{field}' must be a list of strings "
+                              f"(a malformed value can crash the reader / hide a blocker)")
     return summary, None
