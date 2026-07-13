@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from cdn_expr_parser import (parse_expression_full, parse_dynamic_expression,
                              CF_FIELD_MAP, iter_condition_children,
-                             CACHE_BYPASS_HEADER)
+                             CACHE_BYPASS_HEADER, QUOTA_RAISE)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -1883,7 +1883,7 @@ if __name__ == "__main__":
               f"CONTEXT: cdn_summary.json missing or unreadable ({e}). It is written by "
               f"cdn-finalize (Stage 5); re-run Stage 5 before Stage 8. Refusing to "
               f"continue — starting fresh would erase Stage-5 warnings (incl. any "
-              f"deploy-blocking QUOTA-REDESIGN).", file=sys.stderr)
+              f"deploy-blocking QUOTA-REDESIGN).")
         sys.exit(2)
     _summary["cff_total"] = actual_count
     _summary["cff_dedup"] = f"{original_count} -> {actual_count}"
@@ -1895,13 +1895,14 @@ if __name__ == "__main__":
     # Support case, NOT the Service Quotas console.
     _extra = list(_summary.get("warnings", []))
     if actual_count > 100:
-        _extra.append(f"QUOTA-RAISE — CloudFront Functions per account: {actual_count} "
+        _extra.append(f"{QUOTA_RAISE} — CloudFront Functions per account: {actual_count} "
                       f"exceeds the default quota 100 (SOFT). The conversion is correct; "
                       f"request an increase via AWS Support (not Service Quotas), then "
-                      f"deploy unchanged. Or deploy a subset of domains. Blocked until raised.")
+                      f"deploy unchanged (or deploy a subset of domains). Deploy is blocked "
+                      f"until raised.")
     if kvs_warn:
         # kvs_warn already describes the SOFT overage; tag it for the agent.
-        _extra.append(f"QUOTA-RAISE — {kvs_warn}" if kvs_total > 50 else kvs_warn)
+        _extra.append(f"{QUOTA_RAISE} — {kvs_warn}" if kvs_total > 50 else kvs_warn)
     _summary["warnings"] = _extra
     with open(summary_path, "w") as f:
         json.dump(_summary, f, indent=2, ensure_ascii=False)

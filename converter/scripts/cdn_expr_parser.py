@@ -9,6 +9,18 @@ Returns (condition, raw_expression) — exactly one is non-None.
 import hashlib
 import re
 
+# Quota-warning action tags — the machine-readable prefix on each over-limit
+# warning so the final ---RESULT--- (and the agent) know what to DO:
+#   QUOTA-RAISE    — SOFT limit: config is correct, deploy is blocked only until
+#                    the quota is raised, then deploys unchanged.
+#   QUOTA-REDESIGN — HARD limit: no increase path; cdn-validate-js escalates to
+#                    STATUS: BLOCKED and the source must be reduced/redesigned.
+# Single source of truth: the producers (cdn-finalize, cdn-generate-js) prefix
+# with these and the consumer (cdn-validate-js) tests for them, so a typo in one
+# literal can't silently disable the BLOCKED path.
+QUOTA_RAISE = "QUOTA-RAISE"
+QUOTA_REDESIGN = "QUOTA-REDESIGN"
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _parse_in_set(raw):

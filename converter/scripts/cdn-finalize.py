@@ -10,7 +10,7 @@ import json, sys, os, hashlib, copy, re
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdn_expr_parser import orp_header_union
+from cdn_expr_parser import orp_header_union, QUOTA_RAISE, QUOTA_REDESIGN
 
 
 def _combined_name_len(*name_lists):
@@ -335,8 +335,13 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         kvs_data = ir["metadata"].get("kvs_data", [])
         if not kvs_data and not ir["metadata"].get("kvs_requirements", {}).get("needs_continent"):
             continue
-        # Estimate: each entry = key bytes + value bytes + ~20 bytes overhead
-        total_bytes = sum(len(e.get("key", "")) + len(e.get("value", "")) + 20 for e in kvs_data)
+        # Estimate: each entry = key bytes + value bytes + ~20 bytes overhead.
+        # AWS measures the store size in BYTES, so encode to UTF-8 — a char count
+        # under-reports multi-byte content (IDN hosts, non-Latin paths), which
+        # could let a real >5 MB store slip under the HARD-limit gate below.
+        total_bytes = sum(len(e.get("key", "").encode("utf-8"))
+                          + len(e.get("value", "").encode("utf-8")) + 20
+                          for e in kvs_data)
         # Continent/EU mappings add ~3KB
         kvs_req = ir["metadata"].get("kvs_requirements", {})
         if kvs_req.get("needs_continent"):
@@ -349,10 +354,12 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         # QUOTA-REDESIGN blocker (the data must be split across stores or shrunk),
         # NOT a "request a quota increase". The estimate is approximate, so a
         # 4–5 MB store is flagged as approaching (it may cross 5 MB once seeded).
+        # Display uses .2f so a 4.97 MB store doesn't render "5.0 MB" while
+        # landing in the sub-5 MB "approaching" tier (a self-contradictory msg).
         est_mb = total_bytes / 1_000_000
         if total_bytes > 5_000_000:
             all_warnings.append(
-                f"QUOTA-REDESIGN — KVS for {hostname}: estimated {est_mb:.1f} MB exceeds the "
+                f"{QUOTA_REDESIGN} — KVS for {hostname}: estimated {est_mb:.2f} MB exceeds the "
                 f"5 MB HARD per-store limit, NOT adjustable via Service Quotas/Support. "
                 f"Deploy/seeding will be rejected (EntitySizeLimitExceeded). Split the data "
                 f"across multiple key value stores (a domain's error pages, bulk redirects, "
@@ -360,13 +367,13 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
             )
         elif total_bytes > 4_000_000:
             all_warnings.append(
-                f"KVS for {hostname}: estimated {est_mb:.1f} MB (5 MB is a HARD, non-raisable "
+                f"KVS for {hostname}: estimated {est_mb:.2f} MB (5 MB is a HARD, non-raisable "
                 f"limit). Close to the cap — the estimate is approximate, so verify after "
                 f"seeding; if it crosses 5 MB, split the data across multiple stores."
             )
         elif total_bytes > 3_000_000:
             all_warnings.append(
-                f"KVS for {hostname}: estimated {est_mb:.1f} MB (HARD limit 5 MB). "
+                f"KVS for {hostname}: estimated {est_mb:.2f} MB (HARD limit 5 MB). "
                 f"Approaching limit — monitor after deployment."
             )
 
@@ -393,12 +400,12 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         if count > limit:
             if hard:
                 all_warnings.append(
-                    f"QUOTA-REDESIGN — {subject}: {count} exceeds the HARD limit of "
+                    f"{QUOTA_REDESIGN} — {subject}: {count} exceeds the HARD limit of "
                     f"{limit}, NOT adjustable via Service Quotas/AWS Support. Deploy will "
                     f"be rejected as-is — reduce/redesign the source before deploying.")
             else:
                 all_warnings.append(
-                    f"QUOTA-RAISE — {subject}: {count} exceeds the default quota of "
+                    f"{QUOTA_RAISE} — {subject}: {count} exceeds the default quota of "
                     f"{limit} (SOFT). The conversion is correct; request an increase via "
                     f"{raise_via}, then deploy unchanged. Deploy is blocked until raised.")
         elif not hard and count > limit * 0.8:

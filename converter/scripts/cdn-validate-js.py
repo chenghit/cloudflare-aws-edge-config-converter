@@ -13,6 +13,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cdn_expr_parser import QUOTA_RAISE, QUOTA_REDESIGN
+
 CFF_SIZE_LIMIT = 10240
 LAMBDA_SIZE_LIMIT = 1_048_576  # 1 MB
 
@@ -344,6 +347,12 @@ def main():
     try:
         with open(summary_path) as f:
             _s = json.load(f)
+        # A valid-JSON-but-not-an-object payload (e.g. literal `null`) parses
+        # fine yet carries no deploy summary — treat it like an unreadable file,
+        # not a silent empty dict, or `redesign`'s _s.get(...) below would throw
+        # AttributeError with no result block.
+        if not isinstance(_s, dict):
+            raise ValueError(f"expected a JSON object, got {type(_s).__name__}")
     except Exception as e:
         print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
               f"CONTEXT: cdn_summary.json missing or unreadable ({e}) — it carries the "
@@ -368,7 +377,7 @@ def main():
             summary_lines.append(w if w.startswith("QUOTA-") else f"QUOTA/WARNING — {w}")
     # Any HARD-limit breach makes the config undeployable as-is (no quota bump
     # exists) — surface it as a distinct deploy blocker the agent must not skip.
-    redesign = [w for w in _s.get("warnings", []) if w.startswith("QUOTA-REDESIGN")]
+    redesign = [w for w in _s.get("warnings", []) if w.startswith(QUOTA_REDESIGN)]
     # ACM is the hardest prerequisite: the generated Terraform reads each cert via
     # `data "aws_acm_certificate"` (or an explicit ARN), so `terraform plan`
     # FAILS immediately if the cert isn't already ISSUED in us-east-1. This is a
@@ -427,19 +436,23 @@ def main():
         )
         # A JS-validation failure on one domain must NOT bury a deploy blocker on
         # another. Carry the full DEPLOY_SUMMARY here too, and if any
-        # QUOTA-REDESIGN hard-limit breach exists, call it out — it survives
-        # fixing the JS failure and would otherwise be invisible in this branch.
-        redesign_note = ""
+        # QUOTA-REDESIGN hard-limit breach exists, surface it as a structured
+        # BLOCKED_ITEMS block (indented continuation lines per SCRIPT_STANDARDS —
+        # NOT non-indented prose, which a strict parser would split into a garbage
+        # key). It survives fixing the failed domains, so the agent must see it.
+        redesign_block = ""
         if redesign:
-            redesign_note = ("\n⛔ DEPLOY BLOCKED (separate from the JS failures above) — the "
-                             "DEPLOY_SUMMARY has QUOTA-REDESIGN line(s): a HARD CloudFront limit "
-                             "is exceeded and cannot be raised. Even after the failed domains are "
-                             "fixed, do NOT deploy until the source is redesigned. Report this to "
-                             "the user.")
+            items = "\n".join(f"  {w}" for w in redesign)
+            redesign_block = (f"\nBLOCKED_COUNT: {len(redesign)}\nBLOCKED_ITEMS:\n{items}\n"
+                              f"BLOCKED_NOTE: A HARD CloudFront limit is exceeded (see "
+                              f"BLOCKED_ITEMS) and cannot be raised. Independent of the JS "
+                              f"failures above — even after those are fixed, do NOT deploy "
+                              f"until the source is redesigned. Report this to the user.")
         print(f"\n---RESULT---\nSPEC: 1\nSTATUS: ERROR\nPASSED: {pass_count}\nFAILED: {fail_count}\n"
               f"FAILED_ITEMS:\n{failed_items}\nACTION: FIX\n"
               f"CONTEXT: {fail_count} domain(s) failed JS validation"
-              f"{deploy_summary}{redesign_note}")
+              f"{redesign_block}"
+              f"{deploy_summary}")
         sys.exit(1)
 
 

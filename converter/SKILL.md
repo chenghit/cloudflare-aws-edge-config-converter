@@ -314,6 +314,7 @@ Parse the `---RESULT---` block:
 - `STATUS: OK` → all domains passed, proceed to Step 4 (final reporting)
 - `STATUS: BLOCKED` → JS is valid and the Terraform is written, but `BLOCKED_ITEMS` breach a HARD CloudFront limit (not raisable — e.g. a KVS store estimated over the 5 MB per-store cap) that makes it undeployable as-is. Report `BLOCKED_ITEMS`/`CONTEXT` to the user, tell them to reduce/redesign the named item in the source (e.g. split KVS data across stores) and re-run. Do NOT present it as ready to deploy. Still relay the DEPLOY_SUMMARY.
 - `STATUS: ERROR` → some domains failed validation. Report failed domains and their check failures to user. (If `BLOCKED_ITEMS`/a QUOTA-REDESIGN line also appears, surface it too — it survives fixing the failed domains.)
+- `STATUS: FATAL` → `cdn_summary.json` is missing or unreadable (it carries the deploy summary and quota blockers). Report `CONTEXT` and stop; re-run Stage 5 (finalize) and Stage 8 (generate-js), which write/augment it, before retrying Stage 9.
 
 ---
 
