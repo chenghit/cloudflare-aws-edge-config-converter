@@ -9,6 +9,9 @@ Usage:
 """
 import glob as globmod, json, os, re, sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cdn_common import emit_result
+
 # ── Origin classification ────────────────────────────────────────────────────
 
 S3_PATTERNS = [
@@ -50,9 +53,9 @@ def find_file(config_path, pattern):
     if len(sources) > 1:
         zones = sorted(os.path.basename(s) for s in sources)
         print(f"ERROR: {pattern} found under multiple zones: {zones}", file=sys.stderr)
-        print("\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
-              f"CONTEXT: multiple zones detected ({', '.join(zones)}); convert one zone at a time")
-        sys.exit(1)
+        emit_result("FATAL", exit_code=1, ACTION="FIX",
+                    CONTEXT=f"multiple zones detected ({', '.join(zones)}); convert one "
+                            f"zone at a time")
     chosen = sorted(matches)[-1]
     if len(matches) > 1:
         print(f"WARNING: {len(matches)} backups of {pattern} found; using newest "
@@ -96,9 +99,7 @@ def main():
     dns_path = find_file(config_path, "DNS.txt")
     if not dns_path:
         print("ERROR: DNS.txt not found", file=sys.stderr)
-        print("\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
-              "CONTEXT: DNS.txt not found under config path")
-        sys.exit(2)
+        emit_result("FATAL", ACTION="FIX", CONTEXT="DNS.txt not found under config path")
 
     # Step 2: Parse DNS.txt
     try:
@@ -106,9 +107,7 @@ def main():
             data = json.load(f)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         print(f"ERROR: DNS.txt could not be parsed as JSON: {e}", file=sys.stderr)
-        print("\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
-              "CONTEXT: DNS.txt is malformed JSON")
-        sys.exit(2)
+        emit_result("FATAL", ACTION="FIX", CONTEXT="DNS.txt is malformed JSON")
 
     records = data.get("result", [])
     if isinstance(data.get("result"), dict):
@@ -145,9 +144,8 @@ def main():
         print("ABORT: SaaS configuration detected.", file=sys.stderr)
         for r in saas_reasons:
             print(f"  - {r}", file=sys.stderr)
-        print("\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
-              "CONTEXT: SaaS configuration detected. Not supported.")
-        sys.exit(2)
+        emit_result("FATAL", ACTION="FIX",
+                    CONTEXT="SaaS configuration detected. Not supported.")
 
     # Step 4: Extract proxied records, classify
     proxied_domains = []
@@ -195,9 +193,7 @@ def main():
         if non_convertible:
             msg += f" ({len(non_convertible)} A/AAAA records excluded — IP origins not supported by CloudFront)"
         print(f"ERROR: {msg}", file=sys.stderr)
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
-              f"CONTEXT: {msg}")
-        sys.exit(2)
+        emit_result("FATAL", ACTION="FIX", CONTEXT=msg)
 
     # Step 5: Group by apex domain
     apex_groups = {}
@@ -308,10 +304,10 @@ def main():
     print(f"OK: {len(proxied_domains)} proxied domains, "
           f"{len(apex_groups)} apex group(s) → {manifest_path}, {scope_path}")
 
-    warn_str = f"\nWARNINGS: {'; '.join(warnings)}" if warnings else ""
-    print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\n"
-          f"OUTPUT_FILE: {scope_path}\nDOMAINS: {len(proxied_domains)}"
-          f"{warn_str}")
+    fields = {"OUTPUT_FILE": scope_path, "DOMAINS": len(proxied_domains)}
+    if warnings:
+        fields["WARNINGS"] = "; ".join(warnings)
+    emit_result("OK", exit_after=False, **fields)
 
 
 if __name__ == "__main__":

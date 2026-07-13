@@ -7,53 +7,10 @@ Complex expressions are left as raw_expression for cdn-generate-js.py
 Returns (condition, raw_expression) — exactly one is non-None.
 """
 import hashlib
-import json
-import os
 import re
 
-# Quota-warning action tags — the machine-readable prefix on each over-limit
-# warning so the final ---RESULT--- (and the agent) know what to DO:
-#   QUOTA-RAISE    — SOFT limit: config is correct, deploy is blocked only until
-#                    the quota is raised, then deploys unchanged.
-#   QUOTA-REDESIGN — HARD limit: no increase path; cdn-validate-js escalates to
-#                    STATUS: BLOCKED and the source must be reduced/redesigned.
-# Single source of truth: the producers (cdn-finalize, cdn-generate-js) prefix
-# with these and the consumer (cdn-validate-js) tests for them, so a typo in one
-# literal can't silently disable the BLOCKED path.
-QUOTA_RAISE = "QUOTA-RAISE"
-QUOTA_REDESIGN = "QUOTA-REDESIGN"
-
-
-def load_summary_or_fatal(output_dir):
-    """Load cdn_summary.json, returning (summary_dict, None) on success or
-    (None, context_str) on any problem so the caller can emit its own
-    ---RESULT--- STATUS: FATAL and exit.
-
-    Both readers of this file — cdn-generate-js (Stage 8, which reads FIRST and
-    writes back) and cdn-validate-js (Stage 9) — must go through here, and both
-    the top-level shape AND the `warnings` value are validated:
-      - missing/unreadable/invalid JSON → fatal (a truncated or absent file)
-      - not a JSON object (null/list/str/number) → fatal (Stage 8 would crash on
-        item assignment; Stage 9 would crash on _s.get)
-      - `warnings` present but not a list → fatal (a string would be iterated
-        char-by-char, exploding into garbage on write-back and silently dropping
-        a QUOTA-REDESIGN blocker; a null would raise on iteration)
-    Guarding shape here, once, is why neither stage can fail-open on a malformed
-    summary and hide a deploy blocker."""
-    path = os.path.join(output_dir, "cdn_summary.json")
-    try:
-        with open(path) as f:
-            summary = json.load(f)
-    except Exception as e:
-        return None, f"cdn_summary.json missing or unreadable ({e})"
-    if not isinstance(summary, dict):
-        return None, (f"cdn_summary.json is not a JSON object "
-                      f"(got {type(summary).__name__}) — it carries no deploy summary")
-    if "warnings" in summary and not isinstance(summary["warnings"], list):
-        return None, (f"cdn_summary.json 'warnings' is {type(summary['warnings']).__name__}, "
-                      f"expected a list — a malformed summary can hide a deploy blocker")
-    return summary, None
-
+# (Quota tags + cdn_summary.json loader moved to cdn_common.py — file-IO and the
+# result contract don't belong in the expression parser.)
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 

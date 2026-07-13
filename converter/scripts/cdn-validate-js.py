@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdn_expr_parser import QUOTA_RAISE, QUOTA_REDESIGN, load_summary_or_fatal
+from cdn_common import QUOTA_REDESIGN, QUOTA_TAGS, load_summary_or_fatal, emit_result
 
 CFF_SIZE_LIMIT = 10240
 LAMBDA_SIZE_LIMIT = 1_048_576  # 1 MB
@@ -280,13 +280,11 @@ def main():
     os.makedirs(val_dir, exist_ok=True)
 
     if not os.path.isdir(ir_dir):
-        print(f"---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\nCONTEXT: IR directory not found: {ir_dir}")
-        sys.exit(2)
+        emit_result("FATAL", ACTION="FIX", CONTEXT=f"IR directory not found: {ir_dir}")
 
     ir_files = sorted(Path(ir_dir).glob("*.json"))
     if not ir_files:
-        print(f"---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\nCONTEXT: No IR files found in {ir_dir}")
-        sys.exit(2)
+        emit_result("FATAL", ACTION="FIX", CONTEXT=f"No IR files found in {ir_dir}")
 
     # Load manifest once (if exists)
     manifest_path = os.path.join(output_dir, "cff_dedup_manifest.json")
@@ -350,11 +348,11 @@ def main():
     summary_lines = []
     _s, _ctx = load_summary_or_fatal(output_dir)
     if _ctx is not None:
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
-              f"CONTEXT: {_ctx} — it carries the deploy summary and any quota blockers. "
-              f"Re-run Stage 5 (cdn-finalize) and Stage 8 (cdn-generate-js) before this "
-              f"step. Refusing to report STATUS: OK without it.")
-        sys.exit(2)
+        emit_result("FATAL", ACTION="FIX",
+                    CONTEXT=f"{_ctx} — it carries the deploy summary and any quota "
+                            f"blockers. Re-run Stage 5 (cdn-finalize) and Stage 8 "
+                            f"(cdn-generate-js) before this step. Refusing to report "
+                            f"STATUS: OK without it.")
     if _s:
         summary_lines.append(f"Domains: {_s.get('domains','?')}, unique policies: "
                              f"{_s.get('total_policies','?')}, CFF: {_s.get('cff_dedup','?')}, "
@@ -368,9 +366,8 @@ def main():
         # action tag (QUOTA-RAISE = raise the quota then deploy; QUOTA-REDESIGN =
         # HARD limit, deploy blocked until the source is redesigned). Pass them
         # through verbatim — do NOT re-prefix — so the tag reaches the agent.
-        _tags = (QUOTA_RAISE, QUOTA_REDESIGN)
         for w in _s.get("warnings", []):
-            summary_lines.append(w if w.startswith(_tags) else f"QUOTA/WARNING — {w}")
+            summary_lines.append(w if w.startswith(QUOTA_TAGS) else f"QUOTA/WARNING — {w}")
     # Any HARD-limit breach makes the config undeployable as-is (no quota bump
     # exists) — surface it as a distinct deploy blocker the agent must not skip.
     redesign = [w for w in _s.get("warnings", []) if w.startswith(QUOTA_REDESIGN)]
@@ -388,68 +385,66 @@ def main():
         summary_lines.append("PRE-DEPLOY ACTION — S3-origin domains need a manual S3 bucket "
                              "policy for the CloudFront OAC (else 403); policy JSON in "
                              "conversion_report.md. See POST_ACTION.")
-    deploy_summary = ("\nDEPLOY_SUMMARY:\n" + "\n".join(f"  {l}" for l in summary_lines)) \
-        if summary_lines else ""
+    # DEPLOY_SUMMARY body (indented continuation lines), or None to omit the key.
+    deploy_summary = "\n".join(f"  {l}" for l in summary_lines) if summary_lines else None
+
+    post_action = (
+        "Do ALL of the following, in order:"
+        "\n  1. REPORT the full DEPLOY_SUMMARY above to the user — every line — as the CDN completion summary."
+        " QUOTA-RAISE line(s) mean the conversion is correct but deploy is blocked until the user"
+        " requests that quota increase; relay each one so the user can raise it before applying."
+        "\n  2. Before ANY `terraform apply`, confirm with the user that ACM certificates are"
+        " already ISSUED in us-east-1 for every custom domain (see the PRE-DEPLOY BLOCKER line)."
+        " If not, tell them to provision + validate them first — apply will fail otherwise."
+        f"{s3_step}"
+        "\n  3. If user language is not English, translate conversion_report.md to that language as conversion_report_{lang}.md.")
 
     if fail_count == 0:
-        # A HARD-limit (QUOTA-REDESIGN) breach means the artifact is generated but
-        # NOT deployable as-is, and no quota increase will help. That is a
-        # structural STATUS: BLOCKED (per SCRIPT_STANDARDS — same class as the WAF
-        # generator's hard-cap block), not a free-text note under STATUS: OK, so
-        # an agent can branch on it without parsing prose. Exit stays 0: the JS is
-        # valid and the pipeline completed; BLOCKED carries the "don't deploy"
-        # signal. The full DEPLOY_SUMMARY + POST_ACTION ride along either way.
-        post_action = (
-            f"POST_ACTION: Do ALL of the following, in order:"
-            f"\n  1. REPORT the full DEPLOY_SUMMARY above to the user — every line — as the CDN completion summary."
-            f" QUOTA-RAISE line(s) mean the conversion is correct but deploy is blocked until the user"
-            f" requests that quota increase; relay each one so the user can raise it before applying."
-            f"\n  2. Before ANY `terraform apply`, confirm with the user that ACM certificates are"
-            f" already ISSUED in us-east-1 for every custom domain (see the PRE-DEPLOY BLOCKER line)."
-            f" If not, tell them to provision + validate them first — apply will fail otherwise."
-            f"{s3_step}"
-            f"\n  3. If user language is not English, translate conversion_report.md to that language as conversion_report_{{lang}}.md.")
+        # Base fields shared by the OK and BLOCKED paths (order = emit order).
+        fields = {"DOMAINS": len(results), "PASSED": pass_count}
+        if deploy_summary is not None:
+            fields["DEPLOY_SUMMARY"] = "\n" + deploy_summary
         if redesign:
-            items = "\n".join(f"  {w}" for w in redesign)
-            print(f"\n---RESULT---\nSPEC: 1\nSTATUS: BLOCKED\nDOMAINS: {len(results)}\nPASSED: {pass_count}"
-                  f"{deploy_summary}\n"
-                  f"BLOCKED_COUNT: {len(redesign)}\nBLOCKED_ITEMS:\n{items}\n"
-                  f"ACTION: FIX\n"
-                  f"CONTEXT: The Terraform was generated and the JS is valid, but the item(s) "
-                  f"above breach a HARD CloudFront limit (not raisable via Service Quotas/Support). "
-                  f"Deploy will be REJECTED as-is. Do NOT `terraform apply` — reduce/redesign the "
-                  f"named item in the source Cloudflare config (e.g. split KVS data across stores), "
-                  f"then re-run.\n"
-                  f"{post_action}")
+            # A HARD-limit (QUOTA-REDESIGN) breach → structural STATUS: BLOCKED
+            # (per SCRIPT_STANDARDS, same class as the WAF hard-cap block), not a
+            # free-text note under OK. Exit stays 0: the JS is valid and the
+            # pipeline completed; BLOCKED carries the "don't deploy" signal.
+            fields["BLOCKED_COUNT"] = len(redesign)
+            fields["BLOCKED_ITEMS"] = "\n" + "\n".join(f"  {w}" for w in redesign)
+            fields["ACTION"] = "FIX"
+            fields["CONTEXT"] = (
+                "The Terraform was generated and the JS is valid, but the item(s) above "
+                "breach a HARD CloudFront limit (not raisable via Service Quotas/Support). "
+                "Deploy will be REJECTED as-is. Do NOT `terraform apply` — reduce/redesign "
+                "the named item in the source Cloudflare config (e.g. split KVS data across "
+                "stores), then re-run.")
+            fields["POST_ACTION"] = post_action
+            emit_result("BLOCKED", **fields)
         else:
-            print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nDOMAINS: {len(results)}\nPASSED: {pass_count}"
-                  f"{deploy_summary}\n"
-                  f"{post_action}")
+            fields["POST_ACTION"] = post_action
+            emit_result("OK", **fields)
     else:
         failed_items = "\n".join(
             f"  {r['hostname']}: {', '.join(c['name'] + '=' + c['status'] for c in r['checks'] if c['status'] == 'FAIL')}"
             for r in results if r["overall_status"] == "FAIL"
         )
         # A JS-validation failure on one domain must NOT bury a deploy blocker on
-        # another. Carry the full DEPLOY_SUMMARY here too, and if any
-        # QUOTA-REDESIGN hard-limit breach exists, surface it as a structured
-        # BLOCKED_ITEMS block (indented continuation lines per SCRIPT_STANDARDS —
-        # NOT non-indented prose, which a strict parser would split into a garbage
-        # key). It survives fixing the failed domains, so the agent must see it.
-        redesign_block = ""
+        # another: carry DEPLOY_SUMMARY here too, and if a QUOTA-REDESIGN breach
+        # exists surface it as structured BLOCKED_ITEMS (it survives fixing the
+        # failed domains, so the agent must see it).
+        fields = {"PASSED": pass_count, "FAILED": fail_count,
+                  "FAILED_ITEMS": "\n" + failed_items, "ACTION": "FIX",
+                  "CONTEXT": f"{fail_count} domain(s) failed JS validation"}
         if redesign:
-            items = "\n".join(f"  {w}" for w in redesign)
-            redesign_block = (f"\nBLOCKED_COUNT: {len(redesign)}\nBLOCKED_ITEMS:\n{items}\n"
-                              f"BLOCKED_NOTE: A HARD CloudFront limit is exceeded (see "
-                              f"BLOCKED_ITEMS) and cannot be raised. Independent of the JS "
-                              f"failures above — even after those are fixed, do NOT deploy "
-                              f"until the source is redesigned. Report this to the user.")
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: ERROR\nPASSED: {pass_count}\nFAILED: {fail_count}\n"
-              f"FAILED_ITEMS:\n{failed_items}\nACTION: FIX\n"
-              f"CONTEXT: {fail_count} domain(s) failed JS validation"
-              f"{redesign_block}"
-              f"{deploy_summary}")
-        sys.exit(1)
+            fields["BLOCKED_COUNT"] = len(redesign)
+            fields["BLOCKED_ITEMS"] = "\n" + "\n".join(f"  {w}" for w in redesign)
+            fields["BLOCKED_NOTE"] = (
+                "A HARD CloudFront limit is exceeded (see BLOCKED_ITEMS) and cannot be "
+                "raised. Independent of the JS failures above — even after those are fixed, "
+                "do NOT deploy until the source is redesigned. Report this to the user.")
+        if deploy_summary is not None:
+            fields["DEPLOY_SUMMARY"] = "\n" + deploy_summary
+        emit_result("ERROR", **fields)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from cdn_expr_parser import (
     iter_condition_children, host_filter_applies, host_leaf_is_routing,
     condition_has_path_field, CACHE_BYPASS_HEADER,
 )
+from cdn_common import emit_result
 from cdn_rule_processors import (
     process_redirect_rule, process_rewrite_rule, process_config_rule,
     process_origin_rule, process_cache_rule, process_request_header_transform,
@@ -536,7 +537,15 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         # Inline error page served via CFF + KVS
         params = result.get("params", {})
         kvs_key = params.get("kvs_key", "")
+        # str()-coerce: a KVS value MUST be a string (AWS models it as required
+        # string; a non-str reaches botocore as ParamValidationError at seed
+        # time, after the infra exists). Cloudflare types error-page content as a
+        # String, but a malformed/hand-edited config could carry a JSON array or
+        # object — coerce here at the store point so both kvs-data.json and the
+        # size estimate are always valid.
         content = params.get("content", "")
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False)
         ir["metadata"]["kvs_requirements"]["needs_error_pages"] = True
         ir["metadata"]["kvs_data"].append({"key": kvs_key, "value": content})
         # Fall through to viewer_request_ops placement below
@@ -1147,18 +1156,14 @@ def _condition_is_pure_extension(condition):
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def _result(status, code, **fields):
-    """Emit a SCRIPT_STANDARDS ---RESULT--- block on stdout, then exit.
+    """Emit a ---RESULT--- via the shared cdn_common.emit_result, then exit.
 
-    Multi-line values (FAILED_ITEMS) are passed pre-formatted with two-space
-    continuation lines. Exit codes keep the existing pipeline contract:
-    0=OK, 1=PARTIAL (retry failed), 2=FATAL.
+    Keeps the positional `code` because this stage's PARTIAL maps to exit 1
+    (retry-failed-domains), NOT the standard 3 — so the exit code is passed
+    explicitly rather than derived from STATUS. Multi-line values (FAILED_ITEMS)
+    are pre-formatted with two-space continuation lines by the caller.
     """
-    print("\n---RESULT---")
-    print("SPEC: 1")
-    print(f"STATUS: {status}")
-    for k, v in fields.items():
-        print(f"{k}: {v}")
-    sys.exit(code)
+    emit_result(status, exit_code=code, **fields)
 
 
 def main():

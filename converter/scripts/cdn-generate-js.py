@@ -25,7 +25,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from cdn_expr_parser import (parse_expression_full, parse_dynamic_expression,
                              CF_FIELD_MAP, iter_condition_children,
-                             CACHE_BYPASS_HEADER, QUOTA_RAISE, load_summary_or_fatal)
+                             CACHE_BYPASS_HEADER)
+from cdn_common import QUOTA_RAISE, load_summary_or_fatal, emit_result
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -1410,13 +1411,11 @@ def main():
     ir_dir = os.path.join(output_dir, "ir", "final")
 
     if not os.path.isdir(ir_dir):
-        print(f"---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\nCONTEXT: IR directory not found: {ir_dir}")
-        sys.exit(2)
+        emit_result("FATAL", ACTION="FIX", CONTEXT=f"IR directory not found: {ir_dir}")
 
     ir_files = sorted(Path(ir_dir).glob("*.json"))
     if not ir_files:
-        print(f"---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\nCONTEXT: No IR files found in {ir_dir}")
-        sys.exit(2)
+        emit_result("FATAL", ACTION="FIX", CONTEXT=f"No IR files found in {ir_dir}")
 
     # ── Phase 1: Generate all JS in memory ───────────────────────────────────
 
@@ -1469,8 +1468,7 @@ def main():
         print(f"[JS] {hostname}: generated (vr {vr_size}B, vresp {vresp_size}B)", file=sys.stderr)
 
     if not all_vr:
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\nCONTEXT: All domains failed JS generation")
-        sys.exit(2)
+        emit_result("FATAL", ACTION="FIX", CONTEXT="All domains failed JS generation")
 
     # ── Phase 2: Content-hash dedup ──────────────────────────────────────────
 
@@ -1874,7 +1872,9 @@ if __name__ == "__main__":
     # from {} would erase every warning cdn-finalize recorded — including a
     # QUOTA-REDESIGN hard-limit breach — then write the truncated dict back,
     # silently hiding a deploy blocker. So fail LOUD instead of failing open.
-    summary_path = os.path.join(output_dir, "cdn_summary.json")
+    # expanduser to match the loader (which reads the same file) and the writer
+    # in cdn-finalize — a `~`-prefixed output_dir must resolve to one path.
+    summary_path = os.path.join(os.path.expanduser(output_dir), "cdn_summary.json")
     # Shape-validate via the shared loader (dict + warnings-is-list). A non-dict
     # or malformed summary here would otherwise crash on the item assignments
     # below, OR explode a string `warnings` into chars and write it back to disk
@@ -1882,11 +1882,11 @@ if __name__ == "__main__":
     # LOUD on stdout instead — starting fresh would hide a deploy blocker.
     _summary, _ctx = load_summary_or_fatal(output_dir)
     if _ctx is not None:
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
-              f"CONTEXT: {_ctx}. It is written by cdn-finalize (Stage 5); re-run Stage 5 "
-              f"before Stage 8. Refusing to continue — starting fresh would erase Stage-5 "
-              f"warnings (incl. any deploy-blocking QUOTA-REDESIGN).")
-        sys.exit(2)
+        emit_result("FATAL", ACTION="FIX",
+                    CONTEXT=f"{_ctx}. It is written by cdn-finalize (Stage 5); re-run "
+                            f"Stage 5 before Stage 8. Refusing to continue — starting "
+                            f"fresh would erase Stage-5 warnings (incl. any deploy-blocking "
+                            f"QUOTA-REDESIGN).")
     _summary["cff_total"] = actual_count
     _summary["cff_dedup"] = f"{original_count} -> {actual_count}"
     _summary["kvs_total"] = kvs_total
@@ -1914,25 +1914,24 @@ if __name__ == "__main__":
     ok_count = len(all_vr)
     fail_count = len(failed)
 
+    _dedup_ratio = f"{original_count} -> {actual_count}"
     if fail_count == 0:
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nDOMAINS: {ok_count}\nGENERATED: {ok_count}\n"
-              f"CFF_TOTAL: {actual_count}\nCFF_SHARED: {len(written_shared)}\n"
-              f"CFF_INDEPENDENT: {indep_count}\nCFF_DEDUP_RATIO: {original_count} -> {actual_count}\n"
-              f"KVS_TOTAL: {kvs_total}")
+        emit_result("OK", exit_after=False, DOMAINS=ok_count, GENERATED=ok_count,
+                    CFF_TOTAL=actual_count, CFF_SHARED=len(written_shared),
+                    CFF_INDEPENDENT=indep_count, CFF_DEDUP_RATIO=_dedup_ratio,
+                    KVS_TOTAL=kvs_total)
     elif ok_count > 0:
         failed_items = "\n".join(f"  {h}: {s} — {d}" for h, s, d in failed)
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: PARTIAL\nSUCCEEDED: {ok_count}\nFAILED: {fail_count}\n"
-              f"CFF_TOTAL: {actual_count}\nCFF_SHARED: {len(written_shared)}\n"
-              f"CFF_INDEPENDENT: {indep_count}\nCFF_DEDUP_RATIO: {original_count} -> {actual_count}\n"
-              f"FAILED_ITEMS:\n{failed_items}\nACTION: FIX\n"
-              f"{_SIZE_EXCEEDED_GUIDANCE}")
-        sys.exit(3)
+        emit_result("PARTIAL", SUCCEEDED=ok_count, FAILED=fail_count,
+                    CFF_TOTAL=actual_count, CFF_SHARED=len(written_shared),
+                    CFF_INDEPENDENT=indep_count, CFF_DEDUP_RATIO=_dedup_ratio,
+                    FAILED_ITEMS="\n" + failed_items, ACTION="FIX",
+                    raw_tail=_SIZE_EXCEEDED_GUIDANCE)
     else:
         failed_items = "\n".join(f"  {h}: {s} — {d}" for h, s, d in failed)
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nFAILED: {fail_count}\n"
-              f"FAILED_ITEMS:\n{failed_items}\nACTION: FIX\n"
-              f"{_SIZE_EXCEEDED_GUIDANCE}")
-        sys.exit(2)
+        emit_result("FATAL", FAILED=fail_count,
+                    FAILED_ITEMS="\n" + failed_items, ACTION="FIX",
+                    raw_tail=_SIZE_EXCEEDED_GUIDANCE)
 
 
 def _write_domain_functions_tf(san, config, ir, domain_dir, kvs_is_shared=False, shared_kvs_name=None):

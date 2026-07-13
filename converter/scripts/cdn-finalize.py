@@ -10,7 +10,15 @@ import json, sys, os, hashlib, copy, re
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdn_expr_parser import orp_header_union, QUOTA_RAISE, QUOTA_REDESIGN
+from cdn_expr_parser import orp_header_union
+from cdn_common import QUOTA_RAISE, QUOTA_REDESIGN
+
+
+def _nbytes(v):
+    """UTF-8 byte length of a value. str()-coerces first so a non-str (a KVS
+    value should be str after coercion at the store point, but be defensive)
+    can't raise AttributeError on .encode()."""
+    return len(str(v).encode("utf-8"))
 
 
 def _combined_name_len(*name_lists):
@@ -336,14 +344,9 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         if not kvs_data and not ir["metadata"].get("kvs_requirements", {}).get("needs_continent"):
             continue
         # Estimate: each entry = key bytes + value bytes + ~20 bytes overhead.
-        # AWS measures the store size in BYTES, so encode to UTF-8 — a char count
-        # under-reports multi-byte content (IDN hosts, non-Latin paths), which
-        # could let a real >5 MB store slip under the HARD-limit gate below.
-        # str(...) first: a value can be a non-str (a Cloudflare error-page
-        # `content` that's a JSON array/object is stored uncoerced), and the old
-        # len() tolerated that — .encode() alone would AttributeError on a list.
-        def _nbytes(v):
-            return len(str(v).encode("utf-8"))
+        # AWS measures the store size in BYTES (_nbytes encodes to UTF-8) — a char
+        # count under-reports multi-byte content (IDN hosts, non-Latin paths),
+        # which could let a real >5 MB store slip under the HARD-limit gate below.
         total_bytes = sum(_nbytes(e.get("key", "")) + _nbytes(e.get("value", "")) + 20
                           for e in kvs_data)
         # Continent/EU mappings add ~3KB
@@ -358,11 +361,12 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         # QUOTA-REDESIGN blocker (the data must be split across stores or shrunk),
         # NOT a "request a quota increase". The estimate is approximate, so a
         # 4–5 MB store is flagged as approaching (it may cross 5 MB once seeded).
-        # Display FLOORS to 2 decimals (integer math, no round-up): a sub-5 MB
-        # store can never render "5.00 MB" while landing in the "approaching"
-        # tier (4,996,000 B → "4.99 MB", not the self-contradictory "5.00 MB" a
-        # plain :.2f round would give). The >5 MB branch is unaffected — it only
-        # fires when the byte count genuinely exceeds the cap.
+        # Display FLOORS to 2 decimals (integer math, no round-up): a store BELOW
+        # 5 MB never rounds UP to "5.00 MB" in the "approaching" tier the way a
+        # plain :.2f would (4,996,000 B → "4.99 MB", not "5.00"). Exactly
+        # 5,000,000 B does show "5.00 MB", but that's honest — it is exactly at
+        # (not over) the 5 MB cap, which is why it's still in the approaching
+        # tier (the blocker gate is > 5,000,000, and 5 MB itself is allowed).
         est_mb = (total_bytes // 10_000) / 100
         if total_bytes > 5_000_000:
             all_warnings.append(

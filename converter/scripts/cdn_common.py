@@ -1,0 +1,98 @@
+"""Shared CDN-pipeline helpers — SCRIPT_STANDARDS result emitting, the
+cdn_summary.json loader, and the quota action-tag constants.
+
+Split out (mirroring waf_common.py) so file-IO / result-contract logic doesn't
+live in the expression parser. The single most important piece is emit_result:
+every CDN stage MUST emit its ---RESULT--- through it rather than hand-writing
+`print(f"...---RESULT---...")`, because hand-written blocks have repeatedly
+shipped bugs the agent then can't parse — a FATAL sent to stderr instead of
+stdout, a non-indented continuation line that splits into a garbage key, a
+CONTEXT string assembled into self-contradiction. Centralizing the envelope
+(stream, SPEC line, field order, multi-line indentation, STATUS→exit mapping)
+fixes all of those in one place and stops the next one.
+"""
+import json
+import os
+import sys
+
+# ── Quota action tags ─────────────────────────────────────────────────────────
+# The machine-readable prefix on each over-limit warning so the final
+# ---RESULT--- (and the agent) know what to DO:
+#   QUOTA-RAISE    — SOFT limit: config is correct, deploy is blocked only until
+#                    the quota is raised, then deploys unchanged.
+#   QUOTA-REDESIGN — HARD limit: no increase path; cdn-validate-js escalates to
+#                    STATUS: BLOCKED and the source must be reduced/redesigned.
+# Single source of truth: producers prefix with these, consumers test membership
+# against QUOTA_TAGS, so a typo in one literal can't silently disable a path.
+QUOTA_RAISE = "QUOTA-RAISE"
+QUOTA_REDESIGN = "QUOTA-REDESIGN"
+QUOTA_TAGS = (QUOTA_RAISE, QUOTA_REDESIGN)
+
+# STATUS → exit code (SCRIPT_STANDARDS). BLOCKED is a completed run with an
+# undeployable artifact, not a script failure → exit 0 (the block carries the
+# don't-deploy signal). OK also 0; ERROR 1; FATAL 2; PARTIAL 3.
+_STATUS_EXIT = {"OK": 0, "BLOCKED": 0, "ERROR": 1, "FATAL": 2, "PARTIAL": 3}
+
+
+def emit_result(status, *, exit_after=True, exit_code=None, raw_tail=None, **fields):
+    """Print a SCRIPT_STANDARDS ---RESULT--- block to STDOUT (never stderr — the
+    agent parses only stdout) and, by default, exit with the STATUS's code.
+
+    fields are emitted in the order given (kwargs preserve order). A value may be
+    a plain scalar (`KEY: value`) or a pre-formatted multi-line block whose
+    continuation lines are already two-space indented (DEPLOY_SUMMARY,
+    POST_ACTION, FAILED_ITEMS, BLOCKED_ITEMS) — those are passed through verbatim,
+    so callers keep full control of their body while the envelope (marker, SPEC,
+    STATUS, stream, exit) is uniform.
+
+    - exit_after=False: emit but return (for OK paths that keep running).
+    - exit_code: override the STATUS→code mapping when a caller needs a specific
+      code (rare; the mapping covers the normal cases).
+    - raw_tail: a pre-formatted multi-KEY block (its own `KEY: …` lines) appended
+      verbatim after the fields — for reusable guidance constants that already
+      carry several keys.
+    """
+    lines = ["", "---RESULT---", "SPEC: 1", f"STATUS: {status}"]
+    for key, value in fields.items():
+        lines.append(f"{key}: {value}")
+    if raw_tail:
+        lines.append(raw_tail)
+    print("\n".join(lines))
+    if exit_after:
+        code = exit_code if exit_code is not None else _STATUS_EXIT.get(status, 1)
+        sys.exit(code)
+
+
+def load_summary_or_fatal(output_dir):
+    """Load cdn_summary.json, returning (summary_dict, None) on success or
+    (None, context_str) on any problem so the caller can emit its own
+    ---RESULT--- STATUS: FATAL and exit.
+
+    Both readers of this file — cdn-generate-js (Stage 8, which reads FIRST and
+    writes back) and cdn-validate-js (Stage 9) — must go through here, and both
+    the top-level shape AND the `warnings` value are validated:
+      - missing/unreadable/invalid JSON → fatal (a truncated or absent file)
+      - not a JSON object (null/list/str/number) → fatal (Stage 8 would crash on
+        item assignment; Stage 9 would crash on _s.get)
+      - `warnings` present but not a list OF STRINGS → fatal (a string value
+        would be iterated char-by-char, exploding into garbage on write-back and
+        silently dropping a QUOTA-REDESIGN blocker; a null would raise on
+        iteration; a non-string element would crash the readers' w.startswith)
+    Guarding shape here, once, is why neither stage can fail-open on a malformed
+    summary and hide a deploy blocker. expanduser matches the writer
+    (cdn-finalize), so a `~`-prefixed output_dir doesn't misfire a FATAL."""
+    path = os.path.join(os.path.expanduser(output_dir), "cdn_summary.json")
+    try:
+        with open(path) as f:
+            summary = json.load(f)
+    except Exception as e:
+        return None, f"cdn_summary.json missing or unreadable ({e})"
+    if not isinstance(summary, dict):
+        return None, (f"cdn_summary.json is not a JSON object "
+                      f"(got {type(summary).__name__})")
+    warnings = summary.get("warnings")
+    if warnings is not None and not (isinstance(warnings, list)
+                                     and all(isinstance(w, str) for w in warnings)):
+        return None, ("cdn_summary.json 'warnings' must be a list of strings "
+                      "(a malformed value can hide a deploy blocker)")
+    return summary, None
