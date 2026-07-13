@@ -870,16 +870,31 @@ def _process_bulk_redirects(ir, hostname, apex, bulk_redirects, domain_config, o
 
     if kvs_entries:
         ir["metadata"]["kvs_requirements"]["needs_redirects"] = True
-        # Convert to KVS key-value format: key="redirect:{source}", value="{status}|{preserve_qs}|{target}"
+        # Convert to KVS key-value format: value="{status}|{preserve_qs}|{target}".
+        # Key convention (must match the CFF lookup in cdn-generate-js):
+        #   - exact:  "redirect:{source}"       matches only that exact host+path
+        #   - wildcard: "redirect:.{source}"    (leading dot) matches that host
+        #     AND any subdomain of it — written ONLY when include_subdomains=true.
+        # The dot prefix is the include_subdomains marker: the CFF walks the
+        # request host's parent suffixes against dotted keys, so a subdomain
+        # request finds the ancestor's wildcard entry. Without this the flag was
+        # silently dropped (key stored under the bare apex, never matched for a
+        # subdomain request).
         for entry in kvs_entries:
             src = entry["source_url"]
             tgt = entry["target_url"]
             status = entry["status_code"]
             pqs = "1" if entry["preserve_query_string"] else "0"
+            value = f"{status}|{pqs}|{tgt}"
             ir["metadata"]["kvs_data"].append({
                 "key": f"redirect:{src}",
-                "value": f"{status}|{pqs}|{tgt}",
+                "value": value,
             })
+            if entry["include_subdomains"]:
+                ir["metadata"]["kvs_data"].append({
+                    "key": f"redirect:.{src}",
+                    "value": value,
+                })
         # Add bulk_redirect op after redirect/rewrite/origin ops (Cloudflare execution order)
         default_beh = ir["cache_behaviors"][0]
         # Find insertion point: after last redirect/rewrite/origin_override op

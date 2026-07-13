@@ -1187,14 +1187,29 @@ def _cond_has_field(cond, fields):
 
 
 def _generate_bulk_redirect_block(indent="  "):
-    """Generate the fixed bulk_redirect KVS lookup template."""
+    """Generate the fixed bulk_redirect KVS lookup template.
+
+    Key convention (must match the store side in cdn-preprocess):
+      - exact match:    'redirect:{host}{uri}'
+      - include_subdomains: '.{domain}{uri}' — a leading-dot key registered for a
+        domain that opted into subdomain coverage. To honor it, walk the request
+        host's parent suffixes (www.a.example.com → a.example.com → example.com)
+        and probe each as a dotted key, so a subdomain request finds the
+        ancestor's wildcard entry. Dotted keys are ONLY written when
+        include_subdomains=true, so walking parents can never hit an exact-only
+        redirect — no over-matching.
+    """
     return [
         f"{indent}const host = request.headers.host.value;",
         f"{indent}const uri = request.uri;",
         f"{indent}let kv = null;",
         f"{indent}try {{ kv = await kvsHandle.get('redirect:' + host + uri); }} catch(e) {{}}",
-        f"{indent}if (kv === null && host.includes('.')) {{",
-        f"{indent}  try {{ kv = await kvsHandle.get('redirect:.' + host + uri); }} catch(e) {{}}",
+        f"{indent}if (kv === null) {{",
+        f"{indent}  var parts = host.split('.');",
+        f"{indent}  for (var i = 0; i < parts.length - 1 && kv === null; i++) {{",
+        f"{indent}    var suffix = parts.slice(i).join('.');",
+        f"{indent}    try {{ kv = await kvsHandle.get('redirect:.' + suffix + uri); }} catch(e) {{}}",
+        f"{indent}  }}",
         f"{indent}}}",
         f"{indent}if (kv !== null) {{",
         f"{indent}  const pts = kv.split('|');",

@@ -54,6 +54,15 @@ def generate_test_script(ir):
                 continue
 
             test_path = _derive_test_path(cond, pp)
+            # No derivable matching path (e.g. a regex we can't sample, or a
+            # non-path condition) → SKIP with a manual note instead of emitting a
+            # test on '/' that the rule doesn't match and that 404s (false fail).
+            if test_path is None:
+                skips.append({"name": f"{otype}: {desc}",
+                              "note": "Path-scoped by a condition no single sample path "
+                                      "reliably matches (e.g. a complex regex). Test manually "
+                                      "with a URL that matches the rule."})
+                continue
 
             if otype == "redirect":
                 target = params.get("target_url", "")
@@ -111,6 +120,11 @@ def generate_test_script(ir):
                 continue
 
             test_path = _derive_test_path(cond, pp)
+            if test_path is None:
+                skips.append({"name": f"response header: {desc}",
+                              "note": "Path-scoped by a condition no single sample path "
+                                      "reliably matches. Test manually with a matching URL."})
+                continue
 
             if otype == "set_response_header":
                 tests.append({
@@ -228,8 +242,106 @@ def _skip_reason(cond):
     return "Complex condition — test manually"
 
 
+def _regex_emit(p):
+    """Emit ONE string matching regex body `p` (no ^/$ anchors, no path
+    normalization), or None if a construct isn't handled. Cloudflare redirect
+    regexes are simple structured capture patterns (e.g.
+    /products/([0-9]+)/([a-z\\-]+)), not arbitrary regex, so token substitution
+    suffices. Each atom emits its minimal satisfying text once; a following
+    quantifier (+ * ? {n} {n,m}) is consumed — one instance already covers +/{n}
+    (n>=1), and * / ? / {0..} are satisfied by zero, so one instance is always
+    valid."""
+    out = []
+    i = 0
+    while i < len(p):
+        c = p[i]
+        atom = None  # the text this atom contributes (before quantifier)
+        if c == "\\":
+            if i + 1 >= len(p):
+                return None
+            atom = p[i + 1]; i += 2                 # escaped literal (\- \. \/)
+        elif c == "(":
+            depth, j = 1, i + 1
+            while j < len(p) and depth:
+                if p[j] == "\\": j += 2; continue
+                if p[j] == "(": depth += 1
+                elif p[j] == ")": depth -= 1
+                j += 1
+            if depth: return None                    # unbalanced
+            inner = p[i + 1:j - 1].split("|", 1)[0]  # first alternative
+            if inner.startswith("?:"): inner = inner[2:]
+            atom = _regex_emit(inner)
+            if atom is None: return None
+            i = j
+        elif c == "[":
+            j = p.find("]", i + 1)
+            if j == -1: return None
+            cls = p[i + 1:j]
+            atom = ("0" if "0-9" in cls or any(d in cls for d in "0123456789")
+                    else "a" if "a-z" in cls
+                    else "x")
+            i = j + 1
+        elif c == ".":
+            atom = "x"; i += 1
+        elif c in "^$":
+            i += 1; continue                         # stray anchor, no output
+        elif c in "+*?{":
+            # a bare quantifier with no preceding atom shouldn't happen; skip
+            i += 1
+            if c == "{":
+                k = p.find("}", i - 1)
+                if k != -1: i = k + 1
+            continue
+        else:
+            atom = c; i += 1                          # literal char
+        # consume a trailing quantifier. + * ? are satisfied by one/zero, so one
+        # instance is fine; {n}/{n,m} require exactly/at-least n, so repeat n×.
+        reps = 1
+        if i < len(p):
+            if p[i] in "+*?":
+                i += 1
+            elif p[i] == "{":
+                k = p.find("}", i)
+                if k != -1:
+                    spec = p[i + 1:k]
+                    n = spec.split(",", 1)[0].strip()
+                    reps = int(n) if n.isdigit() else 1
+                    i = k + 1
+        out.append(atom * reps)
+    return "".join(out)
+
+
+def _regex_sample_path(pattern):
+    """Build ONE path that satisfies a Cloudflare redirect regex, or None if we
+    can't. Returning None (→ caller skips the test) is correct when unsure:
+    emitting a '/'-based test for a path-scoped regex rule is exactly the
+    false-positive 404 this fixes."""
+    p = pattern.strip()
+    # Top-level alternation (e.g. `^/a/(.*)|^/b/(.*)`): sample the FIRST branch,
+    # so we don't emit a literal '|' into the path. Split only on top-level '|'
+    # (not inside groups), then strip that branch's own ^/$ anchors.
+    depth = 0
+    branch_end = len(p)
+    j = 0
+    while j < len(p):
+        if p[j] == "\\": j += 2; continue
+        if p[j] == "(": depth += 1
+        elif p[j] == ")": depth -= 1
+        elif p[j] == "|" and depth == 0: branch_end = j; break
+        j += 1
+    p = p[:branch_end]
+    if p.startswith("^"): p = p[1:]
+    if p.endswith("$"): p = p[:-1]
+    sample = _regex_emit(p)
+    if sample is None:
+        return None
+    return sample if sample.startswith("/") else "/" + sample
+
+
 def _derive_test_path(cond, path_pattern):
-    """Derive a test URL path from condition or path pattern."""
+    """Derive a test URL path from condition or path pattern. Returns None when a
+    condition is present but no matching sample can be built (caller should SKIP
+    rather than emit a non-matching '/' test that false-fails)."""
     if cond:
         field = cond.get("field", "")
         op = cond.get("op", "")
@@ -241,6 +353,16 @@ def _derive_test_path(cond, path_pattern):
                 return value + "test"
             if op == "ends_with":
                 return "/test/" + value.lstrip("/")
+            if op == "matches":
+                # Regex-scoped rule: build a path the regex accepts. If we can't,
+                # return None so the caller skips it (a '/' test would 404).
+                return _regex_sample_path(value)
+        # A condition on some OTHER field (host, cookie, geo, a logic tree) can't
+        # be exercised by a URL path alone — don't fabricate one.
+        if field and field not in ("uri.path", "uri"):
+            return None
+        if cond.get("logic"):
+            return None
     return _path_from_pattern(path_pattern)
 
 

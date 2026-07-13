@@ -780,10 +780,13 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
 
     step_n += 1
     lines += [
-        f"### {step_n}. DNS cutover",
+        f"### {step_n}. DNS cutover (you do this, at your own pace)",
         "",
-        f"Update DNS records for all {len(domain_list)} domains to point to their "
-        "CloudFront distribution domain names (CNAME records).",
+        f"The tool does NOT touch DNS. When you're ready, point each of the "
+        f"{len(domain_list)} domains at its CloudFront distribution domain name "
+        "(a CNAME, or an ALIAS/ANAME at the apex). Do this on your own schedule — "
+        "there's no rush, and you'll likely want to run your own canary / staged "
+        "rollout first. Nothing above requires DNS to be switched.",
         "",
         "Get each distribution's domain name:",
         "```bash",
@@ -791,6 +794,16 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         '  echo "$(basename $d): $(cd "$d" && terraform output -raw distribution_domain_name 2>/dev/null)"',
         "done",
         "```",
+        "",
+        "**Test before you cut over** — no DNS change needed. Hit the distribution "
+        "domain directly and spoof the Host header, which is exactly what the "
+        "generated `test-cdn-rules.py` does:",
+        "```bash",
+        "curl -sI -H 'Host: www.example.com' https://<distribution-domain>/some/path",
+        "```",
+        "This exercises the real behaviors, functions, and origins on CloudFront "
+        "while your live traffic still flows through Cloudflare, so you can validate "
+        "and canary safely, then switch DNS when you're satisfied.",
         "",
     ]
 
