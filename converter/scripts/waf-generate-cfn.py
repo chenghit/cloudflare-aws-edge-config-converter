@@ -2229,7 +2229,10 @@ def main():
               f"deploy time by the item(s) above (AWS hard caps). Do NOT deploy as-is. "
               f"Reduce the offending WebACL/rule complexity in the source Cloudflare "
               f"config (or split affected hosts), then re-run the pipeline.")
-        return  # exit 0 — pipeline completes; BLOCKED status carries the signal
+        return  # exit 0 — BLOCKED is a completed run with an undeployable artifact,
+                # not a script failure (see SCRIPT_STANDARDS STATUS table). Exit 0
+                # also keeps waf-pipeline.sh's run_step from misreading it as a step
+                # failure and aborting before the BLOCKED_ITEMS signal is delivered.
 
     print(f"OK: {num_resources} resources, {num_webacls} WebACLs, "
           f"{num_ip_sets} IP sets, {wcu_display}")

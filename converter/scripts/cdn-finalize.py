@@ -9,6 +9,9 @@ Exit codes: 0 = OK, 1 = error.
 import json, sys, os, hashlib, copy, re
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cdn_expr_parser import orp_header_union
+
 
 def _combined_name_len(*name_lists):
     """Total character length of all query-string / header / cookie NAMES in a
@@ -340,15 +343,31 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
             total_bytes += 3000
         if kvs_req.get("needs_eu"):
             total_bytes += 300
-        if total_bytes > 4_000_000:
+        # The 5 MB per-store size is a HARD CloudFront limit — NOT adjustable via
+        # Service Quotas or a Support case (verified: it has no increase path;
+        # writes past 5 MB fail with EntitySizeLimitExceeded). So >5 MB is a
+        # QUOTA-REDESIGN blocker (the data must be split across stores or shrunk),
+        # NOT a "request a quota increase". The estimate is approximate, so a
+        # 4–5 MB store is flagged as approaching (it may cross 5 MB once seeded).
+        est_mb = total_bytes / 1_000_000
+        if total_bytes > 5_000_000:
             all_warnings.append(
-                f"KVS for {hostname}: estimated {total_bytes / 1_000_000:.1f} MB "
-                f"(limit 5 MB). Reduce bulk redirects or request KVS quota increase."
+                f"QUOTA-REDESIGN — KVS for {hostname}: estimated {est_mb:.1f} MB exceeds the "
+                f"5 MB HARD per-store limit, NOT adjustable via Service Quotas/Support. "
+                f"Deploy/seeding will be rejected (EntitySizeLimitExceeded). Split the data "
+                f"across multiple key value stores (a domain's error pages, bulk redirects, "
+                f"and IP/geo lists can each use a separate store) or shrink it before deploying."
+            )
+        elif total_bytes > 4_000_000:
+            all_warnings.append(
+                f"KVS for {hostname}: estimated {est_mb:.1f} MB (5 MB is a HARD, non-raisable "
+                f"limit). Close to the cap — the estimate is approximate, so verify after "
+                f"seeding; if it crosses 5 MB, split the data across multiple stores."
             )
         elif total_bytes > 3_000_000:
             all_warnings.append(
-                f"KVS for {hostname}: estimated {total_bytes / 1_000_000:.1f} MB "
-                f"(limit 5 MB). Approaching limit — monitor after deployment."
+                f"KVS for {hostname}: estimated {est_mb:.1f} MB (HARD limit 5 MB). "
+                f"Approaching limit — monitor after deployment."
             )
 
     # ── CloudFront quota checks (soft vs hard) ────────────────────────────────
@@ -398,11 +417,7 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     # by header set), not in the manifest — count distinct header sets here so the
     # quota check (and the final ---RESULT--- warning) reflects the real total.
     # Was a bug: 54 hosts each got an identical custom ORP → hit the 20 cap.
-    custom_orp_sets = {
-        tuple(sorted({h for b in ir["cache_behaviors"]
-                      for h in b.get("required_orp_headers", [])}))
-        for ir in all_irs
-    }
+    custom_orp_sets = {tuple(orp_header_union(ir)) for ir in all_irs}
     custom_orp_sets.discard(())  # domains with no native-header need
     policy_counts["origin_request_policy"] += len(custom_orp_sets)
     for ptype, label in [
@@ -446,15 +461,14 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         # Cache behaviors per distribution (SOFT: 75).
         _quota_warn(len(ir["cache_behaviors"]), 75, False, f"{hostname}: cache behaviors")
 
-        # Custom ORP header whitelist (SOFT: 10). The custom ORP forwards the
-        # UNION of required_orp_headers across all of the domain's behaviors
-        # (that's what cdn-generate-tf-scaffold's collect_orp_headers builds and
-        # what the shared ORP resource actually contains). Checking per-behavior
-        # would miss a domain that stays <10 on each behavior but exceeds 10 in
-        # the union — the real ORP resource is what AWS validates. Header NAME
-        # length also counts toward the 1024 combined-name HARD limit.
-        orp_union = sorted({h for b in ir["cache_behaviors"]
-                            for h in b.get("required_orp_headers", [])})
+        # Custom ORP header whitelist (SOFT: 10). The shared custom ORP forwards
+        # the UNION of required_orp_headers across all of the domain's behaviors
+        # (orp_header_union — the SAME helper the resource and reference use).
+        # Checking per-behavior would miss a domain that stays <10 on each
+        # behavior but exceeds 10 in the union — the real ORP resource is what
+        # AWS validates. Header NAME length also counts toward the 1024
+        # combined-name HARD limit.
+        orp_union = orp_header_union(ir)
         if orp_union:
             _quota_warn(len(orp_union), 10, False,
                         f"{hostname}: custom ORP forwarded headers (union across behaviors)")
@@ -468,11 +482,6 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
                           for b in ir["cache_behaviors"]
                           if b.get("origin", {}).get("domain")}
         _quota_warn(len(origin_domains), 100, False, f"{hostname}: origins per distribution")
-
-        # Alternate domain names (CNAMEs) per distribution (SOFT: 100). One
-        # distribution == one hostname here, so this is 1 in practice; checked so
-        # a future many-alias change can't silently breach the cap.
-        _quota_warn(1, 100, False, f"{hostname}: alternate domain names (CNAMEs)")
 
     # Per-account totals the pipeline can know here: one distribution per proxied
     # host (SOFT: 500). NOTE: the KVS-store quota is NOT checked here — KVS is

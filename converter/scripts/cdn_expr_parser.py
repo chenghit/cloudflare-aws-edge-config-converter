@@ -6,6 +6,7 @@ Complex expressions are left as raw_expression for cdn-generate-js.py
 
 Returns (condition, raw_expression) — exactly one is non-None.
 """
+import hashlib
 import re
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -250,6 +251,30 @@ def iter_condition_children(cond):
         yield p
     if "item" in cond:
         yield cond["item"]
+
+
+def orp_header_union(ir):
+    """The sorted UNION of required_orp_headers across ALL of a domain's cache
+    behaviors — i.e. the exact header set the domain's shared custom ORP resource
+    forwards. Single source of truth for the call sites that MUST agree or the
+    pipeline breaks: the shared-ORP resource (cdn-generate-shared-policies), the
+    per-behavior ORP reference (cdn-generate-tf-scaffold), and the ORP-header
+    quota check (cdn-finalize). Per-behavior counts do NOT match the real
+    resource — a domain can stay under 10 on each behavior yet exceed 10 in the
+    union, which is what AWS actually validates."""
+    headers = set()
+    for b in ir.get("cache_behaviors", []):
+        headers.update(b.get("required_orp_headers", []))
+    return sorted(headers)
+
+
+def custom_orp_hash(headers):
+    """Stable 8-char id for a custom-ORP header set. The shared-ORP RESOURCE name
+    (cdn-generate-shared-policies) and the per-domain DATA-SOURCE name (cdn-
+    generate-tf-scaffold) both derive from this, so they MUST use one function.
+    Sorted so header order can't change the hash."""
+    key = ",".join(sorted(headers))
+    return hashlib.sha256(key.encode()).hexdigest()[:8]
 
 
 def extract_orp_headers(condition):

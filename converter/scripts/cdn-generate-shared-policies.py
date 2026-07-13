@@ -9,7 +9,10 @@ Usage:
 
 Exit codes: 0 = OK, 1 = error.
 """
-import json, sys, os, hashlib, glob
+import json, sys, os, glob
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cdn_expr_parser import custom_orp_hash, orp_header_union
 
 
 def hcl_id(pid):
@@ -21,14 +24,6 @@ def hcl_list(items):
         return "[]"
     sorted_items = sorted(items)
     return "[" + ", ".join(f'"{i}"' for i in sorted_items) + "]"
-
-
-def custom_orp_hash(headers):
-    """Stable 8-char id for a custom-ORP header set. MUST match the identical
-    helper in cdn-generate-tf-scaffold.py so the resource name (here) and the
-    data-source name (there) line up. Sorted so order can't change the hash."""
-    key = ",".join(sorted(headers))
-    return hashlib.sha256(key.encode()).hexdigest()[:8]
 
 
 def _orp_desc(headers):
@@ -79,18 +74,18 @@ def gen_custom_orp(headers):
 
 
 def collect_custom_orp_headersets(output_dir):
-    """Scan all final IRs for distinct required_orp_headers sets. Returns a dict
-    {hash8: sorted_headers_list}, one entry per unique non-empty header set."""
+    """Scan all final IRs for distinct custom-ORP header sets. Returns a dict
+    {hash8: sorted_headers_list}, one entry per unique non-empty header set. Uses
+    the shared orp_header_union / custom_orp_hash so the resource name generated
+    here matches the data-source name cdn-generate-tf-scaffold emits."""
     final_dir = os.path.join(output_dir, "ir", "final")
     sets = {}
     for jf in glob.glob(os.path.join(final_dir, "*.json")):
         with open(jf) as f:
             ir = json.load(f)
-        headers = set()
-        for b in ir.get("cache_behaviors", []):
-            headers.update(b.get("required_orp_headers", []))
+        headers = orp_header_union(ir)
         if headers:
-            sets[custom_orp_hash(headers)] = sorted(headers)
+            sets[custom_orp_hash(headers)] = headers
     return sets
 
 

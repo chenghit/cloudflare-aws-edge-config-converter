@@ -1837,10 +1837,14 @@ if __name__ == "__main__":
     # happens here), so it must be checked here, NOT counted per-host there.
     kvs_standalone = sum(1 for san in kvs_hashes if san not in shared_kvs_domains)
     kvs_total = len(shared_kvs_groups) + kvs_standalone
+    # KVS-stores-per-account (50) is SOFT but raisable ONLY via an AWS Support
+    # case — it has no Service Quotas console entry (no L- quota code), same as
+    # the CFF-count quota above. Do NOT say "Service Quotas".
     kvs_warn = None
     if kvs_total > 50:
-        kvs_warn = (f"{kvs_total} KeyValueStores exceed default quota 50 (SOFT). "
-                    f"Request a quota increase via Service Quotas before deploying.")
+        kvs_warn = (f"{kvs_total} KeyValueStores exceed the default quota 50 (SOFT). "
+                    f"Request an increase via an AWS Support case (this quota has no "
+                    f"Service Quotas console entry) before deploying.")
     elif kvs_total > 40:
         kvs_warn = f"{kvs_total} KeyValueStores approaching default quota 50 (SOFT)."
     if kvs_warn:
@@ -1849,20 +1853,31 @@ if __name__ == "__main__":
     # Augment cdn_summary.json (written by cdn-finalize) with post-dedup CFF/KVS
     # counts + any CFF/KVS quota warning, so the last step (cdn-validate-js) can
     # summarize them in the final ---RESULT---.
+    #
+    # cdn-finalize ALWAYS writes this file first (Stage 5, before this Stage 8).
+    # If it's missing or unreadable here, something is wrong AND blindly starting
+    # from {} would erase every warning cdn-finalize recorded — including a
+    # QUOTA-REDESIGN hard-limit breach — then write the truncated dict back,
+    # silently hiding a deploy blocker. So fail LOUD instead of failing open.
     summary_path = os.path.join(output_dir, "cdn_summary.json")
     try:
         with open(summary_path) as f:
             _summary = json.load(f)
-    except Exception:
-        _summary = {}
+    except Exception as e:
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
+              f"CONTEXT: cdn_summary.json missing or unreadable ({e}). It is written by "
+              f"cdn-finalize (Stage 5); re-run Stage 5 before Stage 8. Refusing to "
+              f"continue — starting fresh would erase Stage-5 warnings (incl. any "
+              f"deploy-blocking QUOTA-REDESIGN).", file=sys.stderr)
+        sys.exit(2)
     _summary["cff_total"] = actual_count
     _summary["cff_dedup"] = f"{original_count} -> {actual_count}"
     _summary["kvs_total"] = kvs_total
     # Tag with QUOTA-RAISE so the final ---RESULT--- carries the same
     # raise-and-proceed signal as cdn-finalize's checks (both are SOFT quotas;
     # the conversion is correct, deploy is only blocked until the quota is
-    # raised). CFF count is raised via AWS Support (NOT the Service Quotas
-    # console); KVS stores via Service Quotas.
+    # raised). BOTH the CFF-count and KVS-stores quotas are raised via an AWS
+    # Support case, NOT the Service Quotas console.
     _extra = list(_summary.get("warnings", []))
     if actual_count > 100:
         _extra.append(f"QUOTA-RAISE — CloudFront Functions per account: {actual_count} "

@@ -333,12 +333,24 @@ def main():
     # cdn-generate-js). This is the LAST thing the agent sees for the CDN
     # pipeline, so every deploy concern must be here — intermediate step RESULTs
     # get diluted by later steps (esp. report translation).
+    # cdn_summary.json is written by cdn-finalize (Stage 5) and augmented by
+    # cdn-generate-js (Stage 8) — both run before this final step, so it MUST be
+    # present and readable here. Defaulting to {} on failure would silently drop
+    # every deploy concern — including a deploy-blocking QUOTA-REDESIGN — and
+    # still print STATUS: OK. Fail LOUD instead: a hidden hard-limit breach is
+    # far worse than a noisy stop.
     summary_lines = []
+    summary_path = os.path.join(output_dir, "cdn_summary.json")
     try:
-        with open(os.path.join(output_dir, "cdn_summary.json")) as f:
+        with open(summary_path) as f:
             _s = json.load(f)
-    except Exception:
-        _s = {}
+    except Exception as e:
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
+              f"CONTEXT: cdn_summary.json missing or unreadable ({e}) — it carries the "
+              f"deploy summary and any quota blockers. Re-run Stage 5 (cdn-finalize) and "
+              f"Stage 8 (cdn-generate-js) before this step. Refusing to report STATUS: OK "
+              f"without it.")
+        sys.exit(2)
     if _s:
         summary_lines.append(f"Domains: {_s.get('domains','?')}, unique policies: "
                              f"{_s.get('total_policies','?')}, CFF: {_s.get('cff_dedup','?')}, "
@@ -375,35 +387,59 @@ def main():
         if summary_lines else ""
 
     if fail_count == 0:
-        # A HARD-limit (QUOTA-REDESIGN) breach means the config cannot deploy
-        # as-is and no quota increase will help — the agent must STOP and tell
-        # the user, not attempt apply. Make that the first, loudest step.
-        redesign_step = ""
+        # A HARD-limit (QUOTA-REDESIGN) breach means the artifact is generated but
+        # NOT deployable as-is, and no quota increase will help. That is a
+        # structural STATUS: BLOCKED (per SCRIPT_STANDARDS — same class as the WAF
+        # generator's hard-cap block), not a free-text note under STATUS: OK, so
+        # an agent can branch on it without parsing prose. Exit stays 0: the JS is
+        # valid and the pipeline completed; BLOCKED carries the "don't deploy"
+        # signal. The full DEPLOY_SUMMARY + POST_ACTION ride along either way.
+        post_action = (
+            f"POST_ACTION: Do ALL of the following, in order:"
+            f"\n  1. REPORT the full DEPLOY_SUMMARY above to the user — every line — as the CDN completion summary."
+            f" QUOTA-RAISE line(s) mean the conversion is correct but deploy is blocked until the user"
+            f" requests that quota increase; relay each one so the user can raise it before applying."
+            f"\n  2. Before ANY `terraform apply`, confirm with the user that ACM certificates are"
+            f" already ISSUED in us-east-1 for every custom domain (see the PRE-DEPLOY BLOCKER line)."
+            f" If not, tell them to provision + validate them first — apply will fail otherwise."
+            f"{s3_step}"
+            f"\n  3. If user language is not English, translate conversion_report.md to that language as conversion_report_{{lang}}.md.")
         if redesign:
-            redesign_step = (
-                "\n  ⛔ DEPLOY BLOCKED (do this FIRST) — the DEPLOY_SUMMARY has QUOTA-REDESIGN"
-                " line(s): a HARD CloudFront limit is exceeded and CANNOT be raised via Service"
-                " Quotas/Support. Do NOT run `terraform apply` — it will be rejected. Tell the user"
-                " exactly which limit and what to shrink in the source Cloudflare config, then stop"
-                " and wait.")
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nDOMAINS: {len(results)}\nPASSED: {pass_count}"
-              f"{deploy_summary}\n"
-              f"POST_ACTION: Do ALL of the following, in order:"
-              f"{redesign_step}"
-              f"\n  1. REPORT the full DEPLOY_SUMMARY above to the user — every line — as the CDN completion summary."
-              f" QUOTA-RAISE line(s) mean the conversion is correct but deploy is blocked until the user"
-              f" requests that quota increase; relay each one so the user can raise it before applying."
-              f"\n  2. Before ANY `terraform apply`, confirm with the user that ACM certificates are"
-              f" already ISSUED in us-east-1 for every custom domain (see the PRE-DEPLOY BLOCKER line)."
-              f" If not, tell them to provision + validate them first — apply will fail otherwise."
-              f"{s3_step}"
-              f"\n  3. If user language is not English, translate conversion_report.md to that language as conversion_report_{{lang}}.md.")
+            items = "\n".join(f"  {w}" for w in redesign)
+            print(f"\n---RESULT---\nSPEC: 1\nSTATUS: BLOCKED\nDOMAINS: {len(results)}\nPASSED: {pass_count}"
+                  f"{deploy_summary}\n"
+                  f"BLOCKED_COUNT: {len(redesign)}\nBLOCKED_ITEMS:\n{items}\n"
+                  f"ACTION: FIX\n"
+                  f"CONTEXT: The Terraform was generated and the JS is valid, but the item(s) "
+                  f"above breach a HARD CloudFront limit (not raisable via Service Quotas/Support). "
+                  f"Deploy will be REJECTED as-is. Do NOT `terraform apply` — reduce/redesign the "
+                  f"named item in the source Cloudflare config (e.g. split KVS data across stores), "
+                  f"then re-run.\n"
+                  f"{post_action}")
+        else:
+            print(f"\n---RESULT---\nSPEC: 1\nSTATUS: OK\nDOMAINS: {len(results)}\nPASSED: {pass_count}"
+                  f"{deploy_summary}\n"
+                  f"{post_action}")
     else:
         failed_items = "\n".join(
             f"  {r['hostname']}: {', '.join(c['name'] + '=' + c['status'] for c in r['checks'] if c['status'] == 'FAIL')}"
             for r in results if r["overall_status"] == "FAIL"
         )
-        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: ERROR\nPASSED: {pass_count}\nFAILED: {fail_count}\nFAILED_ITEMS:\n{failed_items}\nACTION: FIX\nCONTEXT: {fail_count} domain(s) failed JS validation")
+        # A JS-validation failure on one domain must NOT bury a deploy blocker on
+        # another. Carry the full DEPLOY_SUMMARY here too, and if any
+        # QUOTA-REDESIGN hard-limit breach exists, call it out — it survives
+        # fixing the JS failure and would otherwise be invisible in this branch.
+        redesign_note = ""
+        if redesign:
+            redesign_note = ("\n⛔ DEPLOY BLOCKED (separate from the JS failures above) — the "
+                             "DEPLOY_SUMMARY has QUOTA-REDESIGN line(s): a HARD CloudFront limit "
+                             "is exceeded and cannot be raised. Even after the failed domains are "
+                             "fixed, do NOT deploy until the source is redesigned. Report this to "
+                             "the user.")
+        print(f"\n---RESULT---\nSPEC: 1\nSTATUS: ERROR\nPASSED: {pass_count}\nFAILED: {fail_count}\n"
+              f"FAILED_ITEMS:\n{failed_items}\nACTION: FIX\n"
+              f"CONTEXT: {fail_count} domain(s) failed JS validation"
+              f"{deploy_summary}{redesign_note}")
         sys.exit(1)
 
 

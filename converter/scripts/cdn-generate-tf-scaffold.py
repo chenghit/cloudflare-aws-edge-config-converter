@@ -9,15 +9,10 @@ Usage:
 
 Exit codes: 0 = OK, 1 = error.
 """
-import json, sys, os, hashlib
+import json, sys, os
 
-
-def custom_orp_hash(headers):
-    """Stable 8-char id for a custom-ORP header set. MUST match the identical
-    helper in cdn-generate-shared-policies.py so this data-source name lines up
-    with the resource name generated there. Sorted so order can't change it."""
-    key = ",".join(sorted(headers))
-    return hashlib.sha256(key.encode()).hexdigest()[:8]
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cdn_expr_parser import custom_orp_hash, orp_header_union
 
 
 def load_ir(final_dir, hostname):
@@ -83,14 +78,6 @@ def _behavior_needs_cff(ir, beh, ops_key):
     if beh["path_pattern"] == "*":
         return len(beh.get(ops_key, [])) > 0
     return len(beh.get(ops_key, [])) > 0 or _has_zonewide_op(ir, ops_key)
-
-
-def collect_orp_headers(ir):
-    """Collect all required_orp_headers across all behaviors, deduplicated."""
-    headers = set()
-    for b in ir["cache_behaviors"]:
-        headers.update(b.get("required_orp_headers", []))
-    return sorted(headers)
 
 
 # ── HCL generation helpers ───────────────────────────────────────────────────
@@ -179,7 +166,7 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
     ordered_behs = [b for b in behaviors if b["path_pattern"] != "*"]
     ds = default_beh["distribution_settings"]
     has_s3 = any(o["s3_origin"] for o in origins)
-    orp_headers = collect_orp_headers(ir)
+    orp_headers = orp_header_union(ir)
     le = meta.get("lambda_edge", {})
     has_le_origin_resp = le.get("origin_response") is not None
     kvs_req = meta.get("kvs_requirements", {})
