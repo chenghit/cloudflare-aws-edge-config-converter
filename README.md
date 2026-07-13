@@ -12,14 +12,23 @@ No install step. Clone the repo, then let your AI agent (Claude Code, Kiro CLI, 
 git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
 ```
 
-Then tell your agent:
+First, point your agent at the repo so it knows how to drive the pipeline:
 
 ```
-Read AGENTS.md in /path/to/cloudflare-aws-edge-config-converter, then convert my
-Cloudflare config at /path/to/cloudflare-backup to AWS.
+Read AGENTS.md in /path/to/cloudflare-aws-edge-config-converter.
 ```
 
-The agent reads `AGENTS.md` → `converter/SKILL.md` and runs the pipeline for you. You can scope it:
+It reads `AGENTS.md` → `converter/SKILL.md` and is now ready to run.
+
+**Next, you need a Cloudflare config backup** — the converter reads one, it does not pull from the Cloudflare API itself. If you don't have one yet, the `backup/` directory in this repo has a script that produces it, and the agent will guide you through running it (it never sees your API credentials — you configure those yourself). See [Getting a backup](#getting-a-backup). Already have a backup? Point the agent at it.
+
+Then tell the agent to convert:
+
+```
+Convert my Cloudflare config at /path/to/cloudflare-backup to AWS.
+```
+
+You can scope it:
 
 ```
 Convert Cloudflare security rules in /path/to/cloudflare-backup to AWS WAF
@@ -34,8 +43,6 @@ Read the conversion report and deploy it to AWS for me.
 ```
 
 The agent follows the report's deploy steps (Terraform apply / CloudFormation) and tells you the manual prerequisites first. **Heads up for CDN: provision your ACM certificates in us-east-1 before deploying** — CloudFront looks them up at plan time, so a missing cert fails the deploy. Review the report before approving; you stay in control of what gets applied.
-
-Don't have a backup yet? The `backup/` directory contains the backup script — the agent will guide you through running it (it never sees your API credentials; you configure those yourself). See [Getting a backup](#getting-a-backup) below.
 
 Always provide the **backup root directory** (the one containing `account/` and zone subdirectories like `example.com/`). Do **not** provide a subdirectory — both WAF and CDN pipelines need files from the `account/` directory (IP lists for WAF, bulk redirect lists for CDN) that live outside the zone directory.
 

@@ -12,14 +12,23 @@
 git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
 ```
 
-然后告诉你的 agent：
+首先，让 agent 认识这个仓库，它才知道怎么驱动流程：
 
 ```
-阅读 /path/to/cloudflare-aws-edge-config-converter 里的 AGENTS.md，
-然后把我在 /path/to/cloudflare-backup 的 Cloudflare 配置转换到 AWS。
+阅读 /path/to/cloudflare-aws-edge-config-converter 里的 AGENTS.md。
 ```
 
-agent 会读取 `AGENTS.md` → `converter/SKILL.md` 并为你运行流程。你可以指定范围：
+它会读取 `AGENTS.md` → `converter/SKILL.md`，然后就准备好了。
+
+**接下来，你需要一份 Cloudflare 配置备份**——转换器读取的是这份备份，它自己不会去调 Cloudflare API。如果你还没有，本仓库的 `backup/` 目录里有生成脚本，agent 会指导你运行它（它不会看到你的 API 凭据——凭据由你自己配置）。详见 [获取备份](#获取备份)。已经有备份了？直接把路径告诉 agent。
+
+然后让 agent 转换：
+
+```
+把我在 /path/to/cloudflare-backup 的 Cloudflare 配置转换到 AWS。
+```
+
+你可以指定范围：
 
 ```
 将 /path/to/cloudflare-backup 中的 Cloudflare 安全规则转换为 AWS WAF
@@ -34,8 +43,6 @@ agent 会读取 `AGENTS.md` → `converter/SKILL.md` 并为你运行流程。你
 ```
 
 agent 会按报告里的部署步骤操作（Terraform apply / CloudFormation），并先告诉你有哪些手动前置。**CDN 特别注意：部署前先在 us-east-1 准备好 ACM 证书**——CloudFront 在 plan 阶段就要查证书，缺证书会直接导致部署失败。批准前请先看一遍报告，部署什么由你掌控。
-
-还没有备份？`backup/` 目录里就是备份脚本——agent 会指导你运行它（它不会看到你的 API 凭据，凭据由你自己配置）。详见下面的 [获取备份](#获取备份)。
 
 请始终提供 **备份根目录**（包含 `account/` 和 zone 子目录如 `example.com/` 的那个目录）。**不要**提供子目录——WAF 和 CDN pipeline 都需要 `account/` 目录中的文件（WAF 需要 IP 列表，CDN 需要 bulk redirect 列表），这些文件位于 zone 目录之外。
 
