@@ -1161,7 +1161,7 @@ def _result(status, code, **fields):
     Keeps the positional `code` because this stage's PARTIAL maps to exit 1
     (retry-failed-domains), NOT the standard 3 — so the exit code is passed
     explicitly rather than derived from STATUS. Multi-line values (FAILED_ITEMS)
-    are pre-formatted with two-space continuation lines by the caller.
+    are passed as a plain list; emit_result owns the indentation.
     """
     emit_result(status, exit_code=code, **fields)
 

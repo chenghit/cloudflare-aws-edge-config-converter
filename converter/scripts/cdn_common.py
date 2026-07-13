@@ -51,13 +51,21 @@ def emit_result(status, *, exit_after=True, exit_code=None, **fields):
     exit_after=False emits but returns (OK paths that keep running). exit_code
     overrides the STATUS→code mapping when a caller needs a specific code.
     """
+    def _indent_continuations(text):
+        # Every physical line after the first must be two-space indented, or the
+        # agent reads it as a new key (a value/item with an embedded '\n' — e.g.
+        # an agent-authored skipped-domain reason — is the recurring garbage-key
+        # bug). Enforce it here so NO caller input can break the contract.
+        first, *rest = str(text).split("\n")
+        return "\n".join([first, *(f"  {r}" for r in rest)])
+
     lines = ["", "---RESULT---", "SPEC: 1", f"STATUS: {status}"]
     for key, value in fields.items():
         if isinstance(value, (list, tuple)):
             lines.append(f"{key}:")
-            lines.extend(f"  {item}" for item in value)
+            lines.extend(f"  {_indent_continuations(item)}" for item in value)
         else:
-            lines.append(f"{key}: {value}")
+            lines.append(f"{key}: {_indent_continuations(value)}")
     print("\n".join(lines))
     if exit_after:
         code = exit_code if exit_code is not None else _STATUS_EXIT.get(status, 1)

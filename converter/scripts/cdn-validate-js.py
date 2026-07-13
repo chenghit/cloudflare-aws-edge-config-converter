@@ -316,12 +316,10 @@ def main():
     # bucket policy allowing the distribution, or every request 403s. The
     # converter can't do it (the bucket may be in another account, and the
     # distribution ARN isn't known until apply). Surface it so the agent tells
-    # the user and doesn't report "done" on an S3 domain that will 403.
-    # One POST_ACTION value, multi-step (2-space-indented continuation lines per
-    # SCRIPT_STANDARDS / SKILL.md) — a second `POST_ACTION:` key would break parsing.
+    # the user and doesn't report "done" on an S3 domain that will 403. It becomes
+    # one step of the POST_ACTION value; emit_result owns all indentation.
     s3_step = ""
     if s3_hosts:
-        # A POST_ACTION list item (emit_result adds the indent) — no leading "\n  ".
         s3_step = (
             f"MANDATORY MANUAL STEP for {len(s3_hosts)} S3-origin domain(s) "
             f"({', '.join(s3_hosts)}): the generated OAC is only the CloudFront side. "
@@ -353,13 +351,15 @@ def main():
                             f"blockers. Re-run Stage 5 (cdn-finalize) and Stage 8 "
                             f"(cdn-generate-js) before this step. Refusing to report "
                             f"STATUS: OK without it.")
-    # _s is a validated dict (possibly empty). Do NOT gate on `if _s:` — an empty
-    # summary is still valid, and the ACM blocker + redesign scan below MUST run
-    # regardless, or an empty {} would skip every deploy concern and report OK.
+    # _s is a validated dict (possibly empty). The stats line only renders when
+    # the summary actually carries the fields — an empty-but-valid {} shouldn't
+    # surface a literal "Domains: ?, unique policies: ?…" line. The ACM blocker
+    # and redesign scan below run unconditionally either way.
     summary_lines = []
-    summary_lines.append(f"Domains: {_s.get('domains','?')}, unique policies: "
-                         f"{_s.get('total_policies','?')}, CFF: {_s.get('cff_dedup','?')}, "
-                         f"KVS stores: {_s.get('kvs_total','?')}")
+    if _s.get("domains") is not None:
+        summary_lines.append(f"Domains: {_s.get('domains')}, unique policies: "
+                             f"{_s.get('total_policies','?')}, CFF: {_s.get('cff_dedup','?')}, "
+                             f"KVS stores: {_s.get('kvs_total','?')}")
     if _s.get("non_convertible_items"):
         summary_lines.append(f"{_s['non_convertible_items']} non-convertible item(s) — "
                              f"see conversion_report.md.")
@@ -392,8 +392,10 @@ def main():
     # Multi-line field values are LISTS — emit_result owns the KEY: header and the
     # two-space indent, so no caller hand-formats continuation lines.
     if fail_count == 0:
-        # POST_ACTION only applies on the deployable (OK/BLOCKED) path.
-        post_action = [
+        # POST_ACTION only applies on the deployable (OK/BLOCKED) path. It's a
+        # scalar whose first line is the mandatory-and-ordered directive; the
+        # numbered steps follow as continuation lines (emit_result indents them).
+        steps = [
             "1. REPORT the full DEPLOY_SUMMARY above to the user — every line — as the CDN completion summary."
             " QUOTA-RAISE line(s) mean the conversion is correct but deploy is blocked until the user"
             " requests that quota increase; relay each one so the user can raise it before applying.",
@@ -402,9 +404,10 @@ def main():
             " If not, tell them to provision + validate them first — apply will fail otherwise.",
         ]
         if s3_step:
-            post_action.append(s3_step)
-        post_action.append(
+            steps.append(s3_step)
+        steps.append(
             "3. If user language is not English, translate conversion_report.md to that language as conversion_report_{lang}.md.")
+        post_action = "Do ALL of the following, in order:\n" + "\n".join(steps)
         fields = {"DOMAINS": len(results), "PASSED": pass_count,
                   "DEPLOY_SUMMARY": summary_lines}
         if redesign:
@@ -446,6 +449,12 @@ def main():
                 "raised. Independent of the JS failures above — even after those are fixed, "
                 "do NOT deploy until the source is redesigned. Report this to the user.")
         fields["DEPLOY_SUMMARY"] = summary_lines
+        # The DEPLOY_SUMMARY S3 line says "See POST_ACTION"; that step is a real
+        # post-apply requirement regardless of the JS failures, so emit it here
+        # too (else the reference dangles and the S3 bucket policy is dropped → 403
+        # on the domains that DID pass and get deployed).
+        if s3_step:
+            fields["POST_ACTION"] = "After fixing the failed domain(s) and deploying:\n" + s3_step
         emit_result("ERROR", **fields)
 
 
