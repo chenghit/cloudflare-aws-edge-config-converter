@@ -34,29 +34,30 @@ QUOTA_TAGS = (QUOTA_RAISE, QUOTA_REDESIGN)
 _STATUS_EXIT = {"OK": 0, "BLOCKED": 0, "ERROR": 1, "FATAL": 2, "PARTIAL": 3}
 
 
-def emit_result(status, *, exit_after=True, exit_code=None, raw_tail=None, **fields):
+def emit_result(status, *, exit_after=True, exit_code=None, **fields):
     """Print a SCRIPT_STANDARDS ---RESULT--- block to STDOUT (never stderr — the
     agent parses only stdout) and, by default, exit with the STATUS's code.
 
-    fields are emitted in the order given (kwargs preserve order). A value may be
-    a plain scalar (`KEY: value`) or a pre-formatted multi-line block whose
-    continuation lines are already two-space indented (DEPLOY_SUMMARY,
-    POST_ACTION, FAILED_ITEMS, BLOCKED_ITEMS) — those are passed through verbatim,
-    so callers keep full control of their body while the envelope (marker, SPEC,
-    STATUS, stream, exit) is uniform.
+    fields are emitted in the order given (kwargs preserve order). A field value
+    is rendered by TYPE, so callers never hand-format continuation lines (the
+    exact source of the "non-indented line becomes a garbage key" bugs this
+    module exists to kill):
+      - scalar (str/int/…)  → `KEY: value` on one line.
+      - list/tuple of str   → `KEY:` then each item as a two-space-indented
+                              continuation line (FAILED_ITEMS, BLOCKED_ITEMS,
+                              DEPLOY_SUMMARY). emit_result owns the newline and
+                              the indent; the caller just passes the items.
 
-    - exit_after=False: emit but return (for OK paths that keep running).
-    - exit_code: override the STATUS→code mapping when a caller needs a specific
-      code (rare; the mapping covers the normal cases).
-    - raw_tail: a pre-formatted multi-KEY block (its own `KEY: …` lines) appended
-      verbatim after the fields — for reusable guidance constants that already
-      carry several keys.
+    exit_after=False emits but returns (OK paths that keep running). exit_code
+    overrides the STATUS→code mapping when a caller needs a specific code.
     """
     lines = ["", "---RESULT---", "SPEC: 1", f"STATUS: {status}"]
     for key, value in fields.items():
-        lines.append(f"{key}: {value}")
-    if raw_tail:
-        lines.append(raw_tail)
+        if isinstance(value, (list, tuple)):
+            lines.append(f"{key}:")
+            lines.extend(f"  {item}" for item in value)
+        else:
+            lines.append(f"{key}: {value}")
     print("\n".join(lines))
     if exit_after:
         code = exit_code if exit_code is not None else _STATUS_EXIT.get(status, 1)
@@ -90,9 +91,13 @@ def load_summary_or_fatal(output_dir):
     if not isinstance(summary, dict):
         return None, (f"cdn_summary.json is not a JSON object "
                       f"(got {type(summary).__name__})")
-    warnings = summary.get("warnings")
-    if warnings is not None and not (isinstance(warnings, list)
-                                     and all(isinstance(w, str) for w in warnings)):
-        return None, ("cdn_summary.json 'warnings' must be a list of strings "
-                      "(a malformed value can hide a deploy blocker)")
+    # `warnings` is optional, but if the KEY is present its value must be a list
+    # of strings. Gate on presence (`"warnings" in summary`), NOT on `is not
+    # None` — an explicit null is exactly the malformed case to reject (it would
+    # crash the readers' list()/for-in), not a value to wave through.
+    if "warnings" in summary:
+        warnings = summary["warnings"]
+        if not (isinstance(warnings, list) and all(isinstance(w, str) for w in warnings)):
+            return None, ("cdn_summary.json 'warnings' must be a list of strings "
+                          "(a malformed value can hide a deploy blocker)")
     return summary, None

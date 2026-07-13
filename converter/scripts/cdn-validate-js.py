@@ -321,8 +321,9 @@ def main():
     # SCRIPT_STANDARDS / SKILL.md) — a second `POST_ACTION:` key would break parsing.
     s3_step = ""
     if s3_hosts:
+        # A POST_ACTION list item (emit_result adds the indent) — no leading "\n  ".
         s3_step = (
-            f"\n  MANDATORY MANUAL STEP for {len(s3_hosts)} S3-origin domain(s) "
+            f"MANDATORY MANUAL STEP for {len(s3_hosts)} S3-origin domain(s) "
             f"({', '.join(s3_hosts)}): the generated OAC is only the CloudFront side. "
             f"After `terraform apply`, the user MUST add an S3 bucket policy allowing "
             f"cloudfront.amazonaws.com with the distribution ARN (AWS:SourceArn), or S3 "
@@ -345,7 +346,6 @@ def main():
     # crash the _s.get / warnings iteration below with no result block, or (for a
     # string warnings) silently drop a QUOTA-REDESIGN blocker and print OK. Fail
     # LOUD instead: a hidden hard-limit breach is far worse than a noisy stop.
-    summary_lines = []
     _s, _ctx = load_summary_or_fatal(output_dir)
     if _ctx is not None:
         emit_result("FATAL", ACTION="FIX",
@@ -353,28 +353,31 @@ def main():
                             f"blockers. Re-run Stage 5 (cdn-finalize) and Stage 8 "
                             f"(cdn-generate-js) before this step. Refusing to report "
                             f"STATUS: OK without it.")
-    if _s:
-        summary_lines.append(f"Domains: {_s.get('domains','?')}, unique policies: "
-                             f"{_s.get('total_policies','?')}, CFF: {_s.get('cff_dedup','?')}, "
-                             f"KVS stores: {_s.get('kvs_total','?')}")
-        if _s.get("non_convertible_items"):
-            summary_lines.append(f"{_s['non_convertible_items']} non-convertible item(s) — "
-                                 f"see conversion_report.md.")
-        if _s.get("skipped_domains"):
-            summary_lines.append(f"SKIPPED domains: {', '.join(_s['skipped_domains'])}")
-        # Warnings from cdn-finalize / cdn-generate-js already carry their own
-        # action tag (QUOTA-RAISE = raise the quota then deploy; QUOTA-REDESIGN =
-        # HARD limit, deploy blocked until the source is redesigned). Pass them
-        # through verbatim — do NOT re-prefix — so the tag reaches the agent.
-        for w in _s.get("warnings", []):
-            summary_lines.append(w if w.startswith(QUOTA_TAGS) else f"QUOTA/WARNING — {w}")
+    # _s is a validated dict (possibly empty). Do NOT gate on `if _s:` — an empty
+    # summary is still valid, and the ACM blocker + redesign scan below MUST run
+    # regardless, or an empty {} would skip every deploy concern and report OK.
+    summary_lines = []
+    summary_lines.append(f"Domains: {_s.get('domains','?')}, unique policies: "
+                         f"{_s.get('total_policies','?')}, CFF: {_s.get('cff_dedup','?')}, "
+                         f"KVS stores: {_s.get('kvs_total','?')}")
+    if _s.get("non_convertible_items"):
+        summary_lines.append(f"{_s['non_convertible_items']} non-convertible item(s) — "
+                             f"see conversion_report.md.")
+    if _s.get("skipped_domains"):
+        summary_lines.append(f"SKIPPED domains: {', '.join(_s['skipped_domains'])}")
+    # Warnings from cdn-finalize / cdn-generate-js already carry their own action
+    # tag (QUOTA-RAISE = raise the quota then deploy; QUOTA-REDESIGN = HARD limit,
+    # deploy blocked until the source is redesigned). Pass them through verbatim —
+    # do NOT re-prefix — so the tag reaches the agent.
+    for w in _s.get("warnings", []):
+        summary_lines.append(w if w.startswith(QUOTA_TAGS) else f"QUOTA/WARNING — {w}")
     # Any HARD-limit breach makes the config undeployable as-is (no quota bump
     # exists) — surface it as a distinct deploy blocker the agent must not skip.
     redesign = [w for w in _s.get("warnings", []) if w.startswith(QUOTA_REDESIGN)]
     # ACM is the hardest prerequisite: the generated Terraform reads each cert via
     # `data "aws_acm_certificate"` (or an explicit ARN), so `terraform plan`
     # FAILS immediately if the cert isn't already ISSUED in us-east-1. This is a
-    # deploy blocker for EVERY CDN deployment — always surface it, first.
+    # deploy blocker for EVERY CDN deployment — always surface it.
     summary_lines.append("PRE-DEPLOY BLOCKER — ACM certificates MUST exist and be ISSUED in "
                          "us-east-1 (N. Virginia) BEFORE `terraform apply`, one covering every "
                          "custom domain (a `*.apex` wildcard works). CloudFront only accepts "
@@ -385,32 +388,32 @@ def main():
         summary_lines.append("PRE-DEPLOY ACTION — S3-origin domains need a manual S3 bucket "
                              "policy for the CloudFront OAC (else 403); policy JSON in "
                              "conversion_report.md. See POST_ACTION.")
-    # DEPLOY_SUMMARY body (indented continuation lines), or None to omit the key.
-    deploy_summary = "\n".join(f"  {l}" for l in summary_lines) if summary_lines else None
 
-    post_action = (
-        "Do ALL of the following, in order:"
-        "\n  1. REPORT the full DEPLOY_SUMMARY above to the user — every line — as the CDN completion summary."
-        " QUOTA-RAISE line(s) mean the conversion is correct but deploy is blocked until the user"
-        " requests that quota increase; relay each one so the user can raise it before applying."
-        "\n  2. Before ANY `terraform apply`, confirm with the user that ACM certificates are"
-        " already ISSUED in us-east-1 for every custom domain (see the PRE-DEPLOY BLOCKER line)."
-        " If not, tell them to provision + validate them first — apply will fail otherwise."
-        f"{s3_step}"
-        "\n  3. If user language is not English, translate conversion_report.md to that language as conversion_report_{lang}.md.")
-
+    # Multi-line field values are LISTS — emit_result owns the KEY: header and the
+    # two-space indent, so no caller hand-formats continuation lines.
     if fail_count == 0:
-        # Base fields shared by the OK and BLOCKED paths (order = emit order).
-        fields = {"DOMAINS": len(results), "PASSED": pass_count}
-        if deploy_summary is not None:
-            fields["DEPLOY_SUMMARY"] = "\n" + deploy_summary
+        # POST_ACTION only applies on the deployable (OK/BLOCKED) path.
+        post_action = [
+            "1. REPORT the full DEPLOY_SUMMARY above to the user — every line — as the CDN completion summary."
+            " QUOTA-RAISE line(s) mean the conversion is correct but deploy is blocked until the user"
+            " requests that quota increase; relay each one so the user can raise it before applying.",
+            "2. Before ANY `terraform apply`, confirm with the user that ACM certificates are"
+            " already ISSUED in us-east-1 for every custom domain (see the PRE-DEPLOY BLOCKER line)."
+            " If not, tell them to provision + validate them first — apply will fail otherwise.",
+        ]
+        if s3_step:
+            post_action.append(s3_step)
+        post_action.append(
+            "3. If user language is not English, translate conversion_report.md to that language as conversion_report_{lang}.md.")
+        fields = {"DOMAINS": len(results), "PASSED": pass_count,
+                  "DEPLOY_SUMMARY": summary_lines}
         if redesign:
             # A HARD-limit (QUOTA-REDESIGN) breach → structural STATUS: BLOCKED
             # (per SCRIPT_STANDARDS, same class as the WAF hard-cap block), not a
             # free-text note under OK. Exit stays 0: the JS is valid and the
             # pipeline completed; BLOCKED carries the "don't deploy" signal.
             fields["BLOCKED_COUNT"] = len(redesign)
-            fields["BLOCKED_ITEMS"] = "\n" + "\n".join(f"  {w}" for w in redesign)
+            fields["BLOCKED_ITEMS"] = redesign
             fields["ACTION"] = "FIX"
             fields["CONTEXT"] = (
                 "The Terraform was generated and the JS is valid, but the item(s) above "
@@ -424,26 +427,25 @@ def main():
             fields["POST_ACTION"] = post_action
             emit_result("OK", **fields)
     else:
-        failed_items = "\n".join(
-            f"  {r['hostname']}: {', '.join(c['name'] + '=' + c['status'] for c in r['checks'] if c['status'] == 'FAIL')}"
+        failed_items = [
+            f"{r['hostname']}: {', '.join(c['name'] + '=' + c['status'] for c in r['checks'] if c['status'] == 'FAIL')}"
             for r in results if r["overall_status"] == "FAIL"
-        )
+        ]
         # A JS-validation failure on one domain must NOT bury a deploy blocker on
         # another: carry DEPLOY_SUMMARY here too, and if a QUOTA-REDESIGN breach
         # exists surface it as structured BLOCKED_ITEMS (it survives fixing the
         # failed domains, so the agent must see it).
         fields = {"PASSED": pass_count, "FAILED": fail_count,
-                  "FAILED_ITEMS": "\n" + failed_items, "ACTION": "FIX",
+                  "FAILED_ITEMS": failed_items, "ACTION": "FIX",
                   "CONTEXT": f"{fail_count} domain(s) failed JS validation"}
         if redesign:
             fields["BLOCKED_COUNT"] = len(redesign)
-            fields["BLOCKED_ITEMS"] = "\n" + "\n".join(f"  {w}" for w in redesign)
+            fields["BLOCKED_ITEMS"] = redesign
             fields["BLOCKED_NOTE"] = (
                 "A HARD CloudFront limit is exceeded (see BLOCKED_ITEMS) and cannot be "
                 "raised. Independent of the JS failures above — even after those are fixed, "
                 "do NOT deploy until the source is redesigned. Report this to the user.")
-        if deploy_summary is not None:
-            fields["DEPLOY_SUMMARY"] = "\n" + deploy_summary
+        fields["DEPLOY_SUMMARY"] = summary_lines
         emit_result("ERROR", **fields)
 
 

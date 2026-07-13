@@ -1268,21 +1268,21 @@ def main():
     if failed:
         print(f"Failed domains: {', '.join(failed)}")
 
+    # FAILED_ITEMS is a list — emit_result indents each line (no hand "\n  ").
+    failed_items = [f"{h}: see {h}.error.json" for h in failed]
     if success == 0:
         # Nothing converted — every domain raised. Each has a
         # {hostname}.error.json in the accumulator with the traceback.
-        failed_items = "\n".join(f"  {h}: see {h}.error.json" for h in failed)
         _result("FATAL", 2, ACTION="FIX", FAILED=len(failed),
-                FAILED_ITEMS="\n" + failed_items if failed_items else "",
+                FAILED_ITEMS=failed_items,
                 CONTEXT=f"All {total} domains failed preprocessing — likely a bad "
                         "config path or a pipeline bug, not a per-domain issue.")
     elif failed:
         # Retry command mirrors SKILL.md Stage 3: re-run with --domain for the
         # failed subset; if retry also fails, mark those SKIPPED and continue.
         retry_domains = ",".join(failed)
-        failed_items = "\n".join(f"  {h}: see {h}.error.json" for h in failed)
         _result("PARTIAL", 1, SUCCEEDED=success, FAILED=len(failed),
-                FAILED_ITEMS="\n" + failed_items,
+                FAILED_ITEMS=failed_items,
                 ACTION="RETRY_FAILED",
                 COMMAND=f'python3 cdn-preprocess.py "{config_path}" "{output_dir}" '
                         f'--domain {retry_domains}')

@@ -40,20 +40,23 @@ CFF_PREFIX = "cf-"
 # Service Quotas / AWS Support), and this tool deliberately does NOT fall back
 # to Lambda@Edge for viewer events (L@E adds latency and cost). So the listed
 # domains cannot be deployed as-is and need a human decision.
+# Emitted as structured CONTEXT / GUIDANCE fields (via emit_result) when some —
+# but not all — domains exceed the 10 KB CFF hard limit. Only reachable on the
+# PARTIAL path (if EVERY domain failed generation, the earlier `if not all_vr`
+# guard already exited), so the "All OTHER domains…deployed" line always holds.
+_SIZE_EXCEEDED_CONTEXT = (
+    "The listed domain(s) have a viewer-request or viewer-response CloudFront "
+    "Function exceeding the 10240-byte (10 KB) limit even after minification. "
+    "This is a HARD CloudFront quota — it CANNOT be raised via Service Quotas or "
+    "AWS Support. These domains are NOT deployable as generated.")
 _SIZE_EXCEEDED_GUIDANCE = (
-    "CONTEXT: The listed domain(s) have a viewer-request or viewer-response "
-    "CloudFront Function exceeding the 10240-byte (10 KB) limit even after "
-    "minification. This is a HARD CloudFront quota — it CANNOT be raised via "
-    "Service Quotas or AWS Support. These domains are NOT deployable as generated.\n"
-    "GUIDANCE: Tell the user, per listed domain, to either (1) simplify the "
-    "Cloudflare rules for that host (remove/consolidate redirects, header "
-    "transforms, or conditions) so the generated function fits under 10 KB, or "
-    "(2) split the logic across behaviors, or (3) accept that some rules can't "
-    "convert and drop them. Do NOT hand-migrate viewer logic to Lambda@Edge: "
-    "this tool keeps viewer events on CloudFront Functions by design (Lambda@Edge "
-    "adds latency and per-request cost). All OTHER domains generated successfully "
-    "and can be deployed."
-)
+    "Tell the user, per listed domain, to either (1) simplify the Cloudflare "
+    "rules for that host (remove/consolidate redirects, header transforms, or "
+    "conditions) so the generated function fits under 10 KB, or (2) split the "
+    "logic across behaviors, or (3) accept that some rules can't convert and drop "
+    "them. Do NOT hand-migrate viewer logic to Lambda@Edge: this tool keeps viewer "
+    "events on CloudFront Functions by design (Lambda@Edge adds latency and "
+    "per-request cost). All OTHER domains generated successfully and can be deployed.")
 
 
 def cff_name(san, event_type):
@@ -1914,24 +1917,23 @@ if __name__ == "__main__":
     ok_count = len(all_vr)
     fail_count = len(failed)
 
-    _dedup_ratio = f"{original_count} -> {actual_count}"
+    # CFF_DEDUP_RATIO reuses the exact string already stored in the summary, so
+    # the JSON and the RESULT block can't drift.
+    _dedup_ratio = _summary["cff_dedup"]
     if fail_count == 0:
         emit_result("OK", exit_after=False, DOMAINS=ok_count, GENERATED=ok_count,
                     CFF_TOTAL=actual_count, CFF_SHARED=len(written_shared),
                     CFF_INDEPENDENT=indep_count, CFF_DEDUP_RATIO=_dedup_ratio,
                     KVS_TOTAL=kvs_total)
-    elif ok_count > 0:
-        failed_items = "\n".join(f"  {h}: {s} — {d}" for h, s, d in failed)
+    else:
+        # ok_count > 0 always holds here: an all-failed run already exited at the
+        # `if not all_vr` guard above, so this is genuinely PARTIAL.
+        failed_items = [f"{h}: {s} — {d}" for h, s, d in failed]
         emit_result("PARTIAL", SUCCEEDED=ok_count, FAILED=fail_count,
                     CFF_TOTAL=actual_count, CFF_SHARED=len(written_shared),
                     CFF_INDEPENDENT=indep_count, CFF_DEDUP_RATIO=_dedup_ratio,
-                    FAILED_ITEMS="\n" + failed_items, ACTION="FIX",
-                    raw_tail=_SIZE_EXCEEDED_GUIDANCE)
-    else:
-        failed_items = "\n".join(f"  {h}: {s} — {d}" for h, s, d in failed)
-        emit_result("FATAL", FAILED=fail_count,
-                    FAILED_ITEMS="\n" + failed_items, ACTION="FIX",
-                    raw_tail=_SIZE_EXCEEDED_GUIDANCE)
+                    FAILED_ITEMS=failed_items, ACTION="FIX",
+                    CONTEXT=_SIZE_EXCEEDED_CONTEXT, GUIDANCE=_SIZE_EXCEEDED_GUIDANCE)
 
 
 def _write_domain_functions_tf(san, config, ir, domain_dir, kvs_is_shared=False, shared_kvs_name=None):

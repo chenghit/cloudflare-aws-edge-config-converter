@@ -53,7 +53,9 @@ def find_file(config_path, pattern):
     if len(sources) > 1:
         zones = sorted(os.path.basename(s) for s in sources)
         print(f"ERROR: {pattern} found under multiple zones: {zones}", file=sys.stderr)
-        emit_result("FATAL", exit_code=1, ACTION="FIX",
+        # FATAL → exit 2. Multi-zone is NOT retryable (the user must pick a zone),
+        # so it must not read as exit 1 / retryable.
+        emit_result("FATAL", ACTION="FIX",
                     CONTEXT=f"multiple zones detected ({', '.join(zones)}); convert one "
                             f"zone at a time")
     chosen = sorted(matches)[-1]
