@@ -708,15 +708,22 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "",
         "Each domain is a separate Terraform root. WITHOUT a shared plugin cache, every "
         "`terraform init` re-downloads the ~800 MB AWS provider — for dozens of domains "
-        "that is hours of wasted download and disk. Configure the cache ONCE:",
+        "that is hours of wasted download and disk. Enable the cache with the "
+        "`TF_PLUGIN_CACHE_DIR` environment variable (the shell expands the path before "
+        "Terraform sees it):",
         "```bash",
-        "mkdir -p ~/.terraform.d/plugin-cache",
-        "cat > ~/.terraformrc <<'EOF'",
-        'plugin_cache_dir = "$HOME/.terraform.d/plugin-cache"',
-        "EOF",
+        'export TF_PLUGIN_CACHE_DIR="$HOME/.terraform.d/plugin-cache"',
+        'mkdir -p "$TF_PLUGIN_CACHE_DIR"   # Terraform will NOT create it; it must exist',
         "```",
-        "The provider then downloads once and every later `terraform init` links it from "
-        "the cache (seconds, not minutes).",
+        "Keep that `export` in the same shell for all the `terraform` commands below (add "
+        "it to `~/.bashrc` / `~/.zshrc` to persist).",
+        "",
+        "**Do NOT** put `plugin_cache_dir = \"$HOME/…\"` in `~/.terraformrc` instead: "
+        "Terraform only env-expands that value when `HOME` happens to be set in its "
+        "process, and on a shell/CI where it isn't, it silently creates a literal `$HOME` "
+        "directory and the cache quietly does nothing. If you prefer the config-file form, "
+        "write a fully-resolved absolute path (e.g. `plugin_cache_dir = \"/home/you/"
+        ".terraform.d/plugin-cache\"`), not `$HOME` or `~`.",
         "",
         "### 4. Deploy shared policies",
         "",
