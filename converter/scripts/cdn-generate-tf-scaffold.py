@@ -757,14 +757,58 @@ def cert_covers(cert_names, hostname):
     return False
 
 
+def _blank_hcl_comments(text):
+    """Return `text` with every HCL comment blanked to spaces, PRESERVING length
+    and newlines (so offsets and line numbers line up with the original). Blanks
+    `# ...` and `// ...` line comments and `/* ... */` block comments — the block
+    form spans lines, which a per-line scan can't see, so a `cert_arn_x = "x"`
+    inside `/* ... */` used to read as a live value AND writes landed inside the
+    comment. tfvars ARN values contain no `/*` or `#`, so blanking comments can't
+    eat a real value here. Not a full HCL lexer (a `#`/`/*` inside a quoted string
+    would be blanked too) — but tfvars written/consumed here are simple
+    `name = "arn"` assignments, so that case doesn't arise."""
+    out = list(text)
+    nl, bslash = chr(10), chr(92)  # avoid backslash escapes inside this template
+    i, n = 0, len(text)
+    while i < n:
+        two = text[i:i + 2]
+        if two == "/*":
+            j = text.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            for k in range(i, j):
+                if out[k] != nl:
+                    out[k] = " "
+            i = j
+        elif two == "//" or text[i] == "#":
+            j = text.find(nl, i)
+            j = n if j == -1 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+        elif text[i] == '"':  # skip a quoted string so a # inside it isn't a comment
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == bslash else 1
+            i = j + 1
+        else:
+            i += 1
+    return "".join(out)
+
+
+# One regex, one notion of "a live cert_arn_<san> assignment", shared by the
+# reader and writer so they can never disagree about what counts (the split
+# read/write patterns were exactly how commented lines slipped through twice).
+def _assign_re(name):
+    return re.compile(r'^[ \\t]*' + re.escape(name) + r'[ \\t]*=[ \\t]*"([^"]*)"',
+                      re.M)
+
+
 def read_existing_arn(tfvars_path, san):
-    """Return a non-empty cert_arn_<san> already in tfvars, else None. An
-    explicit/prior ARN wins — discovery must not overwrite it. The regex is
-    anchored to a real assignment line (start-of-line, optional indent, NOT after
-    a `#`) and mirrors write_tfvars_var's pattern — otherwise a COMMENTED line
-    like `# cert_arn_x = "old"` reads as a live value, the resolver skips the
-    host, and Terraform then runs with the empty default. Only `#`-style comments
-    exist in tfvars (HCL has no inline value comments that matter here)."""
+    """Return a non-empty cert_arn_<san> already set in tfvars, else None. An
+    explicit/prior ARN wins — discovery must not overwrite it. Matching runs on a
+    COMMENT-BLANKED copy (see _blank_hcl_comments), so neither a `# ...`/`// ...`
+    line comment NOR a `/* ... */` block comment reads as a live value — otherwise
+    the resolver skips the host and Terraform runs with the empty default."""
     if not os.path.exists(tfvars_path):
         return None
     try:
@@ -772,8 +816,7 @@ def read_existing_arn(tfvars_path, san):
             txt = f.read()
     except OSError:
         return None
-    m = re.search(r'^[ \\t]*cert_arn_' + re.escape(san) + r'[ \\t]*=[ \\t]*"([^"]*)"',
-                  txt, re.M)
+    m = _assign_re("cert_arn_" + san).search(_blank_hcl_comments(txt))
     if m and m.group(1).strip():
         return m.group(1).strip()
     return None
@@ -782,17 +825,24 @@ def read_existing_arn(tfvars_path, san):
 def write_tfvars_var(path, name, value):
     """Set `name = "value"` in a tfvars file WITHOUT clobbering anything else.
     Rewriting the whole file with a single line (the old behavior) silently
-    dropped any other variables a user had put there. Update the line in place if
-    present, else append it; write via a temp file + os.replace for atomicity so
-    a crash mid-write can't truncate an existing tfvars."""
+    dropped any other variables a user had put there. Replace an existing LIVE
+    assignment in place (a commented one — `#`, `//`, or inside `/* */` — is NOT
+    live, so it's left untouched and a real assignment is appended instead), else
+    append; write via a temp file + os.replace for atomicity so a crash mid-write
+    can't truncate an existing tfvars. Match position is found on a comment-blanked
+    copy but the splice is applied to the ORIGINAL text, so comments are preserved
+    verbatim and a value is never written inside one."""
     line = f'{name} = "{value}"'
     existing = ""
     if os.path.exists(path):
         with open(path) as f:
             existing = f.read()
-    pat = re.compile(r'^[ \\t]*' + re.escape(name) + r'[ \\t]*=.*$', re.M)
-    if pat.search(existing):
-        new = pat.sub(line, existing)
+    # Find a LIVE assignment by matching on the comment-blanked copy; the span
+    # maps 1:1 onto `existing` (blanking preserves length), so we can splice the
+    # replacement into the original — never into a comment.
+    m = _assign_re(name).search(_blank_hcl_comments(existing))
+    if m:
+        new = existing[:m.start()] + line + existing[m.end():]
     else:
         new = existing + ("" if existing.endswith("\\n") or not existing else "\\n") + line + "\\n"
     tmp = path + ".tmp"

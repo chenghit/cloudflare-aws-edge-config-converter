@@ -266,6 +266,30 @@ def test_end_to_end():
             f.write('   cert_arn_x   =   "INDENTED"\n')
         check("R2-F2: read_existing_arn reads an indented/spaced assignment",
               rea(cprobe, "x") == "INDENTED", f"got {rea(cprobe, 'x')!r}")
+
+        # R3-F1: HCL /* ... */ BLOCK comments (span lines, a per-line scan can't
+        # see them). An assignment inside a block comment must not read as live,
+        # must not shadow a later real assignment, and a write must land OUTSIDE
+        # the comment (else the value stays commented and Terraform uses the empty
+        # default). read AND write both blank comments first, so they agree.
+        wt = ns["write_tfvars_var"]
+        with open(cprobe, "w") as f:
+            f.write('/*\ncert_arn_x = "BLOCKED"\n*/\n')
+        check("R3-F1: read ignores an assignment inside /* */",
+              rea(cprobe, "x") is None, f"got {rea(cprobe, 'x')!r}")
+        with open(cprobe, "w") as f:
+            f.write('/*\ncert_arn_x = "BLOCKED"\n*/\ncert_arn_x = "REAL"\n')
+        check("R3-F1: read returns the real assignment, not the block-commented one",
+              rea(cprobe, "x") == "REAL", f"got {rea(cprobe, 'x')!r}")
+        # write into a file whose only occurrence is inside a block comment →
+        # append a live line, keep the comment, and read it back.
+        with open(cprobe, "w") as f:
+            f.write('/*\ncert_arn_x = "BLOCKED"\n*/\n')
+        wt(cprobe, "cert_arn_x", "WRITTEN")
+        body = open(cprobe).read()
+        check("R3-F1: write past a block comment lands OUTSIDE it (round-trips)",
+              rea(cprobe, "x") == "WRITTEN" and "/*" in body and '"BLOCKED"' in body,
+              f"file now: {body!r}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
