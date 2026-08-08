@@ -835,14 +835,22 @@ class _CDNParser:
     def _func_call(self):
         func_tok = self.advance()
         name = func_tok.value
+        # All three func branches map the field through _map_field (NOT the bare
+        # CF_FIELD_MAP.get), so an INDEXED cookie/header/arg — cookies["x"],
+        # headers["x"], uri.args["x"] — wrapped in len()/lower()/upper()/
+        # starts_with()/ends_with() resolves to its synthetic field + name (extra),
+        # exactly like a bare indexed field does via _field_expr. Without this the
+        # indexed name leaked through as a raw string and was later screened
+        # "unmappable" → rendered `false`, silently killing e.g. a
+        # `len(http.request.headers["rsc"]) > 0` cache-bypass gate.
         if name in ("lower", "upper"):
             self.expect(_TT_LPAREN)
             field = self.expect(_TT_FIELD).value
             self.expect(_TT_RPAREN)
             op = self._read_op()
             value = self._read_value()
-            mapped = CF_FIELD_MAP.get(field, field)
-            result = {"field": mapped, "op": op, "value": value}
+            mapped, extra = _map_field(field)
+            result = {"field": mapped, "op": op, "value": value, **extra}
             if name == "lower":
                 result["transform"] = "lowercase"
             elif name == "upper":
@@ -854,16 +862,16 @@ class _CDNParser:
             self.expect(_TT_COMMA)
             value = self._read_value()
             self.expect(_TT_RPAREN)
-            mapped = CF_FIELD_MAP.get(field, field)
-            return {"field": mapped, "op": name, "value": value}
+            mapped, extra = _map_field(field)
+            return {"field": mapped, "op": name, "value": value, **extra}
         if name == "len":
             self.expect(_TT_LPAREN)
             field = self.expect(_TT_FIELD).value
             self.expect(_TT_RPAREN)
             op = self._read_op()
             value = self._read_value()
-            mapped = CF_FIELD_MAP.get(field, field)
-            return {"field": mapped, "op": op, "value": value, "size_check": True}
+            mapped, extra = _map_field(field)
+            return {"field": mapped, "op": op, "value": value, "size_check": True, **extra}
         raise _ParseError(f"Unknown function: {name}")
 
     def _field_expr(self):

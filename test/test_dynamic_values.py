@@ -707,6 +707,35 @@ check("W-C1 upper(uri.path) eq renders .toUpperCase()",
       _gen.condition_to_js(_parser.parse_expression_full('upper(http.request.uri.path) eq "/A"'), "cff"),
       expect_substr=".toUpperCase() === '/A'")
 
+# W-C1b: an INDEXED cookie/header/arg wrapped in len()/lower()/upper()/
+# starts_with()/ends_with() must resolve to the named-field accessor (with an
+# existence guard), NOT leak the raw "headers[\"x\"]" string and get screened
+# "unmappable" -> `false`. That silent-false killed the real-world Next.js RSC
+# cache-bypass gate `len(http.request.headers["rsc"]) > 0`. All three func
+# branches in _CDNParser._func_call must go through _map_field.
+def _cjs(expr):
+    return _gen.condition_to_js(_parser.parse_expression_full(expr), "cff")
+# the exact image rule's gate (after host-strip): must be a real rsc-present test
+check("W-C1b len(headers[rsc])>0 -> named-header length test (NOT false)",
+      _cjs('len(http.request.headers["rsc"]) > 0'),
+      expect_substr="request.headers['rsc'] !== undefined && request.headers['rsc'].value.length > 0",
+      forbid_substr="false")
+check("W-C1b len(cookies[sid]) gt 3 -> named-cookie length",
+      _cjs('len(http.request.cookies["sid"]) gt 3'),
+      expect_substr="request.cookies['sid'].value.length > 3", forbid_substr="false")
+check("W-C1b lower(headers[x-env]) eq -> named-header toLowerCase",
+      _cjs('lower(http.request.headers["x-env"]) eq "prod"'),
+      expect_substr="request.headers['x-env'].value.toLowerCase() === 'prod'", forbid_substr="false")
+check("W-C1b upper(cookies[Theme]) eq -> named-cookie toUpperCase",
+      _cjs('upper(http.request.cookies["Theme"]) eq "DARK"'),
+      expect_substr="request.cookies['Theme'].value.toUpperCase() === 'DARK'", forbid_substr="false")
+check("W-C1b starts_with(headers[ref], ..) -> named-header startsWith",
+      _cjs('starts_with(http.request.headers["ref"], "http")'),
+      expect_substr="request.headers['ref'].value.startsWith('http')", forbid_substr="false")
+check("W-C1b ends_with(uri.args[p], ..) -> named-arg endsWith",
+      _cjs('ends_with(http.request.uri.args["p"], ".json")'),
+      expect_substr="request.querystring['p'].value.endsWith('.json')", forbid_substr="false")
+
 # C2: custom error — intercepted code from the CONDITION, returned code from the
 # action. Compound/OR/no-code conditions can't map -> non_convertible.
 def _err(expr, status=None):
