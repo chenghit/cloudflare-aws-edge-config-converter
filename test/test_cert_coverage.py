@@ -336,6 +336,27 @@ def test_end_to_end():
               proc2.returncode == 1 and "cannot open the lock file" in proc2.stderr
               and "in progress" not in proc2.stderr,
               f"rc={proc2.returncode} stderr={proc2.stderr.strip()[-160:]}")
+
+        # R8-F3: the lock fd is released on EVERY exit path — the `os.close(_lock_fd)`
+        # must live in a `finally:` (not just the success tail), so a sys.exit mid-run
+        # (BLOCK, ACM error) or an embedded caller catching SystemExit can't leak the
+        # held lock. Assert structurally via the AST: os.close(_lock_fd) is inside a
+        # Try.finalbody. (Behavior with a live sys.exit needs boto3; this holds with
+        # or without it, so it runs in a bare CI too.)
+        import ast as _ast
+        closed_in_finally = False
+        for node in _ast.walk(_ast.parse(src)):
+            if isinstance(node, _ast.Try):
+                for fb in node.finalbody:
+                    for sub in _ast.walk(fb):
+                        if (isinstance(sub, _ast.Call)
+                                and isinstance(sub.func, _ast.Attribute)
+                                and sub.func.attr == "close"
+                                and sub.args and isinstance(sub.args[0], _ast.Name)
+                                and sub.args[0].id == "_lock_fd"):
+                            closed_in_finally = True
+        check("R8-F3: lock fd is closed in a finally (released on every exit path)",
+              closed_in_finally, "os.close(_lock_fd) is not inside a finally block")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

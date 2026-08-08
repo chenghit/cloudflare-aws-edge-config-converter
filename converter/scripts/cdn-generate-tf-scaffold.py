@@ -872,125 +872,129 @@ def main():
               "checkout.", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        import boto3
-        from botocore.exceptions import ClientError
-    except ImportError:
-        print("ERROR: boto3 required. Install with: pip install boto3", file=sys.stderr)
-        sys.exit(1)
+        try:
+            import boto3
+            from botocore.exceptions import ClientError
+        except ImportError:
+            print("ERROR: boto3 required. Install with: pip install boto3", file=sys.stderr)
+            sys.exit(1)
 
-    acm = boto3.client("acm", region_name="us-east-1")
+        acm = boto3.client("acm", region_name="us-east-1")
 
-    # List every ISSUED cert, then DescribeCertificate for the FULL SAN list
-    # (ListCertificates truncates SANs at 100). Includes.keyTypes is REQUIRED:
-    # list_certificates defaults to RSA_1024/RSA_2048 ONLY, silently hiding every
-    # ECDSA and RSA-3072/4096 cert (verified live: 8 certs shown by default vs 16
-    # with all key types — the missing 8 were all EC, including a zone apex). Pass
-    # the full key-type set so no valid cert is invisible to the matcher.
-    ALL_KEY_TYPES = ["RSA_1024", "RSA_2048", "RSA_3072", "RSA_4096",
-                     "EC_prime256v1", "EC_secp384r1", "EC_secp521r1"]
-    certs = []  # [{"arn","names":[...],"not_after":epoch}]
-    try:
-        paginator = acm.get_paginator("list_certificates")
-        for page in paginator.paginate(CertificateStatuses=["ISSUED"],
-                                       Includes={"keyTypes": ALL_KEY_TYPES}):
-            for summ in page.get("CertificateSummaryList", []):
-                arn = summ["CertificateArn"]
-                det = acm.describe_certificate(CertificateArn=arn)["Certificate"]
-                # Skip CloudFront-managed certs (ManagedBy=CLOUDFRONT). CloudFront
-                # auto-creates these for distribution tenants / multi-tenant setups;
-                # their lifecycle (issuance, renewal, domain association) belongs to
-                # that tenant workflow, not the customer's general cert inventory, and
-                # ACM exposes ManagedBy precisely so tooling can exclude them from
-                # auto-selection. They routinely share a real host's SAN and can be
-                # the newest cert, so without this filter the SAN+expiry matcher would
-                # pick one and write an ARN the user can't sensibly deploy. ManagedBy
-                # is a STRING ("CLOUDFRONT"); the key is ABSENT on a normal customer
-                # cert (verified live: 6 such certs in the test account, one sharing a
-                # host's exact SAN). A user who really wants one can still force it
-                # with `-var cert_arn_<san>=...`.
-                if det.get("ManagedBy") == "CLOUDFRONT":
-                    continue
-                names = list(det.get("SubjectAlternativeNames", []))
-                if det.get("DomainName") and det["DomainName"] not in names:
-                    names.append(det["DomainName"])
-                na = det.get("NotAfter")
-                certs.append({"arn": arn, "names": names,
-                              "not_after": na.timestamp() if na else 0.0})
-    except ClientError as e:
-        print(f"ERROR: ACM lookup failed: {e}", file=sys.stderr)
-        sys.exit(1)
+        # List every ISSUED cert, then DescribeCertificate for the FULL SAN list
+        # (ListCertificates truncates SANs at 100). Includes.keyTypes is REQUIRED:
+        # list_certificates defaults to RSA_1024/RSA_2048 ONLY, silently hiding every
+        # ECDSA and RSA-3072/4096 cert (verified live: 8 certs shown by default vs 16
+        # with all key types — the missing 8 were all EC, including a zone apex). Pass
+        # the full key-type set so no valid cert is invisible to the matcher.
+        ALL_KEY_TYPES = ["RSA_1024", "RSA_2048", "RSA_3072", "RSA_4096",
+                         "EC_prime256v1", "EC_secp384r1", "EC_secp521r1"]
+        certs = []  # [{"arn","names":[...],"not_after":epoch}]
+        try:
+            paginator = acm.get_paginator("list_certificates")
+            for page in paginator.paginate(CertificateStatuses=["ISSUED"],
+                                           Includes={"keyTypes": ALL_KEY_TYPES}):
+                for summ in page.get("CertificateSummaryList", []):
+                    arn = summ["CertificateArn"]
+                    det = acm.describe_certificate(CertificateArn=arn)["Certificate"]
+                    # Skip CloudFront-managed certs (ManagedBy=CLOUDFRONT). CloudFront
+                    # auto-creates these for distribution tenants / multi-tenant setups;
+                    # their lifecycle (issuance, renewal, domain association) belongs to
+                    # that tenant workflow, not the customer's general cert inventory, and
+                    # ACM exposes ManagedBy precisely so tooling can exclude them from
+                    # auto-selection. They routinely share a real host's SAN and can be
+                    # the newest cert, so without this filter the SAN+expiry matcher would
+                    # pick one and write an ARN the user can't sensibly deploy. ManagedBy
+                    # is a STRING ("CLOUDFRONT"); the key is ABSENT on a normal customer
+                    # cert (verified live: 6 such certs in the test account, one sharing a
+                    # host's exact SAN). A user who really wants one can still force it
+                    # with `-var cert_arn_<san>=...`.
+                    if det.get("ManagedBy") == "CLOUDFRONT":
+                        continue
+                    names = list(det.get("SubjectAlternativeNames", []))
+                    if det.get("DomainName") and det["DomainName"] not in names:
+                        names.append(det["DomainName"])
+                    na = det.get("NotAfter")
+                    certs.append({"arn": arn, "names": names,
+                                  "not_after": na.timestamp() if na else 0.0})
+        except ClientError as e:
+            print(f"ERROR: ACM lookup failed: {e}", file=sys.stderr)
+            sys.exit(1)
 
-    by_arn = {c["arn"]: c for c in certs}  # ISSUED, non-managed, us-east-1
-    resolved, kept, missing = [], [], []
-    for d in DOMAINS:
-        san, host, cd = d["san"], d["hostname"], d["cert_domain"]
-        key = "cert_arn_" + san
+        by_arn = {c["arn"]: c for c in certs}  # ISSUED, non-managed, us-east-1
+        resolved, kept, missing = [], [], []
+        for d in DOMAINS:
+            san, host, cd = d["san"], d["hostname"], d["cert_domain"]
+            key = "cert_arn_" + san
 
-        matches = [c for c in certs if cert_covers(c["names"], host)]
+            matches = [c for c in certs if cert_covers(c["names"], host)]
 
-        # A value already in this domain's JSON is kept ONLY if it's still VALID:
-        # present in the current ISSUED set AND still covering this host. A stale
-        # ARN (cert expired / deleted / SAN no longer covers) is NOT kept — that
-        # would report a false success; drop it and re-resolve. This is safe
-        # because the JSON is tool-owned (a real override goes through -var, which
-        # outranks *.auto.tfvars, so we never clobber a user's intent).
-        prior = read_existing(san)
-        if prior and prior in by_arn and cert_covers(by_arn[prior]["names"], host):
-            kept.append((host, prior))
-            continue
-        if prior:
-            # Stale cache: drop the dead ARN from disk NOW, before deciding this
-            # host's fate. If re-resolution below finds a cert, write_arn overwrites
-            # anyway; if it doesn't, the file is already gone so Terraform can't
-            # auto-load the dead ARN — a BLOCKED run then genuinely fails closed
-            # (empty variable -> validation error at plan) instead of silently
-            # planning against the stale cert.
-            print(f"NOTE: cached ARN for {host} is no longer a valid ISSUED cert "
-                  f"covering it — dropping it and re-resolving. (was {prior})",
-                  file=sys.stderr)
-            remove_arn(san)
+            # A value already in this domain's JSON is kept ONLY if it's still VALID:
+            # present in the current ISSUED set AND still covering this host. A stale
+            # ARN (cert expired / deleted / SAN no longer covers) is NOT kept — that
+            # would report a false success; drop it and re-resolve. This is safe
+            # because the JSON is tool-owned (a real override goes through -var, which
+            # outranks *.auto.tfvars, so we never clobber a user's intent).
+            prior = read_existing(san)
+            if prior and prior in by_arn and cert_covers(by_arn[prior]["names"], host):
+                kept.append((host, prior))
+                continue
+            if prior:
+                # Stale cache: drop the dead ARN from disk NOW, before deciding this
+                # host's fate. If re-resolution below finds a cert, write_arn overwrites
+                # anyway; if it doesn't, the file is already gone so Terraform can't
+                # auto-load the dead ARN — a BLOCKED run then genuinely fails closed
+                # (empty variable -> validation error at plan) instead of silently
+                # planning against the stale cert.
+                print(f"NOTE: cached ARN for {host} is no longer a valid ISSUED cert "
+                      f"covering it — dropping it and re-resolving. (was {prior})",
+                      file=sys.stderr)
+                remove_arn(san)
 
-        if not matches:
-            missing.append((host, cd))
-            continue
-        # Deterministic pick when several certs cover the host: latest expiry
-        # first (longest-lived), ARN as a stable tiebreak — so re-runs and
-        # different machines choose the SAME cert, and never an about-to-expire
-        # one just because it sorted first.
-        matches.sort(key=lambda c: (-c["not_after"], c["arn"]))
-        chosen = matches[0]["arn"]
-        if len(matches) > 1:
-            print(f"NOTE: {len(matches)} certs cover {host}; chose {chosen} "
-                  f"(latest expiry). Override with -var {key}=... to change.",
-                  file=sys.stderr)
-        write_arn(san, chosen)
-        resolved.append((host, chosen))
+            if not matches:
+                missing.append((host, cd))
+                continue
+            # Deterministic pick when several certs cover the host: latest expiry
+            # first (longest-lived), ARN as a stable tiebreak — so re-runs and
+            # different machines choose the SAME cert, and never an about-to-expire
+            # one just because it sorted first.
+            matches.sort(key=lambda c: (-c["not_after"], c["arn"]))
+            chosen = matches[0]["arn"]
+            if len(matches) > 1:
+                print(f"NOTE: {len(matches)} certs cover {host}; chose {chosen} "
+                      f"(latest expiry). Override with -var {key}=... to change.",
+                      file=sys.stderr)
+            write_arn(san, chosen)
+            resolved.append((host, chosen))
 
-    for host, arn in resolved:
-        print(f"  resolved  {host}  ->  {arn}")
-    for host, arn in kept:
-        print(f"  kept      {host}  ->  {arn} (already set)")
+        for host, arn in resolved:
+            print(f"  resolved  {host}  ->  {arn}")
+        for host, arn in kept:
+            print(f"  kept      {host}  ->  {arn} (already set)")
 
-    if missing:
-        print("", file=sys.stderr)
-        print("BLOCKED: no ISSUED us-east-1 certificate covers these host(s):", file=sys.stderr)
-        for host, cd in missing:
-            print(f"  - {host}", file=sys.stderr)
-            print(f"      needs a cert whose SAN includes an exact {host} OR the wildcard {cd}", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("Provision the certificate(s) in ACM us-east-1 (one cert may carry", file=sys.stderr)
-        print("multiple SANs to cover several of the above), validate to ISSUED,", file=sys.stderr)
-        print("then re-run ./resolve-certs.py. Or pass -var cert_arn_<san>=... at apply.", file=sys.stderr)
-        sys.exit(1)
+        if missing:
+            print("", file=sys.stderr)
+            print("BLOCKED: no ISSUED us-east-1 certificate covers these host(s):", file=sys.stderr)
+            for host, cd in missing:
+                print(f"  - {host}", file=sys.stderr)
+                print(f"      needs a cert whose SAN includes an exact {host} OR the wildcard {cd}", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("Provision the certificate(s) in ACM us-east-1 (one cert may carry", file=sys.stderr)
+            print("multiple SANs to cover several of the above), validate to ISSUED,", file=sys.stderr)
+            print("then re-run ./resolve-certs.py. Or pass -var cert_arn_<san>=... at apply.", file=sys.stderr)
+            sys.exit(1)
 
-    # Each domain's ARN was already written into domains/<san>/certs.auto.tfvars.json
-    # (write_arn) — nothing to flush here.
-    print(f"\\nDone: {len(resolved)} resolved, {len(kept)} kept "
-          f"-> domains/<san>/certs.auto.tfvars.json")
-    # Release the lock explicitly (the OS also drops it on exit; this closes the fd
-    # cleanly so a repeat main() call in-process isn't blocked by our own lock).
-    os.close(_lock_fd)
+        # Each domain's ARN was already written into domains/<san>/certs.auto.tfvars.json
+        # (write_arn) — nothing to flush here.
+        print(f"\\nDone: {len(resolved)} resolved, {len(kept)} kept "
+              f"-> domains/<san>/certs.auto.tfvars.json")
+    finally:
+        # Release the lock on EVERY exit path (normal, SystemExit from a
+        # sys.exit above, or an unexpected exception) — an embedded caller that
+        # catches SystemExit would otherwise leak the held fd. The OS also drops
+        # it on process exit; this makes the lifecycle explicit and lets a repeat
+        # in-process main() run without self-blocking.
+        os.close(_lock_fd)
 
 
 if __name__ == "__main__":
