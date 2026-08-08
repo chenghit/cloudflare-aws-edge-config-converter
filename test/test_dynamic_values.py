@@ -736,6 +736,22 @@ check("W-C1b ends_with(uri.args[p], ..) -> named-arg endsWith",
       _cjs('ends_with(http.request.uri.args["p"], ".json")'),
       expect_substr="request.querystring['p'].value.endsWith('.json')", forbid_substr="false")
 
+# W-C1c: an INDEXED field with `in {set}` must keep its name too — the _field_expr
+# `in` return paths (both {set} and $list) were dropping **extra, so the name
+# resolved to "" and rendered `request.cookies[''] ...` (empty-string key ->
+# silently never matches, invisible to both the unmappable screen and
+# cdn-validate-js). Same bug class as W-C1b's _func_call fix, sibling branch.
+check("W-C1c cookies[env] in {set} -> real key, not empty string",
+      _cjs('http.request.cookies["env"] in {"prod" "staging"}'),
+      expect_substr="['prod', 'staging'].includes(request.cookies['env'].value)",
+      forbid_substr="cookies['']")
+check("W-C1c headers[x-env] in {set} -> real key (lowercased), not empty",
+      _cjs('http.request.headers["x-env"] in {"a" "b"}'),
+      expect_substr="request.headers['x-env']", forbid_substr="headers['']")
+check("W-C1c uri.args[mode] in {set} -> real key, not empty",
+      _cjs('http.request.uri.args["mode"] in {"1"}'),
+      expect_substr="request.querystring['mode']", forbid_substr="querystring['']")
+
 # C2: custom error — intercepted code from the CONDITION, returned code from the
 # action. Compound/OR/no-code conditions can't map -> non_convertible.
 def _err(expr, status=None):

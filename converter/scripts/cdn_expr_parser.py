@@ -887,16 +887,21 @@ class _CDNParser:
         op_tok = self.advance()
         op = op_tok.value
 
-        # "in" can be followed by $list or {set}
+        # "in" can be followed by $list or {set}. BOTH returns must carry **extra:
+        # for an indexed field (cookies["x"] in {…}) the synthetic short name is in
+        # `mapped` but the actual key lives in `extra` — dropping it renders
+        # `request.cookies[''] ...` (empty-string key → silently never matches, and
+        # it evades both the unmappable screen and cdn-validate-js). Same class as
+        # the _func_call bug; keep every _field_expr return path consistent.
         if op == "in":
             t = self.peek()
             if t.type == _TT_DOLLAR:
                 self.advance()
                 list_name = self.expect(_TT_FIELD).value
-                return {"field": mapped, "op": "in_list", "value": "$" + list_name}
+                return {"field": mapped, "op": "in_list", "value": "$" + list_name, **extra}
             if t.type == _TT_LBRACE:
                 values = self._read_set()
-                return {"field": mapped, "op": "in", "value": values}
+                return {"field": mapped, "op": "in", "value": values, **extra}
             raise _ParseError(f"Expected $ or {{ after 'in', got {t.value!r}")
 
         # wildcard / strict_wildcard with full_uri special handling
