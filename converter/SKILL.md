@@ -364,8 +364,9 @@ After the summary table, include deployment instructions:
    coverage — a multi-level subdomain like app.eu.example.com needs its own
    *.eu.example.com SAN, not just *.example.com):
    cd cloudflare-to-aws-cdn/terraform && ./resolve-certs.py
-   (stops and lists exactly what to provision if any host has no covering cert;
-   you can also set cert_arn_<san> by hand in a domain's terraform.tfvars)
+   (writes each domain's domains/<san>/certs.auto.tfvars.json, which Terraform
+   auto-loads; stops and lists exactly what to provision if any host has no
+   covering cert; override a pick with `terraform apply -var cert_arn_<san>=arn:...`)
 
 3. Deploy shared policies first:
    cd cloudflare-to-aws-cdn/terraform/shared && terraform init && terraform apply

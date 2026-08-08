@@ -55,7 +55,7 @@ agent 会按报告里的部署步骤操作（Terraform apply / CloudFormation）
 - **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF pipeline 完全基于 Python（表达式解析、分析、验证、CloudFormation 生成）。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）。macOS 和大多数 Linux 发行版已预装。转换流程无需第三方包（仅用标准库）。**部署阶段**：有 KVS 的 CDN 域名（批量重定向、IP 列表、错误页面）会生成 `seed-kvs.py` 脚本，需要**带 CRT 扩展的 `boto3`**（CloudFront KeyValueStore 的 SigV4a 签名依赖它）——部署前运行 `pip install 'boto3[crt]'`（记得加引号）安装。只装普通 `boto3` 会在 seeding 时报签名错误。
 - **模型**：转换 pipeline 本身无模型要求——所有脚本都是确定性 Python，零 LLM 调用。
 - **备份步骤需要**：`bash`、`curl` 和 `jq`。详见 `backup/README.md`。
-- **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。部署前先申请好 SAN 能覆盖各域名的证书。一层通配符只覆盖一层，`*.example.com` 覆盖 `www.example.com`，四级子域名 `app.eu.example.com` 则需要 `*.eu.example.com`（一张证书可以同时挂这两个 SAN）。工具生成的 `resolve-certs.py` 会按 SAN 覆盖把已签发的证书匹配到每个域名、填好 ARN；在 `terraform apply` 前运行它，或者手动设置 `cert_arn_<san>` 变量。
+- **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。部署前先申请好 SAN 能覆盖各域名的证书。一层通配符只覆盖一层，`*.example.com` 覆盖 `www.example.com`，四级子域名 `app.eu.example.com` 则需要 `*.eu.example.com`（一张证书可以同时挂这两个 SAN）。工具生成的 `resolve-certs.py` 会按 SAN 覆盖把已签发的证书匹配到每个域名，把 ARN 填进各域名工具独占的 `certs.auto.tfvars.json`；在 `terraform apply` 前运行它，或用 `-var cert_arn_<san>=arn:...` 覆盖某个选择。
 - **输入格式**：支持由自带的 `backup/` 脚本生成的备份。不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)——详见 [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)
 
 ## 转换范围
@@ -196,7 +196,7 @@ aws acm request-certificate \
   --region us-east-1
 ```
 
-每个 distribution 从 `cert_arn_<san>` 这个 Terraform 变量读 ARN。在 `terraform/` 目录下运行生成的 `resolve-certs.py`，它会列出你在 us-east-1 已签发的证书，按 SAN 覆盖匹配到每个域名，把 ARN 写进各域名的 `terraform.tfvars`——你手动填的 ARN 不会被覆盖，哪个域名没有能覆盖它的证书就停下来列出要签什么。`cert_arn_<san>` 为空时 `terraform plan` 会失败，并提示这个域名到底需要哪种 SAN 覆盖。
+每个 distribution 从 `cert_arn_<san>` 这个 Terraform 变量读 ARN。在 `terraform/` 目录下运行生成的 `resolve-certs.py`，它会列出你在 us-east-1 已签发的证书，按 SAN 覆盖匹配到每个域名，把 ARN 写进该域名自己的 `domains/<san>/certs.auto.tfvars.json`——这是工具独占、Terraform 自动加载的文件（纯 JSON，不解析 HCL，所以不会碰你自己文件里的注释或 heredoc）。已有的值不会被覆盖，哪个域名没有能覆盖它的证书就停下来列出要签什么。想改某个选择，就在该域名目录 apply 时加 `-var 'cert_arn_<san>=arn:...'`，不要去改生成的 JSON。`cert_arn_<san>` 为空时 `terraform plan` 会失败，并提示这个域名到底需要哪种 SAN 覆盖。
 
 </details>
 

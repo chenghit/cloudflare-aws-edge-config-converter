@@ -712,13 +712,19 @@ def generate_resolve_certs_script(domain_specs):
     SANs at 100), and for each host picks a cert whose SAN actually COVERS it
     under CloudFront's same-level rule (cert_covers, identical to the live-
     verified pipeline logic — inlined here so the emitted script is dependency-
-    free). It writes terraform/domains/<san>/terraform.tfvars with the matched
-    ARN. If ANY host has no covering cert, it writes nothing for that host, prints
-    exactly what SAN coverage to provision, and exits non-zero — fail closed and
-    explain, never leave a half-filled tfvars that plans against the wrong cert.
+    free).
 
-    A host whose tfvars already has a non-empty cert_arn_<san> (user-set, or a
-    prior run) is left untouched — an explicit ARN always wins over discovery."""
+    Storage is a SINGLE tool-owned JSON file, terraform/certs.auto.tfvars.json
+    (Terraform auto-loads *.auto.tfvars.json). Using JSON the tool fully owns —
+    instead of splicing into user-authored per-domain terraform.tfvars — means NO
+    parsing of HCL, which is what repeatedly broke: a cert_arn_ assignment hidden
+    in a `#`/`//`/`/* */` comment or a `<<EOT` heredoc read as live and got
+    corrupted on write. json.load/json.dump have none of those edges. To override
+    a chosen ARN the user passes a HIGHER-precedence Terraform input (`-var`, or an
+    override.auto.tfvars that sorts after this file), never by editing the
+    generated JSON. A non-empty value already in the JSON is kept, so re-runs are
+    stable. If ANY host has no covering cert, it writes nothing for that host,
+    prints what SAN coverage to provision, and exits non-zero — fail closed."""
     specs_json = json.dumps(domain_specs, indent=2)
     return '#!/usr/bin/env python3\n' + '"""resolve-certs.py — fill each domain\'s cert ARN from ACM (us-east-1).\n\n' + \
 '''ARN-first certificate discovery for the CDN pipeline. Run from terraform/:
@@ -726,18 +732,39 @@ def generate_resolve_certs_script(domain_specs):
     cd terraform && ./resolve-certs.py            # or: python3 resolve-certs.py
 
 Requires boto3 and AWS credentials with acm:ListCertificates +
-acm:DescribeCertificate in us-east-1. It only READS ACM and WRITES local
-terraform.tfvars files; it never mutates AWS.
+acm:DescribeCertificate in us-east-1. It only READS ACM and WRITES the local
+file domains/<san>/certs.auto.tfvars.json; it never mutates AWS.
+
+Each domain is its OWN Terraform root (domains/<san>/), and Terraform auto-loads
+*.auto.tfvars.json only from the root it runs in — NOT from a parent dir (verified
+live) — so the ARN is written INTO each domain's own directory, one tiny JSON per
+domain. Those files are TOOL-OWNED. To override a chosen ARN, do NOT edit one (a
+re-run may rewrite it) — pass a higher-precedence Terraform input instead, run
+from that domain's dir:
+    terraform apply -var 'cert_arn_<san>=arn:aws:acm:us-east-1:...'
+or drop it in an override.auto.tfvars there (auto files load in lexical order;
+"override" sorts after "certs", so it wins).
 
 Matching mirrors CloudFront exactly: a certificate covers a host if one of its
 SANs is an exact (case-insensitive) match, or a same-level wildcard *.<parent>
 (one label, leftmost only). A wildcard covers exactly ONE label — *.example.com
 covers a.example.com but NOT the apex and NOT a.b.example.com.
 """
-import json, os, re, sys
+import json, os, sys
 
 # One entry per distribution: {"san","hostname","cert_domain"}.
 DOMAINS = ''' + specs_json + '''
+
+# The terraform/ dir this script lives in. sys.argv[0] (not __file__) so the
+# script works both run directly and when its source is exec'd in a test.
+_HERE = os.path.dirname(os.path.abspath(sys.argv[0]))
+
+
+def tfvars_path(san):
+    """The tool-owned auto-tfvars JSON in THIS domain's Terraform root. Per-domain
+    (not one shared file) because each domains/<san>/ is a separate root and only
+    auto-loads tfvars from its own directory."""
+    return os.path.join(_HERE, "domains", san, "certs.auto.tfvars.json")
 
 
 def cert_covers(cert_names, hostname):
@@ -757,97 +784,30 @@ def cert_covers(cert_names, hostname):
     return False
 
 
-def _blank_hcl_comments(text):
-    """Return `text` with every HCL comment blanked to spaces, PRESERVING length
-    and newlines (so offsets and line numbers line up with the original). Blanks
-    `# ...` and `// ...` line comments and `/* ... */` block comments — the block
-    form spans lines, which a per-line scan can't see, so a `cert_arn_x = "x"`
-    inside `/* ... */` used to read as a live value AND writes landed inside the
-    comment. tfvars ARN values contain no `/*` or `#`, so blanking comments can't
-    eat a real value here. Not a full HCL lexer (a `#`/`/*` inside a quoted string
-    would be blanked too) — but tfvars written/consumed here are simple
-    `name = "arn"` assignments, so that case doesn't arise."""
-    out = list(text)
-    nl, bslash = chr(10), chr(92)  # avoid backslash escapes inside this template
-    i, n = 0, len(text)
-    while i < n:
-        two = text[i:i + 2]
-        if two == "/*":
-            j = text.find("*/", i + 2)
-            j = n if j == -1 else j + 2
-            for k in range(i, j):
-                if out[k] != nl:
-                    out[k] = " "
-            i = j
-        elif two == "//" or text[i] == "#":
-            j = text.find(nl, i)
-            j = n if j == -1 else j
-            for k in range(i, j):
-                out[k] = " "
-            i = j
-        elif text[i] == '"':  # skip a quoted string so a # inside it isn't a comment
-            j = i + 1
-            while j < n and text[j] != '"':
-                j += 2 if text[j] == bslash else 1
-            i = j + 1
-        else:
-            i += 1
-    return "".join(out)
-
-
-# One regex, one notion of "a live cert_arn_<san> assignment", shared by the
-# reader and writer so they can never disagree about what counts (the split
-# read/write patterns were exactly how commented lines slipped through twice).
-def _assign_re(name):
-    return re.compile(r'^[ \\t]*' + re.escape(name) + r'[ \\t]*=[ \\t]*"([^"]*)"',
-                      re.M)
-
-
-def read_existing_arn(tfvars_path, san):
-    """Return a non-empty cert_arn_<san> already set in tfvars, else None. An
-    explicit/prior ARN wins — discovery must not overwrite it. Matching runs on a
-    COMMENT-BLANKED copy (see _blank_hcl_comments), so neither a `# ...`/`// ...`
-    line comment NOR a `/* ... */` block comment reads as a live value — otherwise
-    the resolver skips the host and Terraform runs with the empty default."""
-    if not os.path.exists(tfvars_path):
-        return None
+def read_existing(san):
+    """The non-empty cert_arn_<san> already in this domain's JSON, else None.
+    No HCL parsing — json.load only."""
     try:
-        with open(tfvars_path) as f:
-            txt = f.read()
-    except OSError:
+        with open(tfvars_path(san)) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
         return None
-    m = _assign_re("cert_arn_" + san).search(_blank_hcl_comments(txt))
-    if m and m.group(1).strip():
-        return m.group(1).strip()
+    if isinstance(data, dict):
+        v = data.get("cert_arn_" + san)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
     return None
 
 
-def write_tfvars_var(path, name, value):
-    """Set `name = "value"` in a tfvars file WITHOUT clobbering anything else.
-    Rewriting the whole file with a single line (the old behavior) silently
-    dropped any other variables a user had put there. Replace an existing LIVE
-    assignment in place (a commented one — `#`, `//`, or inside `/* */` — is NOT
-    live, so it's left untouched and a real assignment is appended instead), else
-    append; write via a temp file + os.replace for atomicity so a crash mid-write
-    can't truncate an existing tfvars. Match position is found on a comment-blanked
-    copy but the splice is applied to the ORIGINAL text, so comments are preserved
-    verbatim and a value is never written inside one."""
-    line = f'{name} = "{value}"'
-    existing = ""
-    if os.path.exists(path):
-        with open(path) as f:
-            existing = f.read()
-    # Find a LIVE assignment by matching on the comment-blanked copy; the span
-    # maps 1:1 onto `existing` (blanking preserves length), so we can splice the
-    # replacement into the original — never into a comment.
-    m = _assign_re(name).search(_blank_hcl_comments(existing))
-    if m:
-        new = existing[:m.start()] + line + existing[m.end():]
-    else:
-        new = existing + ("" if existing.endswith("\\n") or not existing else "\\n") + line + "\\n"
+def write_arn(san, arn):
+    """Write {cert_arn_<san>: arn} to this domain's tool-owned JSON, atomically
+    (temp file + os.replace). One var per file — the file is entirely ours."""
+    path = tfvars_path(san)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
-        f.write(new)
+        json.dump({"cert_arn_" + san: arn}, f, indent=2)
+        f.write("\\n")
     os.replace(tmp, path)
 
 
@@ -859,7 +819,6 @@ def main():
         print("ERROR: boto3 required. Install with: pip install boto3", file=sys.stderr)
         sys.exit(1)
 
-    here = os.path.dirname(os.path.abspath(__file__))
     acm = boto3.client("acm", region_name="us-east-1")
 
     # List every ISSUED cert, then DescribeCertificate for the FULL SAN list
@@ -905,11 +864,13 @@ def main():
     resolved, kept, missing = [], [], []
     for d in DOMAINS:
         san, host, cd = d["san"], d["hostname"], d["cert_domain"]
-        tfvars = os.path.join(here, "domains", san, "terraform.tfvars")
+        key = "cert_arn_" + san
 
-        existing = read_existing_arn(tfvars, san)
-        if existing:
-            kept.append((host, existing))
+        # A non-empty value already in this domain's JSON wins (prior run, or one
+        # the user chose to place here) — never overwrite it.
+        prior = read_existing(san)
+        if prior:
+            kept.append((host, prior))
             continue
 
         matches = [c for c in certs if cert_covers(c["names"], host)]
@@ -924,11 +885,9 @@ def main():
         chosen = matches[0]["arn"]
         if len(matches) > 1:
             print(f"NOTE: {len(matches)} certs cover {host}; chose {chosen} "
-                  f"(latest expiry). Set cert_arn_{san} by hand to override.",
+                  f"(latest expiry). Override with -var {key}=... to change.",
                   file=sys.stderr)
-
-        os.makedirs(os.path.dirname(tfvars), exist_ok=True)
-        write_tfvars_var(tfvars, f"cert_arn_{san}", chosen)
+        write_arn(san, chosen)
         resolved.append((host, chosen))
 
     for host, arn in resolved:
@@ -945,11 +904,13 @@ def main():
         print("", file=sys.stderr)
         print("Provision the certificate(s) in ACM us-east-1 (one cert may carry", file=sys.stderr)
         print("multiple SANs to cover several of the above), validate to ISSUED,", file=sys.stderr)
-        print("then re-run ./resolve-certs.py. Or set the cert_arn_<san> variable", file=sys.stderr)
-        print("by hand in the domain's terraform.tfvars.", file=sys.stderr)
+        print("then re-run ./resolve-certs.py. Or pass -var cert_arn_<san>=... at apply.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\\nDone: {len(resolved)} resolved, {len(kept)} kept. All domains have a cert ARN.")
+    # Each domain's ARN was already written into domains/<san>/certs.auto.tfvars.json
+    # (write_arn) — nothing to flush here.
+    print(f"\\nDone: {len(resolved)} resolved, {len(kept)} kept "
+          f"-> domains/<san>/certs.auto.tfvars.json")
 
 
 if __name__ == "__main__":

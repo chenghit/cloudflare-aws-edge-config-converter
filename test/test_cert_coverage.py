@@ -212,28 +212,6 @@ def test_end_to_end():
         check("resolver passes Includes.keyTypes (not default RSA-only)",
               "keyTypes" in src and "EC_prime256v1" in src, "no keyTypes filter")
 
-        # F3: write_tfvars_var must UPDATE the target var and PRESERVE everything
-        # else (the old whole-file rewrite silently dropped other variables).
-        # NOTE the probe VALUES are deliberately NOT ARN-shaped: write_tfvars_var
-        # does no format validation (it writes the value verbatim), so the test
-        # needs no real ARN — and an `arn:aws:...:<12-digit>:` literal, even a fake
-        # one, trips secret scanners on pattern alone. Sentinel strings assert the
-        # same round-trip. (The ARN FORMAT is validated by the generated Terraform
-        # variable's regex, exercised separately, not here.)
-        wt = ns["write_tfvars_var"]
-        tv = os.path.join(tmp, "tfvars_probe")
-        with open(tv, "w") as f:
-            f.write('other_setting = "keep"\ncert_arn_x = ""\n')
-        wt(tv, "cert_arn_x", "CERT-ARN-PLACEHOLDER-X")
-        wt(tv, "cert_arn_y", "CERT-ARN-PLACEHOLDER-Y")
-        after = open(tv).read()
-        check("F3: write_tfvars_var preserves other variables",
-              'other_setting = "keep"' in after, after)
-        check("F3: write_tfvars_var updates the target var in place",
-              after.count("cert_arn_x") == 1 and "CERT-ARN-PLACEHOLDER-X" in after, after)
-        check("F3: write_tfvars_var appends a new var",
-              "cert_arn_y" in after and "CERT-ARN-PLACEHOLDER-Y" in after, after)
-
         # F4: multiple covering certs are chosen deterministically (latest expiry,
         # ARN tiebreak) — assert the resolver sorts by (-not_after, arn).
         check("F4: resolver sorts matches deterministically (expiry then ARN)",
@@ -244,52 +222,44 @@ def test_end_to_end():
         # they are locked to their managed distribution/tenant and can't be attached
         # to a standard distribution. They routinely share a host's SAN and can be
         # the newest, so a missing filter would pick one and write an undeployable
-        # tfvars. Assert the resolver skips them on the exact string ManagedBy carries.
+        # var. Assert the resolver skips them on the exact string ManagedBy carries.
         check("R2-F1: resolver excludes ManagedBy=CLOUDFRONT certs",
               'ManagedBy") == "CLOUDFRONT"' in src or "ManagedBy') == 'CLOUDFRONT'" in src,
               "no ManagedBy=CLOUDFRONT filter in resolver")
 
-        # R2-F2: read_existing_arn must ignore a COMMENTED assignment — else a
-        # `# cert_arn_x = "old"` line reads as a live value, the resolver skips the
-        # host, and Terraform runs with the empty default.
-        rea = ns["read_existing_arn"]
-        cprobe = os.path.join(tmp, "comment_probe")
-        with open(cprobe, "w") as f:
-            f.write('# cert_arn_x = "COMMENTED"\n')
-        check("R2-F2: read_existing_arn ignores a commented assignment",
-              rea(cprobe, "x") is None, f"got {rea(cprobe, 'x')!r}")
-        with open(cprobe, "w") as f:
-            f.write('# cert_arn_x = "OLD"\ncert_arn_x = "LIVE"\n')
-        check("R2-F2: read_existing_arn reads the real line past a comment",
-              rea(cprobe, "x") == "LIVE", f"got {rea(cprobe, 'x')!r}")
-        with open(cprobe, "w") as f:
-            f.write('   cert_arn_x   =   "INDENTED"\n')
-        check("R2-F2: read_existing_arn reads an indented/spaced assignment",
-              rea(cprobe, "x") == "INDENTED", f"got {rea(cprobe, 'x')!r}")
+        # R4: storage is a tool-owned per-domain JSON (certs.auto.tfvars.json),
+        # NOT spliced into user-authored HCL. This retires the whole class of
+        # comment/heredoc misreads (rounds 2 & 3): there is no HCL parsing left.
+        # The JSON MUST live in each domain's own Terraform root — Terraform
+        # auto-loads *.auto.tfvars.json only from the root it runs in, not a parent
+        # (verified live). read_existing/write_arn use only json.load/json.dump.
+        check("R4: resolver has NO HCL comment/heredoc parsing",
+              "_blank_hcl_comments" not in src and "_assign_re" not in src
+              and "<<" not in src,
+              "leftover HCL-parsing machinery in resolver")
+        check("R4: resolver writes certs.auto.tfvars.json (Terraform auto-loads it)",
+              "certs.auto.tfvars.json" in src)
+        check("R4: JSON path is per-domain (domains/<san>/), not a shared parent file",
+              'domains", san' in src or "domains', san" in src,
+              "resolver must write into each domain's own root")
 
-        # R3-F1: HCL /* ... */ BLOCK comments (span lines, a per-line scan can't
-        # see them). An assignment inside a block comment must not read as live,
-        # must not shadow a later real assignment, and a write must land OUTSIDE
-        # the comment (else the value stays commented and Terraform uses the empty
-        # default). read AND write both blank comments first, so they agree.
-        wt = ns["write_tfvars_var"]
-        with open(cprobe, "w") as f:
-            f.write('/*\ncert_arn_x = "BLOCKED"\n*/\n')
-        check("R3-F1: read ignores an assignment inside /* */",
-              rea(cprobe, "x") is None, f"got {rea(cprobe, 'x')!r}")
-        with open(cprobe, "w") as f:
-            f.write('/*\ncert_arn_x = "BLOCKED"\n*/\ncert_arn_x = "REAL"\n')
-        check("R3-F1: read returns the real assignment, not the block-commented one",
-              rea(cprobe, "x") == "REAL", f"got {rea(cprobe, 'x')!r}")
-        # write into a file whose only occurrence is inside a block comment →
-        # append a live line, keep the comment, and read it back.
-        with open(cprobe, "w") as f:
-            f.write('/*\ncert_arn_x = "BLOCKED"\n*/\n')
-        wt(cprobe, "cert_arn_x", "WRITTEN")
-        body = open(cprobe).read()
-        check("R3-F1: write past a block comment lands OUTSIDE it (round-trips)",
-              rea(cprobe, "x") == "WRITTEN" and "/*" in body and '"BLOCKED"' in body,
-              f"file now: {body!r}")
+        # R4 behavior: json.load/dump round-trip, and a non-empty prior value is
+        # KEPT (never overwritten). Point the resolver's _HERE at a temp tree and
+        # exercise write_arn/read_existing directly.
+        rd, wa = ns["read_existing"], ns["write_arn"]
+        ns["_HERE"] = tmp  # tfvars_path(san) -> tmp/domains/<san>/certs.auto.tfvars.json
+        check("R4: read_existing on a missing file -> None", rd("s1") is None)
+        wa("s1", "CERT-ARN-PLACEHOLDER-1")
+        jpath = os.path.join(tmp, "domains", "s1", "certs.auto.tfvars.json")
+        blob = json.load(open(jpath))
+        check("R4: write_arn produces valid JSON with the right key",
+              blob == {"cert_arn_s1": "CERT-ARN-PLACEHOLDER-1"}, blob)
+        check("R4: read_existing reads back the written value",
+              rd("s1") == "CERT-ARN-PLACEHOLDER-1", f"got {rd('s1')!r}")
+        # a malformed JSON must not crash the reader (treated as absent)
+        with open(jpath, "w") as f:
+            f.write("not valid json {")
+        check("R4: malformed JSON -> None (no crash)", rd("s1") is None)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

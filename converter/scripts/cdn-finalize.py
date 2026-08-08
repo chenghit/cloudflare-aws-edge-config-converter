@@ -727,10 +727,11 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "cd cloudflare-to-aws-cdn/terraform",
         "./resolve-certs.py   # matches each host to an ISSUED cert by real SAN coverage",
         "```",
-        "It writes `domains/<san>/terraform.tfvars` for every covered host, leaves any "
-        "hand-set ARN untouched, and STOPS listing exactly what to provision if a host is "
-        "uncovered. You can also set `cert_arn_<san>` by hand in a domain's "
-        "`terraform.tfvars` (an explicit ARN always wins).",
+        "It writes `domains/<san>/certs.auto.tfvars.json` (a tool-owned file Terraform "
+        "auto-loads) for every covered host, keeps any value already there, and STOPS "
+        "listing exactly what to provision if a host is uncovered. To override a chosen "
+        "ARN, don't edit that JSON (a re-run may rewrite it) — pass a higher-precedence "
+        "input from the domain's dir: `terraform apply -var 'cert_arn_<san>=arn:...'`.",
         "",
         "Check what you have:",
         "```bash",
@@ -774,8 +775,9 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "**Before applying any domain, fill the cert ARNs** (step 2): `cd "
         "cloudflare-to-aws-cdn/terraform && ./resolve-certs.py`. Each domain's "
         "`cert_arn_<san>` variable must be a valid us-east-1 ACM ARN or `terraform plan` "
-        "fails its validation. The resolver writes `domains/<san>/terraform.tfvars`; a "
-        "hand-set ARN there also works.",
+        "fails its validation. The resolver writes each domain's "
+        "`domains/<san>/certs.auto.tfvars.json` (Terraform auto-loads it); to override "
+        "one, run that domain's apply with `-var 'cert_arn_<san>=arn:...'`.",
         "",
         "With the plugin cache enabled (step 3), plain `terraform init` reuses the cached "
         "provider. Do NOT use `-upgrade` in the per-domain loop — it forces a network "
