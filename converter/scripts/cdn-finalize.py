@@ -670,7 +670,7 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     # single (and, for deep subdomains, wrong) "*.apex covers everything" claim.
     cert_group_hosts = {}
     for m in domain_list:
-        cd = m.get("cert_domain") or derive_cert_domain(m["hostname"])
+        cd = m.get("cert_domain") or derive_cert_domain(m["hostname"], m.get("apex_domain", ""))
         cert_group_hosts.setdefault(cd, []).append(m["hostname"])
     cert_lines = []
     for cd in sorted(cert_group_hosts):

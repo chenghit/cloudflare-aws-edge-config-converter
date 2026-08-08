@@ -53,30 +53,41 @@ QUOTA_TAGS = (QUOTA_RAISE, QUOTA_REDESIGN)
 #     resolver (resolve-certs.py) that mirrors cert_covers.
 
 
-def derive_cert_domain(hostname):
+def derive_cert_domain(hostname, zone_name=None):
     """The SAME-LEVEL wildcard that must appear in a certificate's SAN to cover
     `hostname` on CloudFront — i.e. the coverage a user needs to provision.
 
-      app.eu.example.com → *.eu.example.com   (wildcard replaces `app`)
-      www.example.com    → *.example.com
-      example.com        → example.com        (apex: a wildcard one level up does
-                                               NOT cover the apex, so it needs an
-                                               exact SAN of itself)
-      *.example.com      → *.example.com       (already a wildcard: unchanged)
+      zone example.com:
+        app.eu.example.com → *.eu.example.com   (wildcard replaces `app`)
+        www.example.com    → *.example.com
+        example.com        → example.com        (apex: a wildcard one level up
+                                                 does NOT cover the apex — it
+                                                 needs an exact SAN of itself)
+      zone a.letsmakeit.link (a delegated/registered zone whose apex has 3+
+      labels — a plain label count can't spot it):
+        a.letsmakeit.link     → a.letsmakeit.link   (apex → exact self, NOT
+                                                     *.letsmakeit.link, which is a
+                                                     different registrable domain)
+        www.a.letsmakeit.link → *.a.letsmakeit.link
+      *.example.com → *.example.com (already a wildcard: unchanged)
 
-    A wildcard host keeps its own value (Cloudflare `*.x` → one CloudFront
-    distribution whose alias is `*.x`, covered by a `*.x` SAN). A bare host with
-    only one label left (a TLD-like `localhost`, or the apex itself) can't be
-    wildcarded a level up soundly, so it maps to an exact-self SAN."""
+    Apex detection is by `hostname == zone_name`, NOT by label count — a zone
+    apex can have any number of labels (example.co.uk, a.letsmakeit.link), and
+    label-counting mis-derived those to a public-suffix wildcard (*.co.uk /
+    *.letsmakeit.link) that ACM won't issue and that would span other zones.
+    `zone_name` is the Cloudflare zone the host lives in (its apex); pass it
+    whenever known. Without it, fall back to "2-label host = apex", correct for
+    the common example.com case but blind to multi-label apexes."""
     if hostname.startswith("*."):
         return hostname
-    labels = hostname.split(".")
-    # Need at least 3 labels (a.b.c) to replace the leftmost with `*` and still
-    # leave a real registrable parent. `example.com` (2 labels) is the apex →
-    # exact self; a single label → exact self.
-    if len(labels) >= 3:
-        return "*." + ".".join(labels[1:])
-    return hostname
+    zone = (zone_name or "").lstrip(".")
+    if zone and hostname == zone:
+        return hostname  # apex → exact self
+    if not zone and hostname.count(".") <= 1:
+        return hostname  # no zone hint: treat a 2-label host as the apex
+    # A subdomain: replace the leftmost label with `*` (its same-level wildcard).
+    # host must have a label to strip; a bare single label has none → exact self.
+    return "*." + hostname.split(".", 1)[1] if "." in hostname else hostname
 
 
 def cert_covers(cert_names, hostname):

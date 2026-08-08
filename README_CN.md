@@ -42,7 +42,7 @@ git clone https://github.com/chenghit/cloudflare-aws-edge-config-converter.git
 读取转换报告，帮我部署到 AWS。
 ```
 
-agent 会按报告里的部署步骤操作（Terraform apply / CloudFormation），并先告诉你有哪些手动前置。**CDN 特别注意：部署前先在 us-east-1 准备好 ACM 证书**——CloudFront 在 plan 阶段就要查证书，缺证书会直接导致部署失败。批准前请先看一遍报告，部署什么由你掌控。
+agent 会按报告里的部署步骤操作（Terraform apply / CloudFormation），并先告诉你有哪些手动前置。**CDN 特别注意：部署前先在 us-east-1 准备好 ACM 证书**。每个 distribution 需要一张 SAN 能覆盖它的证书。一层通配符只覆盖一层，`*.example.com` 覆盖 `www.example.com`，但四级子域名 `app.eu.example.com` 需要 `*.eu.example.com`。工具生成的 `resolve-certs.py` 会按 SAN 覆盖把你已签发的证书匹配到每个域名并填好 ARN；哪个域名没有能覆盖它的证书，它会停下来明确告诉你要签什么。批准前请先看一遍报告，部署什么由你掌控。
 
 请始终提供 **备份根目录**（包含 `account/` 和 zone 子目录如 `example.com/` 的那个目录）。**不要**提供子目录——WAF 和 CDN pipeline 都需要 `account/` 目录中的文件（WAF 需要 IP 列表，CDN 需要 bulk redirect 列表），这些文件位于 zone 目录之外。
 
@@ -55,7 +55,7 @@ agent 会按报告里的部署步骤操作（Terraform apply / CloudFormation）
 - **Python 3** — WAF 和 CDN pipeline 的脚本都需要。WAF pipeline 完全基于 Python（表达式解析、分析、验证、CloudFormation 生成）。CDN 用 Python 做规则预处理、IR 校验和合并（Stage 3–7.6）。macOS 和大多数 Linux 发行版已预装。转换流程无需第三方包（仅用标准库）。**部署阶段**：有 KVS 的 CDN 域名（批量重定向、IP 列表、错误页面）会生成 `seed-kvs.py` 脚本，需要**带 CRT 扩展的 `boto3`**（CloudFront KeyValueStore 的 SigV4a 签名依赖它）——部署前运行 `pip install 'boto3[crt]'`（记得加引号）安装。只装普通 `boto3` 会在 seeding 时报签名错误。
 - **模型**：转换 pipeline 本身无模型要求——所有脚本都是确定性 Python，零 LLM 调用。
 - **备份步骤需要**：`bash`、`curl` 和 `jq`。详见 `backup/README.md`。
-- **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。运行前申请通配符证书（如 `*.example.com`），Terraform 会自动查找已签发的证书。
+- **ACM 证书**（仅 CDN）：CloudFront 要求证书位于 us-east-1。部署前先申请好 SAN 能覆盖各域名的证书。一层通配符只覆盖一层，`*.example.com` 覆盖 `www.example.com`，四级子域名 `app.eu.example.com` 则需要 `*.eu.example.com`（一张证书可以同时挂这两个 SAN）。工具生成的 `resolve-certs.py` 会按 SAN 覆盖把已签发的证书匹配到每个域名、填好 ARN；在 `terraform apply` 前运行它，或者手动设置 `cert_arn_<san>` 变量。
 - **输入格式**：支持由自带的 `backup/` 脚本生成的备份。不兼容 [cf-terraforming](https://github.com/cloudflare/cf-terraforming)——详见 [为何不用 cf-terraforming？](./docs/why-not-cf-terraforming.md)
 
 ## 转换范围
@@ -86,7 +86,7 @@ WAF pipeline 默认生成 2 个 WebACL（website + api）。一个 rule-group ov
 
 **CDN 流程**（0 个 LLM 阶段 + 10 个 Python 脚本）：**🐍 解析 DNS + 生成域名配置** → **🐍 预处理规则** → **🐍 校验 IR** → **🐍 合并去重** → **🐍 校验最终 IR** → **🐍 生成共享策略** → **🐍 生成每域名 Terraform 骨架** → **🐍 生成每域名测试脚本** → **🐍 生成每域名 JS** → **🐍 校验 JS**
 
-所有 CDN 阶段都是确定性 Python 脚本，零 LLM 调用，零用户交互。Stage 1 自动解析 DNS 并生成 `domain_scope.json`（所有域名使用 Terraform data source 自动查找 ACM 证书）。整个工具（WAF + CDN）完全不依赖模型。
+所有 CDN 阶段都是确定性 Python 脚本，零 LLM 调用，转换过程零用户交互。Stage 1 自动解析 DNS 并生成 `domain_scope.json`。证书 ARN 在部署时由生成的 `resolve-certs.py` 按 ACM SAN 覆盖填入，不再靠 Terraform data source 去猜。整个工具（WAF + CDN）完全不依赖模型。
 
 ```mermaid
 flowchart TD
@@ -113,7 +113,7 @@ flowchart TD
     style CDN_Done fill:#9f9,stroke:#333
 ```
 
-**全自动：** 无需用户交互。DNS 解析自动生成域名配置。ACM 证书通过 Terraform data source 自动查找。
+**转换全自动：** 转换过程无需用户交互。DNS 解析自动生成域名配置。部署时由 `resolve-certs.py` 按 SAN 覆盖把你在 us-east-1 已签发的证书匹配到每个域名、填好 ARN（也可以手动填）。
 
 ## CDN 流程详情
 
@@ -186,16 +186,17 @@ cloudflare-to-aws-cdn/
 <details>
 <summary>ACM 证书</summary>
 
-CloudFront 要求 TLS 证书位于 **us-east-1**。运行前申请：
+CloudFront 要求 TLS 证书位于 **us-east-1**。一张证书能不能覆盖某个域名，看它的 SAN 里有没有精确匹配、或者同级通配符。`*.example.com` 覆盖 `www.example.com`，但覆盖不了顶级域 `example.com`，也覆盖不了更深一层的 `app.eu.example.com`（那个要 `*.eu.example.com`）。一张证书可以挂多个 SAN。部署前申请：
 
 ```bash
 aws acm request-certificate \
-  --domain-name "*.example.com" \
+  --domain-name "example.com" \
+  --subject-alternative-names "*.example.com" "*.eu.example.com" \
   --validation-method DNS \
   --region us-east-1
 ```
 
-工具会生成 `data "aws_acm_certificate"` 数据源，在 `terraform plan` 时自动查找已签发的证书。
+每个 distribution 从 `cert_arn_<san>` 这个 Terraform 变量读 ARN。在 `terraform/` 目录下运行生成的 `resolve-certs.py`，它会列出你在 us-east-1 已签发的证书，按 SAN 覆盖匹配到每个域名，把 ARN 写进各域名的 `terraform.tfvars`——你手动填的 ARN 不会被覆盖，哪个域名没有能覆盖它的证书就停下来列出要签什么。`cert_arn_<san>` 为空时 `terraform plan` 会失败，并提示这个域名到底需要哪种 SAN 覆盖。
 
 </details>
 

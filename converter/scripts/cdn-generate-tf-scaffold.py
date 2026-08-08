@@ -773,6 +773,28 @@ def read_existing_arn(tfvars_path, san):
     return None
 
 
+def write_tfvars_var(path, name, value):
+    """Set `name = "value"` in a tfvars file WITHOUT clobbering anything else.
+    Rewriting the whole file with a single line (the old behavior) silently
+    dropped any other variables a user had put there. Update the line in place if
+    present, else append it; write via a temp file + os.replace for atomicity so
+    a crash mid-write can't truncate an existing tfvars."""
+    line = f'{name} = "{value}"'
+    existing = ""
+    if os.path.exists(path):
+        with open(path) as f:
+            existing = f.read()
+    pat = re.compile(r'^[ \\t]*' + re.escape(name) + r'[ \\t]*=.*$', re.M)
+    if pat.search(existing):
+        new = pat.sub(line, existing)
+    else:
+        new = existing + ("" if existing.endswith("\\n") or not existing else "\\n") + line + "\\n"
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(new)
+    os.replace(tmp, path)
+
+
 def main():
     try:
         import boto3
@@ -785,18 +807,27 @@ def main():
     acm = boto3.client("acm", region_name="us-east-1")
 
     # List every ISSUED cert, then DescribeCertificate for the FULL SAN list
-    # (ListCertificates truncates SANs at 100).
-    certs = []  # [{"arn","names":[...]}]
+    # (ListCertificates truncates SANs at 100). Includes.keyTypes is REQUIRED:
+    # list_certificates defaults to RSA_1024/RSA_2048 ONLY, silently hiding every
+    # ECDSA and RSA-3072/4096 cert (verified live: 8 certs shown by default vs 16
+    # with all key types — the missing 8 were all EC, including a zone apex). Pass
+    # the full key-type set so no valid cert is invisible to the matcher.
+    ALL_KEY_TYPES = ["RSA_1024", "RSA_2048", "RSA_3072", "RSA_4096",
+                     "EC_prime256v1", "EC_secp384r1", "EC_secp521r1"]
+    certs = []  # [{"arn","names":[...],"not_after":epoch}]
     try:
         paginator = acm.get_paginator("list_certificates")
-        for page in paginator.paginate(CertificateStatuses=["ISSUED"]):
+        for page in paginator.paginate(CertificateStatuses=["ISSUED"],
+                                       Includes={"keyTypes": ALL_KEY_TYPES}):
             for summ in page.get("CertificateSummaryList", []):
                 arn = summ["CertificateArn"]
                 det = acm.describe_certificate(CertificateArn=arn)["Certificate"]
                 names = list(det.get("SubjectAlternativeNames", []))
                 if det.get("DomainName") and det["DomainName"] not in names:
                     names.append(det["DomainName"])
-                certs.append({"arn": arn, "names": names})
+                na = det.get("NotAfter")
+                certs.append({"arn": arn, "names": names,
+                              "not_after": na.timestamp() if na else 0.0})
     except ClientError as e:
         print(f"ERROR: ACM lookup failed: {e}", file=sys.stderr)
         sys.exit(1)
@@ -811,17 +842,24 @@ def main():
             kept.append((host, existing))
             continue
 
-        matches = [c["arn"] for c in certs if cert_covers(c["names"], host)]
+        matches = [c for c in certs if cert_covers(c["names"], host)]
         if not matches:
             missing.append((host, cd))
             continue
+        # Deterministic pick when several certs cover the host: latest expiry
+        # first (longest-lived), ARN as a stable tiebreak — so re-runs and
+        # different machines choose the SAME cert, and never an about-to-expire
+        # one just because it sorted first.
+        matches.sort(key=lambda c: (-c["not_after"], c["arn"]))
+        chosen = matches[0]["arn"]
         if len(matches) > 1:
-            print(f"NOTE: {len(matches)} certs cover {host}; using {matches[0]}", file=sys.stderr)
+            print(f"NOTE: {len(matches)} certs cover {host}; chose {chosen} "
+                  f"(latest expiry). Set cert_arn_{san} by hand to override.",
+                  file=sys.stderr)
 
         os.makedirs(os.path.dirname(tfvars), exist_ok=True)
-        with open(tfvars, "w") as f:
-            f.write(f'cert_arn_{san} = "{matches[0]}"\\n')
-        resolved.append((host, matches[0]))
+        write_tfvars_var(tfvars, f"cert_arn_{san}", chosen)
+        resolved.append((host, chosen))
 
     for host, arn in resolved:
         print(f"  resolved  {host}  ->  {arn}")

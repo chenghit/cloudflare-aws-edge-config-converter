@@ -42,7 +42,7 @@ Once the conversion finishes, each pipeline writes a report — `conversion_repo
 Read the conversion report and deploy it to AWS for me.
 ```
 
-The agent follows the report's deploy steps (Terraform apply / CloudFormation) and tells you the manual prerequisites first. **Heads up for CDN: provision your ACM certificates in us-east-1 before deploying** — CloudFront looks them up at plan time, so a missing cert fails the deploy. Review the report before approving; you stay in control of what gets applied.
+The agent follows the report's deploy steps (Terraform apply / CloudFormation) and tells you the manual prerequisites first. **Heads up for CDN: provision your ACM certificates in us-east-1 before deploying** — each distribution needs a cert whose SAN covers its host (a multi-level subdomain like `app.eu.example.com` needs `*.eu.example.com`, not `*.example.com`). The generated `resolve-certs.py` matches your ISSUED certs to each host by SAN coverage and fills in the ARNs; it stops and tells you exactly what to provision if a host has no covering cert. Review the report before approving; you stay in control of what gets applied.
 
 Always provide the **backup root directory** (the one containing `account/` and zone subdirectories like `example.com/`). Do **not** provide a subdirectory — both WAF and CDN pipelines need files from the `account/` directory (IP lists for WAF, bulk redirect lists for CDN) that live outside the zone directory.
 
@@ -55,7 +55,7 @@ For testing without your own config, use `examples/cloudflare-configs/`.
 - **Python 3** — Required by both WAF and CDN pipeline scripts. WAF pipeline is entirely Python-based (expression parsing, analysis, validation, CloudFormation generation). CDN uses Python for rule preprocessing, IR validation, and finalization (Stages 3–7.6). Pre-installed on macOS and most Linux distributions. No third-party packages needed for the conversion pipeline (stdlib only). **Post-conversion**: CDN domains with KVS (bulk redirects, IP lists, error pages) generate a `seed-kvs.py` script that requires `boto3` **with the CRT extra** for CloudFront KeyValueStore SigV4a signing — install with `pip install 'boto3[crt]'` (quote it) before deploying. Plain `boto3` will fail seeding with a signing error.
 - **Model**: No model requirement for the conversion pipeline itself — all scripts are deterministic Python with zero LLM invocations.
 - **For the backup step**: `bash`, `curl`, and `jq`. See `backup/README.md`.
-- **ACM certificates** (CDN only): CloudFront requires certs in us-east-1. Provision wildcard certificates (e.g., `*.example.com`) before running. Terraform auto-discovers existing ISSUED certs via data source lookup.
+- **ACM certificates** (CDN only): CloudFront requires certs in us-east-1. Provision certificates whose SANs cover your hosts before deploying — one wildcard covers a single label, so `*.example.com` covers `www.example.com` but a deeper `app.eu.example.com` needs `*.eu.example.com` (one cert may carry both as SANs). The generated `resolve-certs.py` matches ISSUED certs to each host by SAN coverage and fills the ARNs; run it before `terraform apply`, or set the `cert_arn_<san>` variable by hand.
 - **Input format**: Works with backups produced by the bundled `backup/` script. NOT compatible with [cf-terraforming](https://github.com/cloudflare/cf-terraforming) — see [Why Not cf-terraforming?](./docs/why-not-cf-terraforming.md).
 
 ## What Gets Converted
@@ -86,7 +86,7 @@ The WAF pipeline generates 2 WebACLs (website + api). A rule-group overflow pack
 
 **CDN pipeline** (0 LLM stages + 10 Python scripts): **parse DNS + generate scope (Python)** → **preprocess rules (Python)** → **validate IR (Python)** → **finalize + dedup (Python)** → **validate final IR (Python)** → **generate shared policies (Python)** → **generate per-domain Terraform scaffold (Python)** → **generate per-domain test scripts (Python)** → **generate per-domain JS (Python)** → **validate JS (Python)**
 
-All CDN stages are deterministic Python scripts. No LLM subagents. No user interaction — Stage 1 parses DNS and generates `domain_scope.json` automatically (all domains use Terraform data source for ACM cert lookup). The entire tool (WAF + CDN) is zero LLM.
+All CDN stages are deterministic Python scripts. No LLM subagents. No user interaction during conversion — Stage 1 parses DNS and generates `domain_scope.json` automatically. Certificate ARNs are filled at deploy time by the generated `resolve-certs.py` (ACM SAN-coverage match), not guessed by a Terraform data source. The entire tool (WAF + CDN) is zero LLM.
 
 ```mermaid
 flowchart TD
@@ -113,7 +113,7 @@ flowchart TD
     style CDN_Done fill:#9f9,stroke:#333
 ```
 
-**Fully automated:** No user interaction required. DNS parsing generates domain scope automatically. ACM certificates are looked up via Terraform data sources.
+**Fully automated conversion:** No user interaction during conversion. DNS parsing generates domain scope automatically. At deploy time, `resolve-certs.py` fills each distribution's ACM certificate ARN by matching your ISSUED us-east-1 certs to each host by SAN coverage (or set the ARNs by hand).
 
 ## CDN Pipeline Details
 
@@ -191,16 +191,17 @@ Factors that affect conversion time:
 <details>
 <summary>ACM certificates</summary>
 
-CloudFront requires TLS certificates in **us-east-1**. Provision before running:
+CloudFront requires TLS certificates in **us-east-1**. A certificate covers a host only if one of its SANs is an exact match or a **same-level** wildcard — `*.example.com` covers `www.example.com` but NOT the apex `example.com` and NOT a deeper `app.eu.example.com` (which needs `*.eu.example.com`). One certificate can carry several SANs. Provision before deploying:
 
 ```bash
 aws acm request-certificate \
-  --domain-name "*.example.com" \
+  --domain-name "example.com" \
+  --subject-alternative-names "*.example.com" "*.eu.example.com" \
   --validation-method DNS \
   --region us-east-1
 ```
 
-The tool generates a `data "aws_acm_certificate"` lookup that finds your existing ISSUED cert at `terraform plan` time.
+Each distribution reads its ARN from a `cert_arn_<san>` Terraform variable. The generated `resolve-certs.py` (run from `terraform/`) lists your ISSUED us-east-1 certs, matches each host to one by SAN coverage, and writes the ARNs into per-domain `terraform.tfvars` — leaving any hand-set ARN untouched and stopping with a provisioning list if a host has no covering cert. An empty `cert_arn_<san>` fails `terraform plan` with a message naming the exact SAN coverage that host needs.
 
 </details>
 

@@ -1,8 +1,8 @@
 **/.DS_Store
 /workspace/
-# Development-only regression tests (not shipped to users; the converter is
-# deterministic — users don't run these to verify a conversion).
-/test/
+# Regression tests ARE version-controlled (CI + reviewers need them; they double
+# as executable docs of expected behavior). Only their bytecode is ignored.
+/test/__pycache__/
 .kiro/settings/
 __pycache__/
 *.pyc

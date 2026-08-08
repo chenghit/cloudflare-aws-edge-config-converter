@@ -256,7 +256,7 @@ def make_empty_ir(domain_config):
             # cert list and the resolve-certs.py matcher. Fall back to deriving it
             # if an older domain_scope.json predates the field.
             "cert_domain": domain_config.get("cert_domain")
-                or derive_cert_domain(hostname),
+                or derive_cert_domain(hostname, domain_config.get("apex_domain", "")),
             "origin_type": domain_config.get("origin_type", "server"),
             "cert_arn_mode": domain_config.get("cert_arn_mode", "resolve"),
             "cert_arn": domain_config.get("cert_arn"),

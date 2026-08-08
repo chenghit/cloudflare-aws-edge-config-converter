@@ -182,7 +182,7 @@ def main():
         proxied_domains.append({
             "hostname": hostname,
             "apex_domain": zone_name,
-            "cert_domain": derive_cert_domain(hostname),
+            "cert_domain": derive_cert_domain(hostname, zone_name),
             "record_type": rtype,
             "origin_content": content,
             "is_wildcard": hostname.startswith("*."),
