@@ -309,9 +309,33 @@ def test_end_to_end():
                               capture_output=True, text=True, timeout=30)
         _fcntl.flock(fd, _fcntl.LOCK_UN)
         os.close(fd)
-        check("R7-F2: a second concurrent resolver fails fast on the held lock",
-              proc.returncode == 1 and "holds the lock" in proc.stderr,
+        check("R7-F2: a second concurrent resolver fails fast (concurrency branch)",
+              proc.returncode == 1 and "in progress" in proc.stderr,
               f"rc={proc.returncode} stderr={proc.stderr.strip()[-160:]}")
+
+        # R8-F1: the concurrency message must NOT tell the user to delete the lock
+        # file — flock has no "stale held file" state, and deleting it lets a second
+        # process lock a different inode, RE-INTRODUCING the race (verified).
+        check("R8-F1: lock message never advises deleting the lock file",
+              "delete" not in proc.stderr.lower() and "remove" not in proc.stderr.lower()
+              and "rm " not in proc.stderr.lower(),
+              f"stderr advises removing the lock: {proc.stderr.strip()[-160:]}")
+
+        # R8-F2: an UNOPENABLE lock file (unwritable dir) is a filesystem error,
+        # reported distinctly from concurrency — never as "another run in progress".
+        rodir = os.path.join(tmp, "ro")
+        os.makedirs(os.path.join(rodir, "domains"))
+        rc_ro = os.path.join(rodir, "resolve-certs.py")
+        with open(rc_ro, "w") as f:
+            f.write(src)
+        os.chmod(rodir, 0o555)  # can't create .resolve-certs.lock here
+        proc2 = subprocess.run([sys.executable, rc_ro], cwd=rodir,
+                               capture_output=True, text=True, timeout=30)
+        os.chmod(rodir, 0o755)  # restore for cleanup
+        check("R8-F2: unopenable lock file -> filesystem error, not 'in progress'",
+              proc2.returncode == 1 and "cannot open the lock file" in proc2.stderr
+              and "in progress" not in proc2.stderr,
+              f"rc={proc2.returncode} stderr={proc2.stderr.strip()[-160:]}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

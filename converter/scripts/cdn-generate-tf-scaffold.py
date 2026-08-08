@@ -847,13 +847,29 @@ def main():
     # telling the user to wait, rather than silently racing. The fd stays open for
     # the process lifetime; the lock releases on exit. (Unix flock; this tool
     # targets Unix shells/Terraform.)
+    # Open the lock file, then take the lock — the two failure modes are DISTINCT
+    # and must not be conflated. flock releases with the process (or the fd close
+    # at the end of main), so there is NO "stale lock file still held" state — do
+    # NOT tell the user to delete it (deleting it lets a second process open a
+    # different inode and lock THAT, re-introducing the very race this prevents;
+    # verified). open() failing is a filesystem/permission problem, not concurrency.
     try:
         _lock_fd = os.open(_LOCK, os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError as e:
+        print(f"ERROR: cannot open the lock file {_LOCK}: {e}. Check that "
+              f"{os.path.dirname(_LOCK)} exists and is writable.", file=sys.stderr)
+        sys.exit(1)
+    try:
         fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        print("ERROR: another resolve-certs.py run holds the lock "
-              f"({_LOCK}). Wait for it to finish (or remove a stale lock), then "
-              "re-run — concurrent runs would race on the cert files.", file=sys.stderr)
+    except BlockingIOError:
+        print("ERROR: another resolve-certs.py run is in progress (holds "
+              f"{_LOCK}). Wait for it to finish, then re-run — concurrent runs "
+              "would race on the cert files.", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        print(f"ERROR: could not acquire the lock on {_LOCK}: {e}. The filesystem "
+              "may not support flock (e.g. some network mounts); run from a local "
+              "checkout.", file=sys.stderr)
         sys.exit(1)
 
     try:
@@ -972,6 +988,9 @@ def main():
     # (write_arn) — nothing to flush here.
     print(f"\\nDone: {len(resolved)} resolved, {len(kept)} kept "
           f"-> domains/<san>/certs.auto.tfvars.json")
+    # Release the lock explicitly (the OS also drops it on exit; this closes the fd
+    # cleanly so a repeat main() call in-process isn't blocked by our own lock).
+    os.close(_lock_fd)
 
 
 if __name__ == "__main__":
