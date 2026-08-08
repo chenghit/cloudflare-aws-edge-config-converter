@@ -1720,15 +1720,30 @@ if __name__ == "__main__":
 
     shared_dir = os.path.join(output_dir, "terraform", "shared")
     if shared_tf_lines and os.path.isdir(shared_dir):
-        init_result = subprocess.run(
-            ["terraform", "init", "-backend=false"],
-            cwd=shared_dir, capture_output=True, text=True)
-        if init_result.returncode == 0:
-            val_result = subprocess.run(
-                ["terraform", "validate"],
-                cwd=shared_dir, capture_output=True, text=True)
-            if val_result.returncode != 0:
-                print(f"  WARN: shared module terraform validate failed: {val_result.stdout.strip()}", file=sys.stderr)
+        # This is an OPTIONAL sanity check on the generated shared module — it must
+        # never block or hang generation. `terraform init` reaches the provider
+        # registry, so bound it with a timeout and tolerate Terraform being absent:
+        # a slow/blocked network or no `terraform` on PATH downgrades to a WARN, not
+        # a hang or a crash. (Without the timeout this stalled the pipeline on a host
+        # that couldn't reach the registry.)
+        try:
+            init_result = subprocess.run(
+                ["terraform", "init", "-backend=false"],
+                cwd=shared_dir, capture_output=True, text=True, timeout=120)
+            if init_result.returncode == 0:
+                val_result = subprocess.run(
+                    ["terraform", "validate"],
+                    cwd=shared_dir, capture_output=True, text=True, timeout=60)
+                if val_result.returncode != 0:
+                    print(f"  WARN: shared module terraform validate failed: {val_result.stdout.strip()}", file=sys.stderr)
+            else:
+                print(f"  WARN: shared module terraform init failed (skipping validate): {init_result.stderr.strip()[:200]}", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            print("  WARN: terraform init/validate timed out — skipping the optional "
+                  "shared-module validation (generation is unaffected).", file=sys.stderr)
+        except FileNotFoundError:
+            print("  WARN: terraform not found on PATH — skipping the optional "
+                  "shared-module validation (generation is unaffected).", file=sys.stderr)
 
     # ── Phase 4: Write manifest + append report ──────────────────────────────
 
