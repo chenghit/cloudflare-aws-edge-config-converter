@@ -756,7 +756,7 @@ SANs is an exact (case-insensitive) match, or a same-level wildcard *.<parent>
 (one label, leftmost only). A wildcard covers exactly ONE label — *.example.com
 covers a.example.com but NOT the apex and NOT a.b.example.com.
 """
-import json, os, sys
+import fcntl, json, os, sys
 
 # One entry per distribution: {"san","hostname","cert_domain"}.
 DOMAINS = ''' + specs_json + '''
@@ -764,6 +764,7 @@ DOMAINS = ''' + specs_json + '''
 # The terraform/ dir this script lives in. sys.argv[0] (not __file__) so the
 # script works both run directly and when its source is exec'd in a test.
 _HERE = os.path.dirname(os.path.abspath(sys.argv[0]))
+_LOCK = os.path.join(_HERE, ".resolve-certs.lock")
 
 
 def tfvars_path(san):
@@ -807,10 +808,13 @@ def read_existing(san):
 
 def write_arn(san, arn):
     """Write {cert_arn_<san>: arn} to this domain's tool-owned JSON, atomically
-    (temp file + os.replace). One var per file — the file is entirely ours."""
+    (temp file + os.replace). One var per file — the file is entirely ours. The
+    temp name carries the PID so two processes can't collide on a fixed <path>.tmp
+    (the whole run also holds an exclusive lock — see main — but a unique temp is
+    cheap belt-and-suspenders)."""
     path = tfvars_path(san)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump({"cert_arn_" + san: arn}, f, indent=2)
         f.write("\\n")
@@ -818,19 +822,40 @@ def write_arn(san, arn):
 
 
 def remove_arn(san):
-    """Delete this domain's tool-owned cert JSON if present. Called when a cached
-    ARN is found stale and can't be re-resolved — leaving the file would let
-    Terraform auto-load the dead ARN (its format still passes the var validation),
-    so a "BLOCKED" run would NOT actually fail closed. Removing it makes the
-    variable fall back to its empty default, which the validation rejects at
-    plan time — the fail-closed behavior BLOCKED promises."""
+    """Delete this domain's tool-owned cert JSON. Called when a cached ARN is found
+    stale and can't be re-resolved — leaving the file would let Terraform auto-load
+    the dead ARN (its format still passes the var validation), so a "BLOCKED" run
+    would NOT actually fail closed. Removing it makes the variable fall back to its
+    empty default, which the validation rejects at plan time.
+
+    Only a MISSING file is fine (already gone == the goal, idempotent). Any OTHER
+    error (permission, read-only FS, I/O) means we CANNOT guarantee the dead ARN is
+    gone — swallowing it would report a false fail-closed, so let it propagate and
+    abort the resolver."""
     try:
         os.remove(tfvars_path(san))
-    except OSError:
+    except FileNotFoundError:
         pass
 
 
 def main():
+    # Hold ONE exclusive lock for the whole run, FIRST — before boto3/ACM or any
+    # file I/O. The per-domain sequence read cached ARN -> (maybe) delete stale ->
+    # (maybe) write new is not atomic; two concurrent resolvers could interleave so
+    # one deletes the valid value the other just wrote. A single non-blocking flock
+    # serializes runs against this checkout — a second concurrent run fails fast
+    # telling the user to wait, rather than silently racing. The fd stays open for
+    # the process lifetime; the lock releases on exit. (Unix flock; this tool
+    # targets Unix shells/Terraform.)
+    try:
+        _lock_fd = os.open(_LOCK, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("ERROR: another resolve-certs.py run holds the lock "
+              f"({_LOCK}). Wait for it to finish (or remove a stale lock), then "
+              "re-run — concurrent runs would race on the cert files.", file=sys.stderr)
+        sys.exit(1)
+
     try:
         import boto3
         from botocore.exceptions import ClientError

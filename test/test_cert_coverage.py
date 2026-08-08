@@ -278,6 +278,40 @@ def test_end_to_end():
         check("R6-F1: read_existing on the removed file -> None", rd("s2") is None)
         ra("s2")  # idempotent — removing an already-absent file must not raise
         check("R6-F1: remove_arn is idempotent (no crash on missing file)", True)
+
+        # R7-F1: remove_arn must RAISE on a non-ENOENT failure (permission /
+        # read-only FS / I/O) — swallowing it would report a false fail-closed
+        # while the dead ARN stays on disk for Terraform to auto-load. Only a
+        # MISSING file is tolerated. Simulate with a read-only parent dir.
+        wa("s3", "arn:aws:acm:us-east-1:000000000000:certificate/stale3")
+        d3 = os.path.join(tmp, "domains", "s3")
+        os.chmod(d3, 0o555)
+        raised = False
+        try:
+            ra("s3")
+        except OSError:
+            raised = True
+        os.chmod(d3, 0o755)  # restore so cleanup can rmtree
+        check("R7-F1: remove_arn raises (not swallows) a non-ENOENT delete failure",
+              raised, "remove_arn returned normally on a read-only dir")
+
+        # R7-F2: concurrent runs are serialized by an exclusive lock — a second
+        # resolver whose lock is already held must fail fast (exit 1), before any
+        # ACM call or file mutation, rather than race the read->delete->write.
+        lock = os.path.join(tmp, ".resolve-certs.lock")
+        import fcntl as _fcntl
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o644)
+        _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)  # hold it, like a running peer
+        rc_path = os.path.join(tmp, "resolve-certs.py")
+        with open(rc_path, "w") as f:
+            f.write(src)  # the real generated resolver
+        proc = subprocess.run([sys.executable, rc_path], cwd=tmp,
+                              capture_output=True, text=True, timeout=30)
+        _fcntl.flock(fd, _fcntl.LOCK_UN)
+        os.close(fd)
+        check("R7-F2: a second concurrent resolver fails fast on the held lock",
+              proc.returncode == 1 and "holds the lock" in proc.stderr,
+              f"rc={proc.returncode} stderr={proc.stderr.strip()[-160:]}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
