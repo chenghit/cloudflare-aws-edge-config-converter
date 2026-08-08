@@ -245,10 +245,11 @@ def test_end_to_end():
               'domains", san' in src or "domains', san" in src,
               "resolver must write into each domain's own root")
 
-        # R4 behavior: json.load/dump round-trip, and a non-empty prior value is
-        # KEPT (never overwritten). Point the resolver's _HERE at a temp tree and
-        # exercise write_arn/read_existing directly.
-        rd, wa = ns["read_existing"], ns["write_arn"]
+        # R4 behavior: json.load/dump round-trip. A cached value is kept ONLY while
+        # it's still a VALID pick (checked against the live ISSUED set in main());
+        # a stale one is dropped. Point the resolver's _HERE at a temp tree and
+        # exercise read_existing / write_arn / remove_arn directly.
+        rd, wa, ra = ns["read_existing"], ns["write_arn"], ns["remove_arn"]
         ns["_HERE"] = tmp  # tfvars_path(san) -> tmp/domains/<san>/certs.auto.tfvars.json
         check("R4: read_existing on a missing file -> None", rd("s1") is None)
         wa("s1", "CERT-ARN-PLACEHOLDER-1")
@@ -262,6 +263,21 @@ def test_end_to_end():
         with open(jpath, "w") as f:
             f.write("not valid json {")
         check("R4: malformed JSON -> None (no crash)", rd("s1") is None)
+
+        # R6-F1: a stale cache with NO covering cert must be DELETED, not just
+        # flagged — otherwise Terraform auto-loads the dead (but format-valid) ARN
+        # and a "BLOCKED" run silently plans against it. remove_arn drops the file;
+        # the cert_arn variable then falls back to its empty default, which the
+        # generated variable validation rejects at plan time (fail-closed).
+        wa("s2", "arn:aws:acm:us-east-1:000000000000:certificate/stale")
+        jp2 = os.path.join(tmp, "domains", "s2", "certs.auto.tfvars.json")
+        check("R6-F1: stale file exists before removal", os.path.exists(jp2))
+        ra("s2")
+        check("R6-F1: remove_arn deletes the stale cert file (fail-closed)",
+              not os.path.exists(jp2))
+        check("R6-F1: read_existing on the removed file -> None", rd("s2") is None)
+        ra("s2")  # idempotent — removing an already-absent file must not raise
+        check("R6-F1: remove_arn is idempotent (no crash on missing file)", True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

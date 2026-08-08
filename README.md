@@ -201,7 +201,7 @@ aws acm request-certificate \
   --region us-east-1
 ```
 
-Each distribution reads its ARN from a `cert_arn_<san>` Terraform variable. The generated `resolve-certs.py` (run from `terraform/`) lists your ISSUED us-east-1 certs, matches each host to one by SAN coverage, and writes the ARN into that domain's own `domains/<san>/certs.auto.tfvars.json` — a tool-owned file Terraform auto-loads (no HCL parsing, so comments/heredocs in your own files are never touched). It keeps any value already there and stops with a provisioning list if a host has no covering cert. To override a pick, run that domain's apply with `-var 'cert_arn_<san>=arn:...'` rather than editing the generated JSON. An empty `cert_arn_<san>` fails `terraform plan` with a message naming the exact SAN coverage that host needs.
+Each distribution reads its ARN from a `cert_arn_<san>` Terraform variable. The generated `resolve-certs.py` (run from `terraform/`) lists your ISSUED us-east-1 certs, matches each host to one by SAN coverage, and writes the ARN into that domain's own `domains/<san>/certs.auto.tfvars.json` — a tool-owned file Terraform auto-loads (no HCL parsing, so comments/heredocs in your own files are never touched). A value already there is reused only while it stays valid (still ISSUED and still covering the host); a stale ARN is deleted and re-resolved. If a host has no covering cert it removes any stale file and stops with a provisioning list — so a blocked run genuinely fails closed. To override a pick, run that domain's apply with `-var 'cert_arn_<san>=arn:...'` rather than editing the generated JSON. An empty `cert_arn_<san>` fails `terraform plan` with a message naming the exact SAN coverage that host needs.
 
 </details>
 

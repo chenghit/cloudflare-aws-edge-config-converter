@@ -196,7 +196,7 @@ aws acm request-certificate \
   --region us-east-1
 ```
 
-每个 distribution 从 `cert_arn_<san>` 这个 Terraform 变量读 ARN。在 `terraform/` 目录下运行生成的 `resolve-certs.py`，它会列出你在 us-east-1 已签发的证书，按 SAN 覆盖匹配到每个域名，把 ARN 写进该域名自己的 `domains/<san>/certs.auto.tfvars.json`——这是工具独占、Terraform 自动加载的文件（纯 JSON，不解析 HCL，所以不会碰你自己文件里的注释或 heredoc）。已有的值不会被覆盖，哪个域名没有能覆盖它的证书就停下来列出要签什么。想改某个选择，就在该域名目录 apply 时加 `-var 'cert_arn_<san>=arn:...'`，不要去改生成的 JSON。`cert_arn_<san>` 为空时 `terraform plan` 会失败，并提示这个域名到底需要哪种 SAN 覆盖。
+每个 distribution 从 `cert_arn_<san>` 这个 Terraform 变量读 ARN。在 `terraform/` 目录下运行生成的 `resolve-certs.py`，它会列出你在 us-east-1 已签发的证书，按 SAN 覆盖匹配到每个域名，把 ARN 写进该域名自己的 `domains/<san>/certs.auto.tfvars.json`——这是工具独占、Terraform 自动加载的文件（纯 JSON，不解析 HCL，所以不会碰你自己文件里的注释或 heredoc）。已有的值只在仍然有效（仍是 ISSUED、且仍覆盖该 host）时才复用；失效的 ARN（证书过期/删除，或 SAN 不再覆盖）会被删除并重新匹配。哪个域名没有能覆盖它的证书，就删掉可能残留的旧文件并停下来列出要签什么——所以 BLOCKED 时是真正 fail-closed。想改某个选择，就在该域名目录 apply 时加 `-var 'cert_arn_<san>=arn:...'`，不要去改生成的 JSON。`cert_arn_<san>` 为空时 `terraform plan` 会失败，并提示这个域名到底需要哪种 SAN 覆盖。
 
 </details>
 

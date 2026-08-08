@@ -728,10 +728,13 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "./resolve-certs.py   # matches each host to an ISSUED cert by real SAN coverage",
         "```",
         "It writes `domains/<san>/certs.auto.tfvars.json` (a tool-owned file Terraform "
-        "auto-loads) for every covered host, keeps any value already there, and STOPS "
-        "listing exactly what to provision if a host is uncovered. To override a chosen "
-        "ARN, don't edit that JSON (a re-run may rewrite it) — pass a higher-precedence "
-        "input from the domain's dir: `terraform apply -var 'cert_arn_<san>=arn:...'`.",
+        "auto-loads) for every covered host. A value already there is reused ONLY if it's "
+        "still a valid pick (still ISSUED and still covering the host); a stale ARN (cert "
+        "expired/deleted, or SAN no longer covers) is deleted and re-resolved — never left "
+        "to silently plan against. If a host has no covering cert it removes any stale file "
+        "and STOPS, listing exactly what to provision. To override a pick, don't edit that "
+        "JSON (a re-run may rewrite it) — pass a higher-precedence input from the domain's "
+        "dir: `terraform apply -var 'cert_arn_<san>=arn:...'`.",
         "",
         "Check what you have:",
         "```bash",

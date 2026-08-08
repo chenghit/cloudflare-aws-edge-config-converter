@@ -817,6 +817,19 @@ def write_arn(san, arn):
     os.replace(tmp, path)
 
 
+def remove_arn(san):
+    """Delete this domain's tool-owned cert JSON if present. Called when a cached
+    ARN is found stale and can't be re-resolved — leaving the file would let
+    Terraform auto-load the dead ARN (its format still passes the var validation),
+    so a "BLOCKED" run would NOT actually fail closed. Removing it makes the
+    variable fall back to its empty default, which the validation rejects at
+    plan time — the fail-closed behavior BLOCKED promises."""
+    try:
+        os.remove(tfvars_path(san))
+    except OSError:
+        pass
+
+
 def main():
     try:
         import boto3
@@ -886,8 +899,16 @@ def main():
             kept.append((host, prior))
             continue
         if prior:
+            # Stale cache: drop the dead ARN from disk NOW, before deciding this
+            # host's fate. If re-resolution below finds a cert, write_arn overwrites
+            # anyway; if it doesn't, the file is already gone so Terraform can't
+            # auto-load the dead ARN — a BLOCKED run then genuinely fails closed
+            # (empty variable -> validation error at plan) instead of silently
+            # planning against the stale cert.
             print(f"NOTE: cached ARN for {host} is no longer a valid ISSUED cert "
-                  f"covering it — re-resolving. (was {prior})", file=sys.stderr)
+                  f"covering it — dropping it and re-resolving. (was {prior})",
+                  file=sys.stderr)
+            remove_arn(san)
 
         if not matches:
             missing.append((host, cd))
