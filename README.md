@@ -113,7 +113,7 @@ flowchart TD
     style CDN_Done fill:#9f9,stroke:#333
 ```
 
-**Fully automated conversion:** No user interaction during conversion. DNS parsing generates domain scope automatically. At deploy time, `resolve-certs.py` fills each distribution's ACM certificate ARN by matching your ISSUED us-east-1 certs to each host by SAN coverage (or set the ARNs by hand).
+**Fully automated conversion:** No user interaction during conversion. DNS parsing generates domain scope automatically. At deploy time, `resolve-certs.py` fills each distribution's ACM certificate ARN by matching your ISSUED us-east-1 certs to each host by SAN coverage (override any pick with `-var cert_arn_<san>=...`).
 
 ## CDN Pipeline Details
 

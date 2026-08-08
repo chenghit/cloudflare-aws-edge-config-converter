@@ -113,7 +113,7 @@ flowchart TD
     style CDN_Done fill:#9f9,stroke:#333
 ```
 
-**转换全自动：** 转换过程无需用户交互。DNS 解析自动生成域名配置。部署时由 `resolve-certs.py` 按 SAN 覆盖把你在 us-east-1 已签发的证书匹配到每个域名、填好 ARN（也可以手动填）。
+**转换全自动：** 转换过程无需用户交互。DNS 解析自动生成域名配置。部署时由 `resolve-certs.py` 按 SAN 覆盖把你在 us-east-1 已签发的证书匹配到每个域名、填好 ARN（想改某个选择就用 `-var cert_arn_<san>=...`）。
 
 ## CDN 流程详情
 

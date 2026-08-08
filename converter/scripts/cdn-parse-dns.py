@@ -266,14 +266,13 @@ def main():
         f.write("\n".join(lines) + "\n")
 
     # Step 7: Write domain_scope.json
-    # Certificate discovery is ARN-first: cert_arn starts null and cert_arn_mode
-    # is "resolve" — the generated resolve-certs.py fills each domain's ARN by
-    # matching an ISSUED us-east-1 cert whose SAN actually covers the hostname
-    # (cdn_common.cert_covers, mirroring CloudFront). The user may also set an ARN
-    # by hand (ARN always wins). The old "data_source" mode guessed a cert by
-    # domain=*.<apex>, which the Terraform data source matches only against a
-    # cert's PRIMARY DomainName (CN), never its SANs — so a merged cert or any
-    # multi-level subdomain silently failed `terraform plan`. Verified live.
+    # Certificate discovery is external to the IR: each domain records only the
+    # cert_domain (the SAN coverage it needs). The generated resolve-certs.py fills
+    # the actual ARN into domains/<san>/certs.auto.tfvars.json by matching an ISSUED
+    # us-east-1 cert whose SAN covers the hostname (cdn_common.cert_covers,
+    # mirroring CloudFront); override a pick with `-var`. There is NO cert_arn in
+    # the IR — an unfillable ARN can't be expressed here, so it isn't (that stale
+    # data_source-era field created a second, conflicting source of truth).
     cert_groups_out = {}
     for cd in sorted(cert_groups):
         cert_groups_out[cd] = {
@@ -290,8 +289,6 @@ def main():
                 "apex_domain": d["apex_domain"],
                 "cert_domain": d["cert_domain"],
                 "apply_default_cache_behavior": False,
-                "cert_arn_mode": "resolve",
-                "cert_arn": None,
                 "origin_content": d["origin_content"],
                 "origin_type": d["origin_type"],
             }

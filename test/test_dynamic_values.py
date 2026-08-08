@@ -1020,8 +1020,7 @@ check("_is_s3_host rejects non-S3", str(_pre._is_s3_host("origin.example.net")),
 # (non-S3) override is kept; a server-origin override is kept.
 def _place_override(origin_type, params):
     dc = {"hostname": "x.example.com", "apex_domain": "example.com",
-          "origin_type": origin_type, "origin_content": "bucket.s3.amazonaws.com",
-          "cert_arn_mode": "resolve"}
+          "origin_type": origin_type, "origin_content": "bucket.s3.amazonaws.com"}
     ir = _pre.make_empty_ir(dc)
     _pre.find_or_create_behavior(ir, "*", dc, "bucket.s3.amazonaws.com")
     _pre._place_result(ir, {"type": "origin_override", "cf_source_rule": "r",
@@ -1122,7 +1121,7 @@ check("bypass codegen: mandatory else-delete (anti cache-poisoning)",
 # -- placement: conditional -> cache_bypass op; unconditional -> CachingDisabled --
 def _place_bypass(expr):
     dc = {"hostname": "shop.example.com", "apex_domain": "example.com",
-          "origin_type": "custom", "origin_content": "o.net", "cert_arn_mode": "resolve",
+          "origin_type": "custom", "origin_content": "o.net",
           "sanitized_name": "shop_example_com"}
     ir = _pre.make_empty_ir(dc)
     _pre.find_or_create_behavior(ir, "*", dc, "o.net")
@@ -1198,7 +1197,7 @@ check("bypass whitelist: same constant appears in the emitted buster JS",
 # behavior's cache policy carries the header
 def _domain_bypass_whitelist():
     dc = {"hostname": "shop.example.com", "apex_domain": "example.com",
-          "origin_type": "custom", "origin_content": "o.net", "cert_arn_mode": "resolve",
+          "origin_type": "custom", "origin_content": "o.net",
           "sanitized_name": "shop_example_com"}
     rules = {"cache": [{"id": "r", "description": "wp login bypass",
                         "expression": 'http.cookie contains "wordpress_logged_in"',
@@ -1227,7 +1226,7 @@ check("scope: header+path AND cond HAS a path field (descends parts)",
 # _op_scope on placed ops: no-path→all, unconvertible-path→default_only, pattern→behavior
 def _scope_of(expr):
     dc = {"hostname": "shop.example.com", "apex_domain": "example.com",
-          "origin_type": "custom", "origin_content": "o.net", "cert_arn_mode": "resolve",
+          "origin_type": "custom", "origin_content": "o.net",
           "sanitized_name": "shop_example_com"}
     ir = _pre.make_empty_ir(dc); _pre.find_or_create_behavior(ir, "*", dc, "o.net")
     rule = {"id": "r", "description": "b", "expression": expr, "action_parameters": {"cache": False}}

@@ -202,20 +202,22 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
     # SOURCE `domain=` matches only a cert's PRIMARY DomainName (CN) — so guessing
     # `domain = "*.<apex>"` silently failed for merged certs and every multi-level
     # subdomain (verified live). Instead each distribution reads its cert ARN from
-    # a variable. resolve-certs.py fills terraform.tfvars by matching an ISSUED
-    # us-east-1 cert whose SAN actually covers this host (cdn_common.cert_covers,
-    # mirroring CloudFront); the user can also set it by hand. An empty value fails
-    # `terraform plan` with a message naming the exact SAN coverage this host needs
-    # ({cert_domain}) — fail closed and explain, never deploy half-configured.
+    # this variable, whose value comes SOLELY from the tool-owned
+    # domains/<san>/certs.auto.tfvars.json that resolve-certs.py writes (Terraform
+    # auto-loads it) — matching an ISSUED us-east-1 cert whose SAN actually covers
+    # this host (cdn_common.cert_covers, mirroring CloudFront). The variable has NO
+    # default: unfilled, its EMPTY string fails the validation below at
+    # `terraform plan`, naming the exact SAN coverage the host needs — fail closed,
+    # never deploy half-configured. Override a resolved pick with a higher-
+    # precedence input: `terraform apply -var 'cert_arn_{san}=arn:...'`.
     cert_domain = meta.get("cert_domain") or f"*.{apex}"
-    default_arn = meta.get("cert_arn") or ""
     w(f'variable "cert_arn_{san}" {{')
     w(f'  type        = string')
-    w(f'  description = "ACM cert ARN (us-east-1) for {hostname}. Must cover {cert_domain} in its SAN. Run resolve-certs.py to fill, or set by hand."')
-    w(f'  default     = "{default_arn}"')
+    w(f'  default     = ""')
+    w(f'  description = "ACM cert ARN (us-east-1) for {hostname}. Must cover {cert_domain} in its SAN. Filled by resolve-certs.py into certs.auto.tfvars.json; override with -var."')
     w(f'  validation {{')
     w(f'    condition     = can(regex("^arn:aws[a-z-]*:acm:us-east-1:[0-9]{{12}}:certificate/", var.cert_arn_{san}))')
-    w(f'    error_message = "No ACM certificate ARN for {hostname}. It needs an ISSUED us-east-1 certificate whose SAN covers {cert_domain} (an exact SAN of {hostname}, or the wildcard {cert_domain}). Run ./resolve-certs.py to auto-fill terraform.tfvars, or set cert_arn_{san} manually."')
+    w(f'    error_message = "No ACM certificate ARN for {hostname}. It needs an ISSUED us-east-1 certificate whose SAN covers {cert_domain} (an exact SAN of {hostname}, or the wildcard {cert_domain}). Run ./resolve-certs.py to fill certs.auto.tfvars.json, or pass -var cert_arn_{san}=<arn>."')
     w(f'  }}')
     w('}')
     cert_ref = f"var.cert_arn_{san}"
@@ -714,17 +716,21 @@ def generate_resolve_certs_script(domain_specs):
     verified pipeline logic — inlined here so the emitted script is dependency-
     free).
 
-    Storage is a SINGLE tool-owned JSON file, terraform/certs.auto.tfvars.json
-    (Terraform auto-loads *.auto.tfvars.json). Using JSON the tool fully owns —
-    instead of splicing into user-authored per-domain terraform.tfvars — means NO
-    parsing of HCL, which is what repeatedly broke: a cert_arn_ assignment hidden
-    in a `#`/`//`/`/* */` comment or a `<<EOT` heredoc read as live and got
-    corrupted on write. json.load/json.dump have none of those edges. To override
-    a chosen ARN the user passes a HIGHER-precedence Terraform input (`-var`, or an
-    override.auto.tfvars that sorts after this file), never by editing the
-    generated JSON. A non-empty value already in the JSON is kept, so re-runs are
-    stable. If ANY host has no covering cert, it writes nothing for that host,
-    prints what SAN coverage to provision, and exits non-zero — fail closed."""
+    Storage is a tool-owned JSON file PER DOMAIN, domains/<san>/certs.auto.tfvars.json
+    (Terraform auto-loads *.auto.tfvars.json — but only from the root it runs in,
+    and each domain is its own root, so it's per-domain, not one shared file;
+    verified live). Using JSON the tool fully owns — instead of splicing into
+    user-authored HCL — means NO parsing of HCL, which is what repeatedly broke: a
+    cert_arn_ assignment hidden in a `#`/`//`/`/* */` comment or a `<<EOT` heredoc
+    read as live and got corrupted on write. json.load/json.dump have none of those
+    edges. To override a chosen ARN the user passes a HIGHER-precedence Terraform
+    input (`-var`, which outranks *.auto.tfvars — verified live), never by editing
+    the generated JSON. A value already in the JSON is kept ONLY if it's still a
+    VALID pick — present in the current ISSUED set AND still covering the host; a
+    stale ARN (cert expired/deleted, or SAN no longer covers) is dropped and
+    re-resolved, never reported as a false success. If any host has no covering
+    cert, it writes nothing for that host, prints what SAN coverage to provision,
+    and exits non-zero — fail closed."""
     specs_json = json.dumps(domain_specs, indent=2)
     return '#!/usr/bin/env python3\n' + '"""resolve-certs.py — fill each domain\'s cert ARN from ACM (us-east-1).\n\n' + \
 '''ARN-first certificate discovery for the CDN pipeline. Run from terraform/:
@@ -844,11 +850,11 @@ def main():
                 # ACM exposes ManagedBy precisely so tooling can exclude them from
                 # auto-selection. They routinely share a real host's SAN and can be
                 # the newest cert, so without this filter the SAN+expiry matcher would
-                # pick one and write a tfvars the user can't sensibly deploy. ManagedBy
+                # pick one and write an ARN the user can't sensibly deploy. ManagedBy
                 # is a STRING ("CLOUDFRONT"); the key is ABSENT on a normal customer
                 # cert (verified live: 6 such certs in the test account, one sharing a
-                # host's exact SAN). A user who really wants one can still set the ARN
-                # by hand.
+                # host's exact SAN). A user who really wants one can still force it
+                # with `-var cert_arn_<san>=...`.
                 if det.get("ManagedBy") == "CLOUDFRONT":
                     continue
                 names = list(det.get("SubjectAlternativeNames", []))
@@ -861,19 +867,28 @@ def main():
         print(f"ERROR: ACM lookup failed: {e}", file=sys.stderr)
         sys.exit(1)
 
+    by_arn = {c["arn"]: c for c in certs}  # ISSUED, non-managed, us-east-1
     resolved, kept, missing = [], [], []
     for d in DOMAINS:
         san, host, cd = d["san"], d["hostname"], d["cert_domain"]
         key = "cert_arn_" + san
 
-        # A non-empty value already in this domain's JSON wins (prior run, or one
-        # the user chose to place here) — never overwrite it.
+        matches = [c for c in certs if cert_covers(c["names"], host)]
+
+        # A value already in this domain's JSON is kept ONLY if it's still VALID:
+        # present in the current ISSUED set AND still covering this host. A stale
+        # ARN (cert expired / deleted / SAN no longer covers) is NOT kept — that
+        # would report a false success; drop it and re-resolve. This is safe
+        # because the JSON is tool-owned (a real override goes through -var, which
+        # outranks *.auto.tfvars, so we never clobber a user's intent).
         prior = read_existing(san)
-        if prior:
+        if prior and prior in by_arn and cert_covers(by_arn[prior]["names"], host):
             kept.append((host, prior))
             continue
+        if prior:
+            print(f"NOTE: cached ARN for {host} is no longer a valid ISSUED cert "
+                  f"covering it — re-resolving. (was {prior})", file=sys.stderr)
 
-        matches = [c for c in certs if cert_covers(c["names"], host)]
         if not matches:
             missing.append((host, cd))
             continue

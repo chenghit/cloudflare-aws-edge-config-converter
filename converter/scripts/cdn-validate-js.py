@@ -384,10 +384,10 @@ def main():
                          "(N. Virginia) ACM certificate whose SAN COVERS its host BEFORE "
                          "`terraform apply`. A `*.apex` wildcard covers one label only — a "
                          "multi-level subdomain (e.g. app.eu.apex) needs its own *.eu.apex SAN. "
-                         "Run `cd terraform && ./resolve-certs.py` to auto-fill each domain's "
-                         "cert_arn from ACM by SAN coverage (or set cert_arn_<san> by hand); it "
-                         "lists exactly what to provision if any host is uncovered. CloudFront "
-                         "only accepts us-east-1 certs.")
+                         "Run `cd terraform && ./resolve-certs.py` to fill each domain's "
+                         "cert_arn from ACM by SAN coverage into its certs.auto.tfvars.json "
+                         "(override with `-var cert_arn_<san>=...`); it lists exactly what to "
+                         "provision if any host is uncovered. CloudFront only accepts us-east-1 certs.")
     # Gate on the SAME local signal (s3_step, from s3_hosts) that gates the
     # POST_ACTION step below — one source of truth, so the "See POST_ACTION"
     # reference can never dangle (the two used to be driven by separate signals:

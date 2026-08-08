@@ -158,13 +158,15 @@ def test_end_to_end():
               == ["api.eu.example.com", "app.eu.example.com"],
               json.dumps(groups.get("*.eu.example.com")))
 
-        # Per-domain cert_domain + resolve mode.
+        # Per-domain cert_domain is the ONLY cert field in the scope now.
         by_host = {d["hostname"]: d for d in scope["domains"]}
         check("www → *.example.com", by_host["www.example.com"]["cert_domain"] == "*.example.com")
         check("app.eu → *.eu.example.com", by_host["app.eu.example.com"]["cert_domain"] == "*.eu.example.com")
         check("deep.a.b → *.a.b.example.com", by_host["deep.a.b.example.com"]["cert_domain"] == "*.a.b.example.com")
-        check("cert_arn_mode == resolve (not data_source)",
-              all(d["cert_arn_mode"] == "resolve" for d in scope["domains"]))
+        # The stale data_source-era cert fields are GONE — cert ARNs live only in
+        # the tool-owned certs.auto.tfvars.json, not in the IR (no second source).
+        check("no cert_arn/cert_arn_mode in the scope (single source of truth)",
+              all("cert_arn" not in d and "cert_arn_mode" not in d for d in scope["domains"]))
         check("old apex_cert_groups key is gone", "apex_cert_groups" not in scope)
 
         # Run the rest of the pipeline so we can assert the generated main.tf.

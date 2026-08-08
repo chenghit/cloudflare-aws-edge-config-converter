@@ -457,7 +457,6 @@ def assert_cff_scope():
     def _mk(behs):
         return {"metadata": {"sanitized_name": "z", "hostname": "z.example.com",
                              "apex_domain": "example.com", "cert_domain": "*.example.com",
-                             "cert_arn_mode": "resolve",
                              "custom_error_responses": [], "kvs_requirements": {},
                              "lambda_edge": {}},
                 "cache_behaviors": behs}
