@@ -239,6 +239,33 @@ def test_end_to_end():
         check("F4: resolver sorts matches deterministically (expiry then ARN)",
               "not_after" in src and "-c[\"not_after\"]" in src.replace("'", '"'),
               "no deterministic sort key")
+
+        # R2-F1: CloudFront-managed certs (ManagedBy=CLOUDFRONT) must be EXCLUDED —
+        # they are locked to their managed distribution/tenant and can't be attached
+        # to a standard distribution. They routinely share a host's SAN and can be
+        # the newest, so a missing filter would pick one and write an undeployable
+        # tfvars. Assert the resolver skips them on the exact string ManagedBy carries.
+        check("R2-F1: resolver excludes ManagedBy=CLOUDFRONT certs",
+              'ManagedBy") == "CLOUDFRONT"' in src or "ManagedBy') == 'CLOUDFRONT'" in src,
+              "no ManagedBy=CLOUDFRONT filter in resolver")
+
+        # R2-F2: read_existing_arn must ignore a COMMENTED assignment — else a
+        # `# cert_arn_x = "old"` line reads as a live value, the resolver skips the
+        # host, and Terraform runs with the empty default.
+        rea = ns["read_existing_arn"]
+        cprobe = os.path.join(tmp, "comment_probe")
+        with open(cprobe, "w") as f:
+            f.write('# cert_arn_x = "COMMENTED"\n')
+        check("R2-F2: read_existing_arn ignores a commented assignment",
+              rea(cprobe, "x") is None, f"got {rea(cprobe, 'x')!r}")
+        with open(cprobe, "w") as f:
+            f.write('# cert_arn_x = "OLD"\ncert_arn_x = "LIVE"\n')
+        check("R2-F2: read_existing_arn reads the real line past a comment",
+              rea(cprobe, "x") == "LIVE", f"got {rea(cprobe, 'x')!r}")
+        with open(cprobe, "w") as f:
+            f.write('   cert_arn_x   =   "INDENTED"\n')
+        check("R2-F2: read_existing_arn reads an indented/spaced assignment",
+              rea(cprobe, "x") == "INDENTED", f"got {rea(cprobe, 'x')!r}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

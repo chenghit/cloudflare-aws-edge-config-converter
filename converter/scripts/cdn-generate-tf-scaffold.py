@@ -759,7 +759,12 @@ def cert_covers(cert_names, hostname):
 
 def read_existing_arn(tfvars_path, san):
     """Return a non-empty cert_arn_<san> already in tfvars, else None. An
-    explicit/prior ARN wins — discovery must not overwrite it."""
+    explicit/prior ARN wins — discovery must not overwrite it. The regex is
+    anchored to a real assignment line (start-of-line, optional indent, NOT after
+    a `#`) and mirrors write_tfvars_var's pattern — otherwise a COMMENTED line
+    like `# cert_arn_x = "old"` reads as a live value, the resolver skips the
+    host, and Terraform then runs with the empty default. Only `#`-style comments
+    exist in tfvars (HCL has no inline value comments that matter here)."""
     if not os.path.exists(tfvars_path):
         return None
     try:
@@ -767,7 +772,8 @@ def read_existing_arn(tfvars_path, san):
             txt = f.read()
     except OSError:
         return None
-    m = re.search(r'cert_arn_' + re.escape(san) + r'\\s*=\\s*"([^"]*)"', txt)
+    m = re.search(r'^[ \\t]*cert_arn_' + re.escape(san) + r'[ \\t]*=[ \\t]*"([^"]*)"',
+                  txt, re.M)
     if m and m.group(1).strip():
         return m.group(1).strip()
     return None
@@ -822,6 +828,20 @@ def main():
             for summ in page.get("CertificateSummaryList", []):
                 arn = summ["CertificateArn"]
                 det = acm.describe_certificate(CertificateArn=arn)["Certificate"]
+                # Skip CloudFront-managed certs (ManagedBy=CLOUDFRONT). CloudFront
+                # auto-creates these for distribution tenants / multi-tenant setups;
+                # their lifecycle (issuance, renewal, domain association) belongs to
+                # that tenant workflow, not the customer's general cert inventory, and
+                # ACM exposes ManagedBy precisely so tooling can exclude them from
+                # auto-selection. They routinely share a real host's SAN and can be
+                # the newest cert, so without this filter the SAN+expiry matcher would
+                # pick one and write a tfvars the user can't sensibly deploy. ManagedBy
+                # is a STRING ("CLOUDFRONT"); the key is ABSENT on a normal customer
+                # cert (verified live: 6 such certs in the test account, one sharing a
+                # host's exact SAN). A user who really wants one can still set the ARN
+                # by hand.
+                if det.get("ManagedBy") == "CLOUDFRONT":
+                    continue
                 names = list(det.get("SubjectAlternativeNames", []))
                 if det.get("DomainName") and det["DomainName"] not in names:
                     names.append(det["DomainName"])
