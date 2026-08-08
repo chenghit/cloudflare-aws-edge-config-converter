@@ -360,10 +360,17 @@ After the summary table, include deployment instructions:
 1. Set your AWS profile (must have CloudFront, Lambda, IAM, and ACM permissions):
    export AWS_PROFILE=<your-profile-name>
 
-2. Deploy shared policies first:
+2. Fill each domain's ACM certificate ARN (matches ISSUED us-east-1 certs by SAN
+   coverage — a multi-level subdomain like app.eu.example.com needs its own
+   *.eu.example.com SAN, not just *.example.com):
+   cd cloudflare-to-aws-cdn/terraform && ./resolve-certs.py
+   (stops and lists exactly what to provision if any host has no covering cert;
+   you can also set cert_arn_<san> by hand in a domain's terraform.tfvars)
+
+3. Deploy shared policies first:
    cd cloudflare-to-aws-cdn/terraform/shared && terraform init && terraform apply
 
-3. Deploy each domain:
+4. Deploy each domain:
    cd cloudflare-to-aws-cdn/terraform/domains/<domain>/ && terraform init && terraform apply
 
 See docs/deployment-guide.md for the full deployment order and DNS cutover steps.

@@ -374,16 +374,20 @@ def main():
     # Any HARD-limit breach makes the config undeployable as-is (no quota bump
     # exists) — surface it as a distinct deploy blocker the agent must not skip.
     redesign = [w for w in _s.get("warnings", []) if w.startswith(QUOTA_REDESIGN)]
-    # ACM is the hardest prerequisite: the generated Terraform reads each cert via
-    # `data "aws_acm_certificate"` (or an explicit ARN), so `terraform plan`
-    # FAILS immediately if the cert isn't already ISSUED in us-east-1. This is a
-    # deploy blocker for EVERY CDN deployment — always surface it.
-    summary_lines.append("PRE-DEPLOY BLOCKER — ACM certificates MUST exist and be ISSUED in "
-                         "us-east-1 (N. Virginia) BEFORE `terraform apply`, one covering every "
-                         "custom domain (a `*.apex` wildcard works). CloudFront only accepts "
-                         "us-east-1 certs; the Terraform looks them up via a data source, so a "
-                         "missing/pending/wrong-region cert fails `terraform plan` outright. "
-                         "Provision + validate them first.")
+    # ACM is the hardest prerequisite: each distribution reads its cert ARN from a
+    # cert_arn_<san> variable, and an empty value FAILS `terraform plan` (a var
+    # validation naming the exact SAN coverage the host needs). This is a deploy
+    # blocker for EVERY CDN deployment — always surface it. NOTE: a `*.apex`
+    # wildcard does NOT cover a multi-level subdomain (app.eu.apex needs
+    # *.eu.apex); run resolve-certs.py, which matches by real SAN coverage.
+    summary_lines.append("PRE-DEPLOY BLOCKER — every distribution needs an ISSUED us-east-1 "
+                         "(N. Virginia) ACM certificate whose SAN COVERS its host BEFORE "
+                         "`terraform apply`. A `*.apex` wildcard covers one label only — a "
+                         "multi-level subdomain (e.g. app.eu.apex) needs its own *.eu.apex SAN. "
+                         "Run `cd terraform && ./resolve-certs.py` to auto-fill each domain's "
+                         "cert_arn from ACM by SAN coverage (or set cert_arn_<san> by hand); it "
+                         "lists exactly what to provision if any host is uncovered. CloudFront "
+                         "only accepts us-east-1 certs.")
     # Gate on the SAME local signal (s3_step, from s3_hosts) that gates the
     # POST_ACTION step below — one source of truth, so the "See POST_ACTION"
     # reference can never dangle (the two used to be driven by separate signals:

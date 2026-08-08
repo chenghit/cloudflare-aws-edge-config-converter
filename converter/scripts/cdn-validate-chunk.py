@@ -35,7 +35,7 @@ VR_OPS_ORDER_GROUP = {
 }
 
 REQUIRED_METADATA_FIELDS = [
-    "hostname", "sanitized_name", "apex_domain", "origin_type",
+    "hostname", "sanitized_name", "apex_domain", "cert_domain", "origin_type",
     "cert_arn_mode", "kvs_requirements",
 ]
 

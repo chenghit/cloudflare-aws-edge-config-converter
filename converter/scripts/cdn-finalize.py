@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdn_expr_parser import orp_header_union
-from cdn_common import QUOTA_RAISE, QUOTA_REDESIGN
+from cdn_common import QUOTA_RAISE, QUOTA_REDESIGN, derive_cert_domain
 
 
 def _nbytes(v):
@@ -663,6 +663,21 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
                        if ir["metadata"].get("lambda_edge", {}).get("origin_response")]
     domain_list = [ir["metadata"] for ir in all_irs]
 
+    # Group hosts by the cert coverage each needs (same-level SAN). One zone can
+    # need several certs when subdomains sit at different depths — www.apex needs
+    # *.apex, app.eu.apex needs *.eu.apex. This drives the ACM prerequisite list
+    # below so the user sees the REAL per-depth coverage to provision, not a
+    # single (and, for deep subdomains, wrong) "*.apex covers everything" claim.
+    cert_group_hosts = {}
+    for m in domain_list:
+        cd = m.get("cert_domain") or derive_cert_domain(m["hostname"])
+        cert_group_hosts.setdefault(cd, []).append(m["hostname"])
+    cert_lines = []
+    for cd in sorted(cert_group_hosts):
+        hosts = sorted(cert_group_hosts[cd])
+        shown = ", ".join(hosts[:4]) + (f", +{len(hosts) - 4} more" if len(hosts) > 4 else "")
+        cert_lines.append(f"- **`{cd}`** — covers {len(hosts)} host(s): {shown}")
+
     lines += [
         "", "---", "",
         "## Deployment Steps",
@@ -686,17 +701,36 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "",
         "### 2. Prerequisite — ACM certificates (REQUIRED before any apply)",
         "",
-        "Every distribution's `viewer_certificate` is resolved from an ACM certificate "
-        "via a Terraform `data` source. The certificate MUST already exist and be "
-        "**ISSUED** before you run `terraform apply`, or `terraform plan` fails immediately.",
+        "Each distribution reads its certificate ARN from a `cert_arn_<san>` Terraform "
+        "variable. The certificate MUST already exist and be **ISSUED** in us-east-1 "
+        "before `terraform apply`, or `terraform plan` fails with a message naming the "
+        "exact coverage that host needs.",
         "",
         "- **Region: us-east-1 (N. Virginia)** — CloudFront only accepts certs from there, "
         "regardless of where your origins live.",
-        "- One cert must cover **every** custom domain being deployed. A `*.<apex>` wildcard "
-        "(e.g. `*.example.com`) covers all subdomains; add the apex itself as a SAN if you "
-        "deploy the apex too.",
-        "- The cert must be validated (DNS or email) to reach status ISSUED — a PENDING "
-        "cert will NOT be found by the data source.",
+        "- **Coverage is per-depth.** A certificate covers a host only if one of its SANs "
+        "is an exact match or a **same-level** wildcard. `*.example.com` covers "
+        "`www.example.com` but NOT the apex `example.com` and NOT a deeper "
+        "`app.eu.example.com` — that host needs `*.eu.example.com`. One certificate may "
+        "carry several SANs to cover multiple rows below.",
+        "- The cert must be validated (DNS or email) to reach status ISSUED.",
+        "",
+        "**Coverage this deployment needs** (one SAN per row; a single multi-SAN cert can "
+        "satisfy several):",
+        "",
+        *cert_lines,
+        "",
+        "**Fill the ARNs automatically** — from `cloudflare-to-aws-cdn/terraform/`, run the "
+        "generated resolver (needs `boto3` + credentials with `acm:ListCertificates` and "
+        "`acm:DescribeCertificate`):",
+        "```bash",
+        "cd cloudflare-to-aws-cdn/terraform",
+        "./resolve-certs.py   # matches each host to an ISSUED cert by real SAN coverage",
+        "```",
+        "It writes `domains/<san>/terraform.tfvars` for every covered host, leaves any "
+        "hand-set ARN untouched, and STOPS listing exactly what to provision if a host is "
+        "uncovered. You can also set `cert_arn_<san>` by hand in a domain's "
+        "`terraform.tfvars` (an explicit ARN always wins).",
         "",
         "Check what you have:",
         "```bash",
@@ -736,6 +770,12 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         "```",
         "",
         "### 5. Deploy each domain",
+        "",
+        "**Before applying any domain, fill the cert ARNs** (step 2): `cd "
+        "cloudflare-to-aws-cdn/terraform && ./resolve-certs.py`. Each domain's "
+        "`cert_arn_<san>` variable must be a valid us-east-1 ACM ARN or `terraform plan` "
+        "fails its validation. The resolver writes `domains/<san>/terraform.tfvars`; a "
+        "hand-set ARN there also works.",
         "",
         "With the plugin cache enabled (step 3), plain `terraform init` reuses the cached "
         "provider. Do NOT use `-upgrade` in the per-domain loop — it forces a network "

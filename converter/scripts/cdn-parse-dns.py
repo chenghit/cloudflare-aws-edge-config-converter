@@ -10,7 +10,7 @@ Usage:
 import glob as globmod, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdn_common import emit_result
+from cdn_common import emit_result, derive_cert_domain
 
 # ── Origin classification ────────────────────────────────────────────────────
 
@@ -182,6 +182,7 @@ def main():
         proxied_domains.append({
             "hostname": hostname,
             "apex_domain": zone_name,
+            "cert_domain": derive_cert_domain(hostname),
             "record_type": rtype,
             "origin_content": content,
             "is_wildcard": hostname.startswith("*."),
@@ -197,21 +198,25 @@ def main():
         print(f"ERROR: {msg}", file=sys.stderr)
         emit_result("FATAL", ACTION="FIX", CONTEXT=msg)
 
-    # Step 5: Group by apex domain
-    apex_groups = {}
+    # Step 5: Group by REQUIRED CERT COVERAGE, not by zone apex.
+    # Each hostname needs a certificate whose SAN covers it under CloudFront's
+    # same-level rule (see cdn_common.derive_cert_domain / cert_covers, verified
+    # live). A multi-level subdomain needs a DIFFERENT wildcard than the apex:
+    #   www.example.com    → *.example.com
+    #   app.eu.example.com → *.eu.example.com   (NOT *.example.com — that SAN
+    #                        does not cover a two-label-deeper host)
+    # so one zone can legitimately need several certs. Grouping by the derived
+    # cert-domain (instead of the old single `*.<apex>` per zone) is what makes
+    # the report list the real, per-depth coverage a user must provision.
+    cert_groups = {}
     for d in proxied_domains:
-        apex = d["apex_domain"]
-        if apex not in apex_groups:
-            apex_groups[apex] = {"hostnames": [], "suggested_cert_domain": None}
-        apex_groups[apex]["hostnames"].append(d["hostname"])
+        cd = d["cert_domain"]
+        if cd not in cert_groups:
+            cert_groups[cd] = {"hostnames": []}
+        cert_groups[cd]["hostnames"].append(d["hostname"])
 
-    for apex, group in apex_groups.items():
+    for group in cert_groups.values():
         group["hostnames"].sort()
-        hn = group["hostnames"]
-        if len(hn) == 1 and hn[0] == apex:
-            group["suggested_cert_domain"] = apex
-        else:
-            group["suggested_cert_domain"] = f"*.{apex}"
 
     # Step 6: Write dns_manifest.yaml
     os.makedirs(output_dir, exist_ok=True)
@@ -226,18 +231,22 @@ def main():
     for d in proxied_domains:
         lines.append(f"  - hostname: {yaml_str(d['hostname'])}")
         lines.append(f"    apex_domain: {yaml_str(d['apex_domain'])}")
+        lines.append(f"    cert_domain: {yaml_str(d['cert_domain'])}")
         lines.append(f"    record_type: {yaml_str(d['record_type'])}")
         lines.append(f"    origin_content: {yaml_str(d['origin_content'])}")
         lines.append(f"    is_wildcard: {'true' if d['is_wildcard'] else 'false'}")
         lines.append(f"    origin_type: {yaml_str(d['origin_type'])}")
 
-    lines.append("apex_groups:")
-    for apex in sorted(apex_groups):
-        g = apex_groups[apex]
-        lines.append(f"  {yaml_str(apex)}:")
+    # cert_groups: one entry per REQUIRED cert coverage (the SAN a user must
+    # provision), listing every hostname that needs it. A zone with subdomains at
+    # different depths yields several groups — each is a separate certificate.
+    lines.append("cert_groups:")
+    for cd in sorted(cert_groups):
+        g = cert_groups[cd]
+        lines.append(f"  {yaml_str(cd)}:")
         hn_str = ", ".join(yaml_str(h) for h in g["hostnames"])
         lines.append(f"    hostnames: [{hn_str}]")
-        lines.append(f"    suggested_cert_domain: {yaml_str(g['suggested_cert_domain'])}")
+        lines.append(f"    required_san: {yaml_str(cd)}")
 
     if non_convertible:
         lines.append("non_convertible_origins:")
@@ -257,13 +266,19 @@ def main():
         f.write("\n".join(lines) + "\n")
 
     # Step 7: Write domain_scope.json
-    # All domains: apply_default_cache_behavior=false, cert_arn=null (data_source)
-    apex_cert_groups = {}
-    for apex in sorted(apex_groups):
-        g = apex_groups[apex]
-        apex_cert_groups[apex] = {
-            "suggested_cert_domain": g["suggested_cert_domain"],
-            "hostnames": g["hostnames"],
+    # Certificate discovery is ARN-first: cert_arn starts null and cert_arn_mode
+    # is "resolve" — the generated resolve-certs.py fills each domain's ARN by
+    # matching an ISSUED us-east-1 cert whose SAN actually covers the hostname
+    # (cdn_common.cert_covers, mirroring CloudFront). The user may also set an ARN
+    # by hand (ARN always wins). The old "data_source" mode guessed a cert by
+    # domain=*.<apex>, which the Terraform data source matches only against a
+    # cert's PRIMARY DomainName (CN), never its SANs — so a merged cert or any
+    # multi-level subdomain silently failed `terraform plan`. Verified live.
+    cert_groups_out = {}
+    for cd in sorted(cert_groups):
+        cert_groups_out[cd] = {
+            "required_san": cd,
+            "hostnames": cert_groups[cd]["hostnames"],
         }
 
     scope = {
@@ -273,15 +288,16 @@ def main():
             {
                 "hostname": d["hostname"],
                 "apex_domain": d["apex_domain"],
+                "cert_domain": d["cert_domain"],
                 "apply_default_cache_behavior": False,
-                "cert_arn_mode": "data_source",
+                "cert_arn_mode": "resolve",
                 "cert_arn": None,
                 "origin_content": d["origin_content"],
                 "origin_type": d["origin_type"],
             }
             for d in proxied_domains
         ],
-        "apex_cert_groups": apex_cert_groups,
+        "cert_groups": cert_groups_out,
         "global_rules_note": "Rules without http.host condition will be applied to ALL domains during per-domain processing",
     }
 
@@ -304,7 +320,7 @@ def main():
         warnings.append(f"{len(cf_loop_excluded)} CloudFront-loop domains excluded")
 
     print(f"OK: {len(proxied_domains)} proxied domains, "
-          f"{len(apex_groups)} apex group(s) → {manifest_path}, {scope_path}")
+          f"{len(cert_groups)} cert group(s) → {manifest_path}, {scope_path}")
 
     fields = {"OUTPUT_FILE": scope_path, "DOMAINS": len(proxied_domains)}
     if warnings:

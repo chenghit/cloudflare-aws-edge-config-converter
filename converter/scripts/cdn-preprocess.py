@@ -15,7 +15,7 @@ from cdn_expr_parser import (
     iter_condition_children, host_filter_applies, host_leaf_is_routing,
     condition_has_path_field, CACHE_BYPASS_HEADER,
 )
-from cdn_common import emit_result
+from cdn_common import emit_result, derive_cert_domain
 from cdn_rule_processors import (
     process_redirect_rule, process_rewrite_rule, process_config_rule,
     process_origin_rule, process_cache_rule, process_request_header_transform,
@@ -251,8 +251,14 @@ def make_empty_ir(domain_config):
             "hostname": hostname,
             "sanitized_name": sanitized,
             "apex_domain": domain_config.get("apex_domain", ""),
+            # The same-level wildcard SAN this host needs a cert to cover (see
+            # cdn_common.derive_cert_domain). Drives the report's per-coverage
+            # cert list and the resolve-certs.py matcher. Fall back to deriving it
+            # if an older domain_scope.json predates the field.
+            "cert_domain": domain_config.get("cert_domain")
+                or derive_cert_domain(hostname),
             "origin_type": domain_config.get("origin_type", "server"),
-            "cert_arn_mode": domain_config.get("cert_arn_mode", "data_source"),
+            "cert_arn_mode": domain_config.get("cert_arn_mode", "resolve"),
             "cert_arn": domain_config.get("cert_arn"),
             "kvs_requirements": {
                 "needs_redirects": False,

@@ -28,6 +28,88 @@ QUOTA_RAISE = "QUOTA-RAISE"
 QUOTA_REDESIGN = "QUOTA-REDESIGN"
 QUOTA_TAGS = (QUOTA_RAISE, QUOTA_REDESIGN)
 
+# ── ACM certificate coverage (SNI / CloudFront alternate-domain matching) ──────
+# CloudFront checks a distribution's alternate domain name against the attached
+# certificate's SAN field: it is covered by an EXACT SAN entry, or by a wildcard
+# SAN "at the same level" (one wildcard label, leftmost only). A wildcard covers
+# exactly ONE DNS label — `*.example.com` covers `a.example.com` but NOT the apex
+# `example.com` (zero labels) NOR a two-label host `a.b.example.com`. This is the
+# TLS/RFC-6125 rule AWS enforces; VERIFIED LIVE (2026-08): a distribution with
+# alias `app.eu.a.letsmakeit.link` and a cert whose SANs were `*.a.letsmakeit.link`
+# + `*.eu.a.letsmakeit.link` served HTTPS 200 with tls_verify=0 — the request host
+# matched ONLY via the `*.eu…` SAN, since the `*.a…` SAN (one level up) does not
+# cover a two-label-deeper host.
+#
+# NOTE the split of responsibilities that this whole cert rework rests on, also
+# verified live the same day:
+#   - CloudFront matches an alias against a cert by SAN COVERAGE (cert_covers).
+#   - The Terraform `aws_acm_certificate` DATA SOURCE `domain=` filter matches a
+#     cert ONLY by its primary DomainName (CN) with exact string equality — it
+#     does NOT search SANs. So `domain = "*.eu.example.com"` finds a cert only if
+#     that string is the cert's CN; a merged cert (CN `*.example.com`, SAN
+#     `*.eu.example.com`) is NOT found and `terraform plan` errors "no matching
+#     ACM Certificate". That mismatch is exactly why cert discovery cannot be a
+#     domain-guess data source and moves to explicit ARNs + a SAN-coverage
+#     resolver (resolve-certs.py) that mirrors cert_covers.
+
+
+def derive_cert_domain(hostname):
+    """The SAME-LEVEL wildcard that must appear in a certificate's SAN to cover
+    `hostname` on CloudFront — i.e. the coverage a user needs to provision.
+
+      app.eu.example.com → *.eu.example.com   (wildcard replaces `app`)
+      www.example.com    → *.example.com
+      example.com        → example.com        (apex: a wildcard one level up does
+                                               NOT cover the apex, so it needs an
+                                               exact SAN of itself)
+      *.example.com      → *.example.com       (already a wildcard: unchanged)
+
+    A wildcard host keeps its own value (Cloudflare `*.x` → one CloudFront
+    distribution whose alias is `*.x`, covered by a `*.x` SAN). A bare host with
+    only one label left (a TLD-like `localhost`, or the apex itself) can't be
+    wildcarded a level up soundly, so it maps to an exact-self SAN."""
+    if hostname.startswith("*."):
+        return hostname
+    labels = hostname.split(".")
+    # Need at least 3 labels (a.b.c) to replace the leftmost with `*` and still
+    # leave a real registrable parent. `example.com` (2 labels) is the apex →
+    # exact self; a single label → exact self.
+    if len(labels) >= 3:
+        return "*." + ".".join(labels[1:])
+    return hostname
+
+
+def cert_covers(cert_names, hostname):
+    """True if a certificate whose SAN/name set is `cert_names` covers `hostname`
+    under CloudFront's alternate-domain matching rule. `cert_names` is the list
+    of names on the cert (its DomainName plus every SubjectAlternativeName — ACM
+    folds the primary name into the SAN list too). Matching per name:
+
+      - exact, case-insensitive:            `app.example.com` == `app.example.com`
+      - same-level wildcard `*.parent`:     covers exactly one label under parent,
+                                            `*.example.com` ⊇ `app.example.com`
+                                            but NOT the apex and NOT two-deep.
+
+    Mirrors derive_cert_domain (a cert containing derive_cert_domain(h) as a SAN
+    always covers h) AND CloudFront's live behavior. resolve-certs.py uses this to
+    pick the cert whose coverage CloudFront will actually accept — so a cert it
+    selects can never fail the distribution's viewer-certificate check."""
+    host = hostname.lower().rstrip(".")
+    for name in cert_names:
+        n = str(name).lower().rstrip(".")
+        if n == host:
+            return True
+        if n.startswith("*."):
+            suffix = n[1:]  # ".parent"
+            if not host.endswith(suffix):
+                continue
+            # exactly one label before the matched suffix (no extra dots)
+            label = host[: -len(suffix)]
+            if label and "." not in label:
+                return True
+    return False
+
+
 # STATUS → exit code (SCRIPT_STANDARDS). BLOCKED is a completed run with an
 # undeployable artifact, not a script failure → exit 0 (the block carries the
 # don't-deploy signal). OK also 0; ERROR 1; FATAL 2; PARTIAL 3.

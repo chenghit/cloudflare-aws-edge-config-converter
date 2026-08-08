@@ -197,20 +197,28 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
     w('}')
     w('')
 
-    # ACM certificate
-    if meta["cert_arn_mode"] == "explicit" and meta.get("cert_arn"):
-        w(f'locals {{')
-        w(f'  cert_arn_{san} = "{meta["cert_arn"]}"')
-        w('}')
-        cert_ref = f"local.cert_arn_{san}"
-    else:
-        w(f'data "aws_acm_certificate" "{san}" {{')
-        w(f'  provider    = aws.us_east_1')
-        w(f'  domain      = "*.{apex}"')
-        w(f'  statuses    = ["ISSUED"]')
-        w(f'  most_recent = true')
-        w('}')
-        cert_ref = f"data.aws_acm_certificate.{san}.arn"
+    # ACM certificate — ARN-first, never a domain guess. CloudFront matches an
+    # alias to a cert by SAN COVERAGE, but the Terraform aws_acm_certificate DATA
+    # SOURCE `domain=` matches only a cert's PRIMARY DomainName (CN) — so guessing
+    # `domain = "*.<apex>"` silently failed for merged certs and every multi-level
+    # subdomain (verified live). Instead each distribution reads its cert ARN from
+    # a variable. resolve-certs.py fills terraform.tfvars by matching an ISSUED
+    # us-east-1 cert whose SAN actually covers this host (cdn_common.cert_covers,
+    # mirroring CloudFront); the user can also set it by hand. An empty value fails
+    # `terraform plan` with a message naming the exact SAN coverage this host needs
+    # ({cert_domain}) — fail closed and explain, never deploy half-configured.
+    cert_domain = meta.get("cert_domain") or f"*.{apex}"
+    default_arn = meta.get("cert_arn") or ""
+    w(f'variable "cert_arn_{san}" {{')
+    w(f'  type        = string')
+    w(f'  description = "ACM cert ARN (us-east-1) for {hostname}. Must cover {cert_domain} in its SAN. Run resolve-certs.py to fill, or set by hand."')
+    w(f'  default     = "{default_arn}"')
+    w(f'  validation {{')
+    w(f'    condition     = can(regex("^arn:aws[a-z-]*:acm:us-east-1:[0-9]{{12}}:certificate/", var.cert_arn_{san}))')
+    w(f'    error_message = "No ACM certificate ARN for {hostname}. It needs an ISSUED us-east-1 certificate whose SAN covers {cert_domain} (an exact SAN of {hostname}, or the wildcard {cert_domain}). Run ./resolve-certs.py to auto-fill terraform.tfvars, or set cert_arn_{san} manually."')
+    w(f'  }}')
+    w('}')
+    cert_ref = f"var.cert_arn_{san}"
     w('')
 
     # Policy data sources
@@ -693,6 +701,154 @@ def generate_outputs_tf(ir):
     return "\n".join(lines) + "\n"
 
 
+# ── resolve-certs.py generation ───────────────────────────────────────────────
+
+def generate_resolve_certs_script(domain_specs):
+    """Generate resolve-certs.py — the ARN-first cert discovery step.
+
+    `domain_specs` is a list of {"san","hostname","cert_domain"} (one per
+    distribution). The generated script lists every ISSUED us-east-1 ACM cert,
+    pulls each cert's FULL SAN list (DescribeCertificate — ListCertificates caps
+    SANs at 100), and for each host picks a cert whose SAN actually COVERS it
+    under CloudFront's same-level rule (cert_covers, identical to the live-
+    verified pipeline logic — inlined here so the emitted script is dependency-
+    free). It writes terraform/domains/<san>/terraform.tfvars with the matched
+    ARN. If ANY host has no covering cert, it writes nothing for that host, prints
+    exactly what SAN coverage to provision, and exits non-zero — fail closed and
+    explain, never leave a half-filled tfvars that plans against the wrong cert.
+
+    A host whose tfvars already has a non-empty cert_arn_<san> (user-set, or a
+    prior run) is left untouched — an explicit ARN always wins over discovery."""
+    specs_json = json.dumps(domain_specs, indent=2)
+    return '#!/usr/bin/env python3\n' + '"""resolve-certs.py — fill each domain\'s cert ARN from ACM (us-east-1).\n\n' + \
+'''ARN-first certificate discovery for the CDN pipeline. Run from terraform/:
+
+    cd terraform && ./resolve-certs.py            # or: python3 resolve-certs.py
+
+Requires boto3 and AWS credentials with acm:ListCertificates +
+acm:DescribeCertificate in us-east-1. It only READS ACM and WRITES local
+terraform.tfvars files; it never mutates AWS.
+
+Matching mirrors CloudFront exactly: a certificate covers a host if one of its
+SANs is an exact (case-insensitive) match, or a same-level wildcard *.<parent>
+(one label, leftmost only). A wildcard covers exactly ONE label — *.example.com
+covers a.example.com but NOT the apex and NOT a.b.example.com.
+"""
+import json, os, re, sys
+
+# One entry per distribution: {"san","hostname","cert_domain"}.
+DOMAINS = ''' + specs_json + '''
+
+
+def cert_covers(cert_names, hostname):
+    """True if a cert with SAN set `cert_names` covers `hostname` on CloudFront.
+    Same rule as cdn_common.cert_covers (kept in sync; verified live)."""
+    host = hostname.lower().rstrip(".")
+    for name in cert_names:
+        n = str(name).lower().rstrip(".")
+        if n == host:
+            return True
+        if n.startswith("*."):
+            suffix = n[1:]
+            if host.endswith(suffix):
+                label = host[: -len(suffix)]
+                if label and "." not in label:
+                    return True
+    return False
+
+
+def read_existing_arn(tfvars_path, san):
+    """Return a non-empty cert_arn_<san> already in tfvars, else None. An
+    explicit/prior ARN wins — discovery must not overwrite it."""
+    if not os.path.exists(tfvars_path):
+        return None
+    try:
+        with open(tfvars_path) as f:
+            txt = f.read()
+    except OSError:
+        return None
+    m = re.search(r'cert_arn_' + re.escape(san) + r'\\s*=\\s*"([^"]*)"', txt)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    return None
+
+
+def main():
+    try:
+        import boto3
+        from botocore.exceptions import ClientError
+    except ImportError:
+        print("ERROR: boto3 required. Install with: pip install boto3", file=sys.stderr)
+        sys.exit(1)
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    acm = boto3.client("acm", region_name="us-east-1")
+
+    # List every ISSUED cert, then DescribeCertificate for the FULL SAN list
+    # (ListCertificates truncates SANs at 100).
+    certs = []  # [{"arn","names":[...]}]
+    try:
+        paginator = acm.get_paginator("list_certificates")
+        for page in paginator.paginate(CertificateStatuses=["ISSUED"]):
+            for summ in page.get("CertificateSummaryList", []):
+                arn = summ["CertificateArn"]
+                det = acm.describe_certificate(CertificateArn=arn)["Certificate"]
+                names = list(det.get("SubjectAlternativeNames", []))
+                if det.get("DomainName") and det["DomainName"] not in names:
+                    names.append(det["DomainName"])
+                certs.append({"arn": arn, "names": names})
+    except ClientError as e:
+        print(f"ERROR: ACM lookup failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    resolved, kept, missing = [], [], []
+    for d in DOMAINS:
+        san, host, cd = d["san"], d["hostname"], d["cert_domain"]
+        tfvars = os.path.join(here, "domains", san, "terraform.tfvars")
+
+        existing = read_existing_arn(tfvars, san)
+        if existing:
+            kept.append((host, existing))
+            continue
+
+        matches = [c["arn"] for c in certs if cert_covers(c["names"], host)]
+        if not matches:
+            missing.append((host, cd))
+            continue
+        if len(matches) > 1:
+            print(f"NOTE: {len(matches)} certs cover {host}; using {matches[0]}", file=sys.stderr)
+
+        os.makedirs(os.path.dirname(tfvars), exist_ok=True)
+        with open(tfvars, "w") as f:
+            f.write(f'cert_arn_{san} = "{matches[0]}"\\n')
+        resolved.append((host, matches[0]))
+
+    for host, arn in resolved:
+        print(f"  resolved  {host}  ->  {arn}")
+    for host, arn in kept:
+        print(f"  kept      {host}  ->  {arn} (already set)")
+
+    if missing:
+        print("", file=sys.stderr)
+        print("BLOCKED: no ISSUED us-east-1 certificate covers these host(s):", file=sys.stderr)
+        for host, cd in missing:
+            print(f"  - {host}", file=sys.stderr)
+            print(f"      needs a cert whose SAN includes an exact {host} OR the wildcard {cd}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Provision the certificate(s) in ACM us-east-1 (one cert may carry", file=sys.stderr)
+        print("multiple SANs to cover several of the above), validate to ISSUED,", file=sys.stderr)
+        print("then re-run ./resolve-certs.py. Or set the cert_arn_<san> variable", file=sys.stderr)
+        print("by hand in the domain's terraform.tfvars.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\\nDone: {len(resolved)} resolved, {len(kept)} kept. All domains have a cert ARN.")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -712,6 +868,7 @@ def main():
         print("ERROR: no finalized IR files found", file=sys.stderr)
         sys.exit(1)
 
+    domain_specs = []  # for resolve-certs.py: {"san","hostname","cert_domain"}
     for filename in json_files:
         hostname = filename.replace(".json", "")
         ir = load_ir(final_dir, hostname)
@@ -719,6 +876,13 @@ def main():
         domain_dir = os.path.join(tf_domains_dir, san)
         func_dir = os.path.join(domain_dir, "functions")
         os.makedirs(func_dir, exist_ok=True)
+
+        meta = ir["metadata"]
+        domain_specs.append({
+            "san": san,
+            "hostname": hostname,
+            "cert_domain": meta.get("cert_domain") or f"*.{meta.get('apex_domain','')}",
+        })
 
         origins, domain_to_origin_id = collect_origins(ir)
 
@@ -747,8 +911,18 @@ def main():
         file_count = 3 + (3 if any(kvs_req.values()) else 0)
         print(f"OK: {hostname} → {file_count} scaffold files in terraform/domains/{san}/")
 
+    # resolve-certs.py at the terraform/ root — one run fills every domain's cert
+    # ARN from ACM by SAN coverage (ARN-first discovery; see the generator docs).
+    tf_root = os.path.join(output_dir, "terraform")
+    os.makedirs(tf_root, exist_ok=True)
+    resolve_path = os.path.join(tf_root, "resolve-certs.py")
+    _write(resolve_path, generate_resolve_certs_script(domain_specs))
+    os.chmod(resolve_path, 0o755)
+
     print(f"\n{'='*60}")
     print(f"Generated scaffold for {len(json_files)} domains")
+    print(f"Wrote {resolve_path} — run it (cd terraform && ./resolve-certs.py) "
+          f"to fill cert ARNs before terraform apply.")
 
 
 def _write(path, content):

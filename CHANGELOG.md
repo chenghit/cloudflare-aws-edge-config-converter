@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-08-08
+
+### CDN converter: per-distribution ACM certificate discovery (fixes multi-level subdomains)
+
+Certificate lookup was wrong for any zone with a multi-level subdomain (e.g. `app.eu.example.com`). Every AWS fact below was confirmed with dual subagents that initially DISAGREED, then settled by a live experiment on a real account — request an ACM cert, `terraform apply` a distribution, and `curl` the 4-level host to a real HTTPS 200.
+
+**Root cause**
+- The pipeline generated `data "aws_acm_certificate" { domain = "*.<zone-apex>" }` for every distribution. Two independent failures, both verified live:
+  1. **CloudFront covers an alias by same-level SAN.** A wildcard covers exactly one DNS label — `*.example.com` covers `www.example.com` but NOT the apex and NOT a two-label-deeper `app.eu.example.com`, which needs `*.eu.example.com`. (Live: a cert with SANs `*.a.letsmakeit.link` + `*.eu.a.letsmakeit.link` served HTTPS 200 for `app.eu.a.letsmakeit.link`, matching only via the `*.eu…` SAN — `tls_verify=0`.)
+  2. **The Terraform data source `domain=` matches only a cert's primary DomainName (CN), never its SANs.** (Live: `domain = "*.eu.a.letsmakeit.link"` — a SAN but not the CN — errored `reading ACM Certificates: empty result`; the CN value matched.) So a merged cert or any multi-level subdomain silently failed `terraform plan`. Guessing the domain a level deeper wouldn't help — it would just miss the CN of a merged cert instead.
+
+**Fix — ARN-first certificate discovery** (`cdn_common.py`, `cdn-parse-dns.py`, `cdn-generate-tf-scaffold.py`)
+- Two pure functions in `cdn_common.py`, both validated against the real cert's SANs and CloudFront's live behavior: `derive_cert_domain(host)` gives the same-level SAN a host needs (`app.eu.example.com` → `*.eu.example.com`; apex → exact self; `*.x` unchanged), and `cert_covers(cert_names, host)` applies CloudFront's exact-or-same-level-wildcard rule.
+- DNS parsing now groups hosts by **required cert coverage**, not by one `*.<apex>` per zone — a zone with subdomains at different depths yields several cert groups (several certificates), surfaced per-coverage in the report.
+- Each distribution reads its cert from a `cert_arn_<san>` variable with a validation that fails `terraform plan` when empty, naming the exact SAN coverage that host needs. No `aws_acm_certificate` data source is emitted.
+- New generated `resolve-certs.py` (boto3): lists ISSUED us-east-1 certs, pulls each cert's full SAN list, and fills `domains/<san>/terraform.tfvars` with an ARN whose SAN actually **covers** each host (mirroring `cert_covers`). A hand-set ARN always wins (never overwritten). If any host has no covering cert it writes nothing for it, prints exactly what to provision, and exits non-zero — fail closed and explain, never a half-filled tfvars.
+- Report / SKILL deploy steps rewritten: a per-coverage certificate checklist, the `resolve-certs.py` step before `terraform apply`, and the corrected "`*.apex` does not cover a deeper subdomain" note (was "one `*.apex` covers all subdomains"). `cert_domain` threads through the IR and is enforced by `cdn-validate-chunk`.
+
+**Not touched — rule match/action for multi-level hosts was already correct.** Verified with the real modules: routing (`hostname_matches` is suffix-based), host-condition stripping (eq/in/ne/wildcard stripped, `matches`/`contains`/`len` kept as live predicates), and JS rendering (`host === '…'`, `endsWith('.eu.example.com')`, regex, `full_uri` host∧path, bulk-redirect subdomain walk) all handle 4-level hosts regardless of depth. The bug was confined to certificate discovery.
+
+Verified: full pipeline on a 4-level domain → generated `resolve-certs.py` filled the real ARN by SAN coverage → `terraform apply` created the distribution → `curl https://pipeline.eu.a.letsmakeit.link/` returned **HTTPS 200 with `tls_verify=0`**, served by the SAN-covered cert through CloudFront. New `test/test_cert_coverage.py` (pure-function + mixed 3/4/5-label e2e) plus the existing CDN/WAF regression suites all pass.
+
 ## 2026-07-12
 
 ### WAF converter: rule-group overflow packer, exact WCU, and a unified over-limit signal
