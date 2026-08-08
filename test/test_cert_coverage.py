@@ -214,19 +214,25 @@ def test_end_to_end():
 
         # F3: write_tfvars_var must UPDATE the target var and PRESERVE everything
         # else (the old whole-file rewrite silently dropped other variables).
+        # NOTE the probe VALUES are deliberately NOT ARN-shaped: write_tfvars_var
+        # does no format validation (it writes the value verbatim), so the test
+        # needs no real ARN — and an `arn:aws:...:<12-digit>:` literal, even a fake
+        # one, trips secret scanners on pattern alone. Sentinel strings assert the
+        # same round-trip. (The ARN FORMAT is validated by the generated Terraform
+        # variable's regex, exercised separately, not here.)
         wt = ns["write_tfvars_var"]
         tv = os.path.join(tmp, "tfvars_probe")
         with open(tv, "w") as f:
             f.write('other_setting = "keep"\ncert_arn_x = ""\n')
-        wt(tv, "cert_arn_x", "arn:aws:acm:us-east-1:111111111111:certificate/aaa")
-        wt(tv, "cert_arn_y", "arn:aws:acm:us-east-1:111111111111:certificate/bbb")
+        wt(tv, "cert_arn_x", "CERT-ARN-PLACEHOLDER-X")
+        wt(tv, "cert_arn_y", "CERT-ARN-PLACEHOLDER-Y")
         after = open(tv).read()
         check("F3: write_tfvars_var preserves other variables",
               'other_setting = "keep"' in after, after)
         check("F3: write_tfvars_var updates the target var in place",
-              after.count("cert_arn_x") == 1 and "certificate/aaa" in after, after)
+              after.count("cert_arn_x") == 1 and "CERT-ARN-PLACEHOLDER-X" in after, after)
         check("F3: write_tfvars_var appends a new var",
-              "cert_arn_y" in after and "certificate/bbb" in after, after)
+              "cert_arn_y" in after and "CERT-ARN-PLACEHOLDER-Y" in after, after)
 
         # F4: multiple covering certs are chosen deterministically (latest expiry,
         # ARN tiebreak) — assert the resolver sorts by (-not_after, arn).

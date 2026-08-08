@@ -114,7 +114,12 @@ def _substitute_refs(rules, ipset_arn, regex_arn):
                 lid = o["Fn::GetAtt"][0].lower()
                 return regex_arn if "regex" in lid else ipset_arn
             if "Fn::Sub" in o:
-                return "awswaf:000000000000:webacl:x:label"
+                # Account segment is a non-numeric placeholder on purpose: a label
+                # match's WCU is 1 regardless of the key, and CheckCapacity accepts
+                # a non-12-digit account segment here (verified live) — so this
+                # avoids embedding a 12-digit-account-id-shaped string that trips
+                # secret scanners, with zero effect on the computed capacity.
+                return "awswaf:PLACEHOLDER:webacl:x:label"
             out = {}
             for k, v in o.items():
                 if k == "SearchString" and isinstance(v, str):
