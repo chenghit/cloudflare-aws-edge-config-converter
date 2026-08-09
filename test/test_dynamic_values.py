@@ -832,6 +832,36 @@ check("W-C1d-all cloud connector w/ unparseable cond -> non_convertible",
           {"id": "r", "description": "d", "enabled": True, "expression": _unp,
            "provider": "aws_s3", "parameters": {"host": "h"}}, {}, "")),
       expect_substr="non_convertible")
+# custom_error with inline content + unstructurable condition (was serve_error_inline
+# then silently dropped); control: a `true`-gated inline error still converts.
+check("W-C1d-all custom_error inline + unparseable cond -> non_convertible",
+      _nc(_proc.process_custom_error_rule(
+          {"id": "e", "description": "d", "enabled": True, "expression": _unp, "action": "serve_error",
+           "action_parameters": {"content": "<h1>x</h1>", "content_type": "text/html", "status_code": 503}}, {}, "http_custom_errors")),
+      expect_substr="non_convertible")
+check("W-C1d-all control: custom_error inline + true -> serve_error_inline (no over-report)",
+      _nc(_proc.process_custom_error_rule(
+          {"id": "e", "description": "d", "enabled": True, "expression": "true", "action": "serve_error",
+           "action_parameters": {"content": "<h1>x</h1>", "content_type": "text/html", "status_code": 503}}, {}, "http_custom_errors")),
+      expect_substr="serve_error_inline", forbid_substr="non_convertible")
+
+# W-C1e: Configuration Rule distribution-level settings (ssl / min_tls_version)
+# were applied UNCONDITIONALLY — the processor never parsed the condition, so a
+# per-request-gated setting widened to the whole distribution (silent widening,
+# worse than a drop). Now only `true` / pure host-routing conditions convert; a
+# path/header/unparseable condition is reported non-convertible.
+def _cfg(expr, setting="min_tls_version", val="1.3"):
+    return _proc.process_config_rule(
+        {"id": "c", "description": "d", "enabled": True, "expression": expr,
+         "action": "set_config", "action_parameters": {setting: val}}, {}, "http_config_settings")
+check("W-C1e config min_tls + true -> distribution_setting (convertible)",
+      _nc(_cfg("true")), expect_substr="distribution_setting", forbid_substr="non_convertible")
+check("W-C1e config min_tls + host eq (routing) -> distribution_setting",
+      _nc(_cfg('http.host eq "www.x.com"')), expect_substr="distribution_setting", forbid_substr="non_convertible")
+check("W-C1e config min_tls + uri.path (per-request) -> non_convertible (no widening)",
+      _nc(_cfg('http.request.uri.path eq "/admin"')), expect_substr="non_convertible")
+check("W-C1e config ssl + header cond -> non_convertible (no widening)",
+      _nc(_cfg('http.request.headers["x"][0] eq "1"', "ssl", "full")), expect_substr="non_convertible")
 
 # C2: custom error — intercepted code from the CONDITION, returned code from the
 # action. Compound/OR/no-code conditions can't map -> non_convertible.

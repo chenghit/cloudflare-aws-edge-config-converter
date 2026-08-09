@@ -437,13 +437,42 @@ def process_rewrite_rule(rule, ip_lists, phase):
     return op
 
 
+def _config_setting_scope_ok(cond, raw_expr):
+    """True if a Configuration Rule condition can be honored by a DISTRIBUTION-level
+    setting (ssl / min_tls_version apply to the whole distribution, per connection —
+    CloudFront has NO way to vary them per request). That's only sound when the
+    condition is unconditional (`true`) or purely HOST-ROUTING (host eq/in/ne/…,
+    which the router already consumed → after routing it means "this whole
+    distribution"). ANY other scope — a path/header/geo predicate, a live host
+    predicate, an unparseable raw, or OR/NOT logic — CANNOT be represented as a
+    distribution setting; applying it unconditionally is silent WIDENING (the
+    setting leaks to requests the rule never targeted), so those must be reported
+    non-convertible instead."""
+    if raw_expr:
+        return False  # unparseable / deferred → not representable as a dist setting
+    if cond is None or cond.get("always"):
+        return True
+    if "logic" in cond:
+        if cond["logic"] != "and":
+            return False  # OR / NOT can't reduce to "this whole distribution"
+        return all(_config_setting_scope_ok(p, None) for p in cond.get("parts", []))
+    # a single leaf: OK only if it's a host-ROUTING leaf (consumed by the router)
+    return host_leaf_is_routing(cond)
+
+
 def process_config_rule(rule, ip_lists, phase):
     """Process a Configuration Rule (http_config_settings).
 
-    Most settings are Cloudflare-specific → non_convertible.
+    Most settings are Cloudflare-specific → non_convertible. ssl / min_tls_version
+    map to a distribution-level setting, but ONLY when the rule's condition is
+    unconditional or pure host-routing — a per-request condition (path/header/geo)
+    can't gate a distribution setting, so it's reported non-convertible rather than
+    silently widened to the whole distribution.
     """
     expr = rule.get("expression", "true")
     action_params = rule.get("action_parameters", {})
+    _cond, _raw = parse_expression(expr)
+    _scope_ok = _config_setting_scope_ok(_cond, _raw)
     results = []
 
     for setting, value in action_params.items():
@@ -456,23 +485,45 @@ def process_config_rule(rule, ip_lists, phase):
                 "reason": reason,
             })
         elif setting == "ssl":
-            # SSL mode → distribution setting
-            results.append({
-                "type": "distribution_setting",
-                "setting": "viewer_protocol_policy",
-                "value": "redirect-to-https" if value == "full" else "allow-all",
-                "cf_source_rule": rule.get("id", ""),
-                "description": rule.get("description", ""),
-            })
+            # SSL mode → distribution setting, but ONLY if the condition is
+            # unconditional / pure host-routing (else it would widen to the whole
+            # distribution — see _config_setting_scope_ok).
+            if not _scope_ok:
+                results.append({
+                    "type": "non_convertible",
+                    "cf_source_rule": rule.get("id", ""),
+                    "description": f"{rule.get('description', '')}: {setting}",
+                    "reason": ("ssl mode is a distribution-level setting and can't be "
+                               "gated by a per-request condition; applying it "
+                               f"unconditionally would widen it. Condition: {expr}"),
+                })
+            else:
+                results.append({
+                    "type": "distribution_setting",
+                    "setting": "viewer_protocol_policy",
+                    "value": "redirect-to-https" if value == "full" else "allow-all",
+                    "cf_source_rule": rule.get("id", ""),
+                    "description": rule.get("description", ""),
+                })
         elif setting == "min_tls_version":
-            tls_map = {"1.0": "TLSv1", "1.1": "TLSv1.1_2016", "1.2": "TLSv1.2_2021", "1.3": "TLSv1.2_2021"}
-            results.append({
-                "type": "distribution_setting",
-                "setting": "minimum_protocol_version",
-                "value": tls_map.get(value, "TLSv1.2_2021"),
-                "cf_source_rule": rule.get("id", ""),
-                "description": rule.get("description", ""),
-            })
+            if not _scope_ok:
+                results.append({
+                    "type": "non_convertible",
+                    "cf_source_rule": rule.get("id", ""),
+                    "description": f"{rule.get('description', '')}: {setting}",
+                    "reason": ("min_tls_version is a distribution-level setting and "
+                               "can't be gated by a per-request condition; applying "
+                               f"it unconditionally would widen it. Condition: {expr}"),
+                })
+            else:
+                tls_map = {"1.0": "TLSv1", "1.1": "TLSv1.1_2016", "1.2": "TLSv1.2_2021", "1.3": "TLSv1.2_2021"}
+                results.append({
+                    "type": "distribution_setting",
+                    "setting": "minimum_protocol_version",
+                    "value": tls_map.get(value, "TLSv1.2_2021"),
+                    "cf_source_rule": rule.get("id", ""),
+                    "description": rule.get("description", ""),
+                })
         else:
             results.append({
                 "type": "non_convertible",
@@ -777,6 +828,11 @@ def process_custom_error_rule(rule, ip_lists, phase):
                 "1024-character value limit. Deploy error page as static file on origin "
                 "and use custom error response with response_page_path"
             )
+        # 4b': an unstructurable condition would gate the serve_error_inline op and
+        # then be silently dropped by the generator (comment-only) — report it.
+        _unparse = _raw_condition_unparseable_reason(raw_expr)
+        if _unparse:
+            return _make_non_convertible(rule, _unparse)
         # 4c: request-phase only + content ≤ 1KB → serve via CFF + KVS
         effective_code = response_code or status_code or 500
         kvs_key = f"error:{rule.get('id', '')[:8]}"
