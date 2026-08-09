@@ -640,6 +640,11 @@ def process_cache_rule(rule, ip_lists, phase):
         mode = browser_ttl.get("mode", "respect_origin")
         if mode == "override_origin":
             result["params"]["browser_ttl_override"] = browser_ttl.get("default", 0)
+        elif mode == "respect_origin":
+            # A RESET back to the origin's Cache-Control. Tracked so a later
+            # respect_origin can cancel an earlier override at the same scope; the
+            # placement layer decides whether a CFF can faithfully restore it.
+            result["params"]["browser_ttl_respect_origin"] = True
 
     # Cache key
     if custom_key:
@@ -674,6 +679,18 @@ def process_cache_rule(rule, ip_lists, phase):
         result["params"]["origin_cache_control"] = action_params["origin_cache_control"]
     if "respect_strong_etags" in action_params:
         result["params"]["respect_strong_etags"] = action_params["respect_strong_etags"]
+
+    # SETTING INVENTORY (round-9): record the ORIGINAL top-level action-parameter
+    # keys this rule configured. Accounting reads THIS, not the reduced params — so
+    # a Cloudflare setting the processor never mapped (cache_reserve, serve_stale,
+    # read_timeout, …) is still visible and gets a non-convertible outcome instead
+    # of silently vanishing. `browser_ttl.mode` is tracked as a sub-key so its
+    # respect_origin/bypass_by_default reset states are accounted (only
+    # override_origin produces an effect above).
+    configured = set(action_params.keys())
+    if isinstance(browser_ttl, dict) and "mode" in browser_ttl:
+        configured.add(f"browser_ttl.mode={browser_ttl.get('mode')}")
+    result["_configured"] = sorted(configured)
 
     return result
 

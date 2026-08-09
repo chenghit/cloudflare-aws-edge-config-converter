@@ -706,27 +706,32 @@ def _replay_native_effects(ir, domain_config, origin_content):
 
 
 def _reconcile_mixed_op_headers(ir, domain_config, origin_content):
-    """ONE MECHANISM PER HEADER NAME. A response header can be served natively (RHP,
-    which AWS runs BEFORE the viewer-response function) OR by the CFF, but if BOTH
-    touch the same header the fixed RHP-then-CFF order can't reproduce arbitrary
-    Cloudflare source order (e.g. remove(rule1)+set(rule2) → RHP-set + CFF-remove →
-    wrongly removed). And CORS `origin_override` is a single policy-level flag that
-    can't represent mixed add/set across rules. So: decide the mechanism per
-    lowercased header name over ALL its ops; if the group is NOT pure-RHP-safe, move
-    every RHP effect for that name into the CFF, PRESERVING each effect's own
-    screened condition/raw/seq (never a stand-in `always` — that widened /Admin/*
-    to every path). Runs before replay so moved effects never reach the RHP.
+    """ONE AWS WRITER PER RESPONSE HEADER. A header is served by the RHP (native,
+    which AWS runs BEFORE the viewer-response function) OR the CFF, never both — the
+    fixed RHP-then-CFF order can't reproduce arbitrary Cloudflare source order
+    (remove(1)+set(2) → RHP-set + CFF-remove → wrongly removed). When a header is
+    touched by both, move all its RHP effects into the CFF, PRESERVING each effect's
+    screened condition/raw/seq. Runs before replay so moved effects never reach RHP.
 
-    A group is NOT pure-RHP-safe when the header already has ANY CFF response-header
-    op (remove / dynamic value / per-request condition), OR it is a CORS header with
-    MIXED add/set operations (the shared origin_override flag can't encode both).
+    Two move triggers:
+    - PER NAME: the header already has a CFF response-header op (remove / dynamic /
+      conditional), so unify it in the CFF.
+    - WHOLE CORS GROUP: CloudFront's `origin_override` is ONE boolean for the ENTIRE
+      CorsConfig, not per header. So if ANY mix of add/set exists ACROSS ALL the
+      behavior's CORS headers (e.g. add Allow-Origin + set Allow-Methods — different
+      names), the single flag can't encode it → move the ENTIRE CORS group to the
+      CFF. (A pure-all-add or pure-all-set CORS group stays native.)
     """
-    # Per lowercased header name: RHP effect indices, and CFF-op / CORS-op presence.
     effects = ir.get("_native_effects", [])
-    rhp_by_name = {}          # name -> list of effect dicts (rhp_security/rhp_cors)
+    rhp_names = set()         # lowercased names with a (non-managed) RHP effect
+    cors_ops = set()          # operations seen across ALL CORS RHP effects
+    has_cors = False
     for e in effects:
         if e["kind"] in ("rhp_security", "rhp_cors") and not e["params"].get("_managed"):
-            rhp_by_name.setdefault(e["params"]["name"].lower(), []).append(e)
+            rhp_names.add(e["params"]["name"].lower())
+            if e["kind"] == "rhp_cors":
+                has_cors = True
+                cors_ops.add(e["params"].get("operation", "set"))
     cff_names = set()         # names with an existing CFF response-header op
     for beh in ir["cache_behaviors"]:
         for op in beh.get("viewer_response_ops", []):
@@ -735,23 +740,24 @@ def _reconcile_mixed_op_headers(ir, domain_config, origin_content):
                 if nm:
                     cff_names.add(nm.lower())
 
-    def _must_move(name, group):
-        if name in cff_names:
-            return True                      # already handled by a CFF op → unify
-        # CORS header with mixed add/set → the one origin_override flag can't encode it.
-        if any(e["kind"] == "rhp_cors" for e in group):
-            ops = {e["params"].get("operation", "set") for e in group}
-            if "add" in ops and any(o != "add" for o in ops):
-                return True
+    # CORS is one shared-flag group: mixed add/set anywhere in it → move it all.
+    cors_mixed = has_cors and ("add" in cors_ops and any(o != "add" for o in cors_ops))
+
+    def _must_move(e):
+        nm = e["params"]["name"].lower()
+        if nm in cff_names:
+            return True
+        if e["kind"] == "rhp_cors" and cors_mixed:
+            return True
         return False
 
-    move = {n for n, g in rhp_by_name.items() if _must_move(n, g)}
-    if not move:
+    if not any(e["kind"] in ("rhp_security", "rhp_cors")
+               and not e["params"].get("_managed") and _must_move(e) for e in effects):
         return
     kept = []
     for e in effects:
-        nm = e["params"].get("name", "").lower() if e["kind"] in ("rhp_security", "rhp_cors") else None
-        if nm in move and not e["params"].get("_managed"):
+        _is_hdr = e["kind"] in ("rhp_security", "rhp_cors") and not e["params"].get("_managed")
+        if _is_hdr and _must_move(e):
             op_type = "add_response_header" if e["params"].get("operation") == "add" \
                 else "set_response_header"
             beh = find_or_create_behavior(ir, e["scope"], domain_config, origin_content)
@@ -765,7 +771,9 @@ def _reconcile_mixed_op_headers(ir, domain_config, origin_content):
                 "condition": e.get("condition") if e.get("condition") is not None else {"always": True},
                 "raw_expression": e.get("raw_expression"),
                 "params": {"name": e["params"]["name"], "value": e["params"]["value"]},
-                "scope_pattern": e["scope"],
+                # CFF-attach scope from the SAME single authority (case-insensitive
+                # wildcard → all behaviors), not the native path scope e["scope"].
+                "scope_pattern": _compute_scope_pattern(e.get("condition")),
                 "seq": e.get("seq", 0),
             })
         else:
@@ -853,7 +861,25 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         # outer re-parsed cond.
         scope, reason = native_placement(result.get("condition"), _resolved_vpp(ir))
         if reason:
-            _mark_result_non_convertible(ir, result, reason, expr)
+            # The condition can't reduce to a native path scope (a per-request
+            # header/geo/cookie predicate, or a multi-path OR). A response-headers
+            # policy can't gate that — but a viewer-response CFF CAN (it self-gates
+            # on any condition). Route the static header to the CFF instead of
+            # reporting non-convertible (round-9 #5: "scope first, mechanism last" —
+            # a conditional static HSTS should use the existing viewer-response CFF).
+            params = result["params"]
+            op = params.get("operation", "set")
+            beh = find_or_create_behavior(ir, "*", domain_config, origin_content)
+            beh["viewer_response_ops"].append({
+                "type": f"{op}_response_header",
+                "cf_source_rule": result.get("cf_source_rule", ""),
+                "description": result.get("description", ""),
+                "condition": result.get("condition"),
+                "raw_expression": result.get("raw_expression"),
+                "params": {"name": params["name"], "value": params.get("value")},
+                "scope_pattern": _compute_scope_pattern(result.get("condition")),
+                "seq": ir.get("_seq", 0),
+            })
             return
         _warn_case_insensitive_native(ir, result.get("condition"), scope, result)
         params = result["params"]
@@ -1011,7 +1037,7 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         "condition": result.get("condition"),
         "raw_expression": result.get("raw_expression"),
         "params": result.get("params", {}),
-        "scope_pattern": _op_scope_pattern(path, result.get("condition")),
+        "scope_pattern": _compute_scope_pattern(result.get("condition")),
         "seq": ir.get("_seq", 0),   # source-processing order (see make_empty_ir)
     }
 
@@ -1099,27 +1125,39 @@ def _extract_path_from_result(result, cond, expr):
     return extract_path_pattern_single(c)
 
 
-def _op_scope_pattern(path, condition=None):
-    """The CloudFront path pattern a viewer op's effect COULD reach, so the scaffold
-    attaches the shared CFF to every behavior that OVERLAPS it (a shared CFF that
-    isn't attached to the behavior serving a matching request silently drops the
-    op — CloudFront function associations are strictly per-behavior, no inheritance).
+def _scope_leaf_is_case_insensitive_pattern(cond):
+    """True if the SPECIFIC path-yielding leaf inside `cond` is a case-INSENSITIVE
+    wildcard with cased letters. Recurses AND/OR/NOT so `uri.path wildcard /Admin/*
+    AND header x==1` is caught (the wildcard leaf sits under an AND), which a
+    top-level-only check misses."""
+    if not isinstance(cond, dict):
+        return False
+    if "logic" in cond:
+        return any(_scope_leaf_is_case_insensitive_pattern(c)
+                   for c in iter_condition_children(cond))
+    return _pattern_case_insensitive_letters(cond, extract_path_pattern_single(cond))
 
-    `path` is _extract_path_from_result's best-effort pattern:
-      - a concrete pattern (e.g. `/api/*`) when the op reduced to one path → it can
-        only match there — EXCEPT when that path came from a CASE-INSENSITIVE
-        Cloudflare wildcard (letters): the case-SENSITIVE `/Admin/*` behavior won't
-        receive a `/admin/x` request (it routes to the default), so a CFF attached
-        only to `/Admin/*` would never run for the case variants the source rule
-        matches. The op's own JS condition already lower-cases, so widen the ATTACH
-        scope to `*` (all behaviors) — the op self-gates, attach-everywhere is only
-        cost, a miss is a silent drop.
-      - `"*"` otherwise (zone-wide, or a path that couldn't reduce to a pattern —
-        regex/negated/multi-ext/OR-of-paths — which can still match requests served
-        by ordered behaviors). Attaching to the default behavior ONLY was UNSOUND.
+
+def _compute_scope_pattern(condition):
+    """THE single source of truth for a viewer op / re-homed effect's CFF-ATTACH
+    scope, computed ONCE from the full screened condition and stored on the op — no
+    placement site may re-derive it (they drifted: the op tail, RHP re-home, and
+    browser_ttl each computed scope differently, so a case-insensitive /Admin/*
+    stayed /Admin/* on two of the three paths).
+
+    Returns an EXACT CloudFront path pattern ONLY when the source match set equals
+    that pattern's set — a case-SENSITIVE single path. Returns `"*"` (attach to
+    EVERY behavior, the op self-gates in JS) when it can't prove that:
+      - a case-INSENSITIVE `wildcard` with letters (CloudFront PathPattern is
+        case-sensitive, so a `/admin/x` request routes to the default behavior, not
+        the /Admin/* one — attaching only there silently drops it);
+      - a top-level OR, a NOT, or any condition that doesn't reduce to one path
+        (can still match requests served by ordered behaviors).
     """
-    if path != "*" and _pattern_case_insensitive_letters(
-            condition if isinstance(condition, dict) and "logic" not in condition else {}, path):
+    path = _extract_path_from_result({"condition": condition}, None, None)
+    if path == "*":
+        return "*"
+    if _scope_leaf_is_case_insensitive_pattern(condition):
         return "*"
     return path
 
@@ -1184,25 +1222,48 @@ def _record_cache_effects(ir, scope, result, domain_config, origin_content):
                 "condition": result.get("condition"),
                 "raw_expression": result.get("raw_expression"),
                 "params": {"name": "cache-control", "value": f"max-age={max_age}"},
-                "scope_pattern": scope,
+                # Same single scope authority — a case-insensitive wildcard scope
+                # must attach the browser_ttl CFF to all behaviors, not just `scope`.
+                "scope_pattern": _compute_scope_pattern(result.get("condition")),
                 "seq": ir.get("_seq", 0),
             })
+    elif params.get("browser_ttl_respect_origin"):
+        # A browser_ttl RESET back to the origin's Cache-Control. We can't faithfully
+        # restore it: a viewer-response CFF would have to know the origin's original
+        # value, but an earlier override CFF op / other AWS mechanism may already
+        # have replaced it, and CloudFront gives no "unset to origin" primitive here.
+        # Report rather than silently ignore the reset (round-9 #4).
+        ir["cache_behaviors"][0]["non_convertible"].append({
+            "cf_source_rule": result.get("cf_source_rule", ""),
+            "description": result.get("description", ""),
+            "reason": ("browser_ttl respect_origin (reset to the origin's Cache-Control) "
+                       "has no faithful CloudFront equivalent — a viewer-response function "
+                       "can't reliably restore the origin value once forced; apply the "
+                       "browser cache policy at the origin instead."),
+        })
 
-    # EVERY-SETTING-ACCOUNTED backstop: a cache rule can configure several settings
-    # (cache eligibility, edge/browser TTL, cache-key). Each is handled above; any
-    # param key NOT in this known set was configured by the rule but produced no
-    # output — a silently dropped SETTING that the per-RULE invariant would miss
-    # (the rule still emitted other effects). Report it so it can't vanish.
-    _handled = {"bypass", "edge_ttl_override", "edge_ttl_respect_origin",
-                "caching_enabled", "cache_key_qs", "cache_key_qs_list",
-                "cache_key_qs_exclude", "cache_key_headers", "browser_ttl_override"}
-    unhandled = [k for k in params if k not in _handled]
+    # EVERY-CONFIGURED-SETTING accounted (round-9 #3), TWO layers so nothing hides:
+    # (a) ORIGINAL action-parameter keys the processor never mapped to any param at
+    #     all (cache_reserve, serve_stale, read_timeout, …) — read from `_configured`,
+    #     not the reduced params, so a wholesale-dropped setting is still visible;
+    # (b) params the processor DID emit but `_record_cache_effects` does NOT apply
+    #     (cache_key device_type/geo/lang/header_contains, origin_cache_control,
+    #     respect_strong_etags) — these have no CloudFront cache-policy equivalent.
+    _mapped_orig = {"cache", "edge_ttl", "browser_ttl", "cache_key"}
+    _applied_params = {"bypass", "edge_ttl_override", "edge_ttl_respect_origin",
+                       "browser_ttl_override", "browser_ttl_respect_origin",
+                       "cache_key_qs", "cache_key_qs_list", "cache_key_qs_exclude",
+                       "cache_key_headers", "status_code_ttl"}
+    unhandled = [k for k in result.get("_configured", [])
+                 if k.split(".", 1)[0] not in _mapped_orig and "=" not in k]
+    unhandled += [k for k in params if k not in _applied_params]
     if unhandled:
         ir["cache_behaviors"][0]["non_convertible"].append({
             "cf_source_rule": result.get("cf_source_rule", ""),
             "description": result.get("description", ""),
-            "reason": (f"cache rule setting(s) {unhandled} have no CloudFront mapping "
-                       "and were not converted (other settings on the same rule were)"),
+            "reason": (f"cache rule setting(s) {sorted(set(unhandled))} have no "
+                       "CloudFront mapping and were not converted (other settings on "
+                       "the same rule were)"),
         })
 
 
