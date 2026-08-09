@@ -687,12 +687,32 @@ def process_cache_rule(rule, ip_lists, phase):
     # of silently vanishing. `browser_ttl.mode` is tracked as a sub-key so its
     # respect_origin/bypass_by_default reset states are accounted (only
     # override_origin produces an effect above).
-    configured = set(action_params.keys())
-    if isinstance(browser_ttl, dict) and "mode" in browser_ttl:
-        configured.add(f"browser_ttl.mode={browser_ttl.get('mode')}")
-    result["_configured"] = sorted(configured)
+    # RECURSE to LEAVES (round-10 #2): a top-level inventory treats the whole
+    # `cache_key`/`edge_ttl` subtree as mapped, so a nested leaf the processor never
+    # consumed (cache_key.custom_key.cookie.include, edge_ttl.mode=bypass_by_default)
+    # vanishes. Enumerate every leaf path so accounting can flag the unconsumed ones.
+    result["_configured"] = _leaf_paths(action_params)
 
     return result
+
+
+def _leaf_paths(obj, prefix=""):
+    """Flatten a nested action_parameters dict to dotted leaf paths. A scalar leaf
+    becomes `path=value` (so edge_ttl.mode=respect_origin is distinguishable);
+    a dict recurses; a non-empty list leaf becomes `path[]`. Empty containers become
+    a bare `path` leaf so an empty setting is still visible."""
+    leaves = []
+    if isinstance(obj, dict):
+        if not obj:
+            return [prefix] if prefix else []
+        for k, v in obj.items():
+            leaves += _leaf_paths(v, f"{prefix}.{k}" if prefix else k)
+    elif isinstance(obj, list):
+        leaves.append(f"{prefix}[]" if prefix else "[]")
+    else:
+        # scalar: keep the value for mode-like discriminators, bool/str/int only
+        leaves.append(f"{prefix}={obj}" if isinstance(obj, (str, bool, int)) else prefix)
+    return sorted(set(leaves))
 
 
 def process_request_header_transform(rule, ip_lists, phase):
@@ -764,6 +784,25 @@ def process_response_header_transform(rule, ip_lists, phase):
         operation = header_config.get("operation", "set")
         value = header_config.get("value")
         expression = header_config.get("expression")
+
+        # Cloudflare `add` APPENDS a new header, keeping existing same-name headers
+        # (verified vs Cloudflare docs: "Add operations append a new header without
+        # removing existing headers of the same name"). CloudFront has NO faithful
+        # equivalent (confirmed vs AWS docs, dual subagents — memory
+        # cdn-response-header-mechanism-facts): a Response Headers Policy is set-only
+        # (one value, Override is a winner-switch, never appends); and building a
+        # brand-new multiValue header from a single value in a CloudFront Function is
+        # undocumented. So a `remove`+`set` render it as a no-op today. PHASE-1: report
+        # non-convertible until multiValue creation is verified live, rather than emit
+        # a silent no-op.
+        if operation == "add":
+            ops.append(_make_non_convertible(
+                rule, f"response header '{header_name}': Cloudflare `add` appends a "
+                "duplicate header (keeps existing values); CloudFront has no faithful "
+                "equivalent (RHP is set-only; CFF multiValue-from-single is "
+                "undocumented). Set the value at the origin, or use `set` if replacing "
+                "is acceptable."))
+            continue
 
         # Check if this is a well-known security/CORS header → RHP
         lower_name = header_name.lower()

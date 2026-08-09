@@ -139,22 +139,22 @@ check("HSTS on /admin -> header on /admin, not default",
       admin is not None and "Strict-Transport-Security" in admin["response_headers_policy"]["security_headers"]
       and "Strict-Transport-Security" not in _behavior(ir, "*")["response_headers_policy"]["security_headers"])
 
-# STATIC security header (HSTS) gated on a header condition: the RHP can't gate a
-# per-request predicate, but a viewer-response CFF CAN — so placement routes it to
-# the CFF (round-9 #5, "scope first, mechanism last"), NOT non_convertible. The op
-# self-gates on the header condition, scope_pattern='*' (attach everywhere).
+# STATIC security header (HSTS) gated on a header condition: PHASE-1 — the RHP
+# can't gate a per-request predicate, AND a viewer-response CFF would silently NOT
+# apply it to error responses (origin 4xx/5xx, custom-error, WAF block) that the
+# Cloudflare rule covers. No faithful CloudFront equivalent → NON_CONVERTIBLE, not a
+# CFF that hides the error-response gap (reverses round-9 #5, per the mechanism facts
+# confirmed with dual AWS subagents).
 ir = _preprocess({"Response-Header-Transform.txt": _wrap([
     _rule("e" * 32, 'http.request.headers["x"] eq "1"', "rewrite",
           {"headers": {"Strict-Transport-Security": {"operation": "set", "value": "max-age=31536000"}}},
           "HSTS on header-cond")])})
-check("static security header gated on header -> CFF op, NOT non_convertible",
-      len(_all_nc(ir)) == 0, f"nc={_all_nc(ir)}")
+check("conditional static security header -> non_convertible (no error-response-gap masking)",
+      len(_all_nc(ir)) == 1, f"nc={_all_nc(ir)}")
 _hsts_cff = [o for b in ir["cache_behaviors"] for o in b["viewer_response_ops"]
              if o["params"].get("name") == "Strict-Transport-Security"]
-check("static security header gated on header -> CFF set_response_header, gated, scope '*'",
-      len(_hsts_cff) == 1 and _hsts_cff[0]["type"] == "set_response_header"
-      and _hsts_cff[0].get("condition") is not None
-      and _hsts_cff[0].get("scope_pattern") == "*", f"ops={_hsts_cff}")
+check("conditional static security header -> NOT emitted as a (gap-masking) CFF op",
+      len(_hsts_cff) == 0, f"ops={_hsts_cff}")
 # a NON-security dynamic header gated on a header condition → CFF op, NOT
 # non_convertible (CFF gates on any condition). Confirms we didn't over-report.
 ir = _preprocess({"Response-Header-Transform.txt": _wrap([
@@ -258,13 +258,12 @@ _ncs = _all_nc(ir)
 check("cross-overlap (/api/* vs *.js): reported non_convertible (not silently applied)",
       any("cross-overlap" in n.get("reason", "") for n in _ncs), f"nc={_ncs}")
 
-print("== ACCEPTANCE: F1 -- RHP gates on its OWN screened condition (no silent false) ==")
+print("== ACCEPTANCE: conditional static header after OR-prune -> non_convertible ==")
 # HSTS set on (mappable header OR unmappable bot-score). _screen_unmappable prunes
-# the bot-score branch → the RHP result's condition is the pruned header-only cond,
-# NOT the raw OR (which the OLD fallback re-parsed → rendered `false` → silent drop).
-# The header-only predicate can't reduce to a path → routed to the viewer-response
-# CFF (round-9 #5), gating on the PRUNED header condition — visible, not dropped,
-# and not the false-rendering raw OR.
+# the bot-score branch → the header-only pruned condition is still a per-request
+# predicate. PHASE-1: it's a conditional static security header → non_convertible
+# (RHP can't gate it; a CFF misses error responses), and it must be VISIBLE — never
+# a silent drop and never the false-rendering raw OR emitted as a CFF op.
 ir = _preprocess({"Response-Header-Transform.txt": _wrap([
     _rule("d1" + "0" * 30,
           'http.request.headers["x"] eq "1" or cf.bot_management.score gt 30', "rewrite",
@@ -272,14 +271,8 @@ ir = _preprocess({"Response-Header-Transform.txt": _wrap([
           "hsts header-or-botscore")])})
 _d1 = [o for b in ir["cache_behaviors"] for o in b["viewer_response_ops"]
        if o["params"].get("name") == "Strict-Transport-Security"]
-check("F1: header-cond static HSTS after OR-prune -> CFF op (not non_convertible, not silent)",
-      len(_all_nc(ir)) == 0 and len(_d1) == 1 and _d1[0]["type"] == "set_response_header",
-      f"nc={_all_nc(ir)} ops={_d1}")
-# the CFF op gates on the PRUNED header-only condition (the bot-score branch gone),
-# NOT the raw OR that would render `false`.
-check("F1: CFF op carries the pruned header-only condition (no unmappable branch)",
-      len(_d1) == 1 and _d1[0].get("condition", {}).get("header_name") == "x",
-      f"cond={_d1[0].get('condition') if _d1 else None}")
+check("conditional static HSTS after OR-prune -> non_convertible, no CFF op",
+      len(_all_nc(ir)) == 1 and len(_d1) == 0, f"nc={_all_nc(ir)} ops={_d1}")
 
 print("== ACCEPTANCE: full_uri scheme -- https maps to path, http rejected ==")
 # https:// full_uri cache rule → faithful path behavior (scheme redundant under
@@ -434,18 +427,23 @@ check("r8-2: HSTS fully in CFF, none left in native RHP",
       "Strict-Transport-Security" not in _behavior(ir, "*")["response_headers_policy"]["security_headers"]
       and "Strict-Transport-Security" not in _behavior(ir, "/Admin/*")["response_headers_policy"]["security_headers"])
 
-print("== ACCEPTANCE(r8): CORS mixed add/set -> CFF (shared origin_override can't encode) ==")
+print("== ACCEPTANCE(r8/P1): CORS add is non-convertible; set stays native ==")
+# PHASE-1: Cloudflare `add` appends a duplicate header — CloudFront has no faithful
+# equivalent (RHP set-only; CFF multiValue-from-single undocumented) → non-convertible.
+# The `set` part is a plain unconditional static set → native RHP. So a mixed add/set
+# yields ONE non_convertible (the add) + the set applied natively — NOT a CFF group.
 for order, a, b in [("add-then-set", "add", "set"), ("set-then-add", "set", "add")]:
     ir = _preprocess({"Response-Header-Transform.txt": _wrap([
         _rule("o1" + "0" * 30, "true", "rewrite",
               {"headers": {"Access-Control-Allow-Origin": {"operation": a, "value": "*"}}}, "cors a"),
         _rule("o2" + "0" * 30, "true", "rewrite",
               {"headers": {"Access-Control-Allow-Origin": {"operation": b, "value": "https://x"}}}, "cors b")])})
+    _add_nc = [n for n in _all_nc(ir) if "`add`" in n.get("reason", "")]
     _cors = _behavior(ir, "*")["response_headers_policy"]["cors"]
-    _cff = [o for o in _resp_ops(ir, "*") if o["params"].get("name") == "Access-Control-Allow-Origin"]
-    check(f"r8-4 {order}: mixed CORS -> CFF (2 ops, seq-ordered), not native cors",
-          _cors is None and len(_cff) == 2 and _cff[0]["seq"] < _cff[1]["seq"],
-          f"cors={_cors} cff={[(o['type'], o.get('seq')) for o in _cff]}")
+    check(f"P1 {order}: the add op -> non_convertible; the set -> native cors",
+          len(_add_nc) == 1 and _cors is not None
+          and "Access-Control-Allow-Origin" in _cors,
+          f"add_nc={_add_nc} cors={_cors}")
 
 print("== ACCEPTANCE(r8): full_uri strict wildcard keeps case-sensitive op ==")
 sys.path.insert(0, SCRIPTS)
@@ -483,9 +481,10 @@ check("r8-3: strict-wildcard /Admin/* redirect -> exact scope_pattern (case-sens
 
 
 # ── round-9 review: CORS whole-group, scope-once, setting inventory ────────────
-print("== ACCEPTANCE(r9): CORS mixed add/set across DIFFERENT header names -> CFF ==")
-# origin_override is ONE flag for the whole CorsConfig — add on one CORS header +
-# set on ANOTHER can't be encoded, so the ENTIRE CORS group moves to the CFF.
+print("== ACCEPTANCE(P1): CORS `add` non-convertible; the `set` sibling stays native ==")
+# PHASE-1: `add` (append duplicate) is non-convertible on its own. So a rule set with
+# an add on one CORS header + a set on another yields ONE non_convertible (the add)
+# and the set applied natively — no whole-group CFF (there's nothing to append with).
 for order, (n1, o1), (n2, o2) in [
         ("add-Origin/set-Methods", ("Access-Control-Allow-Origin", "add"),
          ("Access-Control-Allow-Methods", "set")),
@@ -494,17 +493,19 @@ for order, (n1, o1), (n2, o2) in [
     ir = _preprocess({"Response-Header-Transform.txt": _wrap([
         _rule("q1" + "0" * 30, "true", "rewrite", {"headers": {n1: {"operation": o1, "value": "*"}}}, "cors 1"),
         _rule("q2" + "0" * 30, "true", "rewrite", {"headers": {n2: {"operation": o2, "value": "GET"}}}, "cors 2")])})
+    _add_name = n1 if o1 == "add" else n2
+    _set_name = n2 if o1 == "add" else n1
     _cors = _behavior(ir, "*")["response_headers_policy"]["cors"]
-    _cff = [o["params"].get("name") for o in _resp_ops(ir, "*")
-            if o["params"].get("name", "").startswith("Access-Control")]
-    check(f"r9-1 {order}: whole CORS group -> CFF (both names), native cors None",
-          _cors is None and set(_cff) == {n1, n2}, f"cors={_cors} cff={_cff}")
-# a pure-all-set CORS group stays NATIVE (no mix → RHP is faithful).
+    _add_nc = [n for n in _all_nc(ir) if "`add`" in n.get("reason", "")]
+    check(f"P1 {order}: add -> non_convertible, set -> native cors",
+          len(_add_nc) == 1 and _cors is not None and _set_name in _cors and _add_name not in _cors,
+          f"add_nc={_add_nc} cors={_cors}")
+# a pure-all-set CORS group stays NATIVE (no add anywhere → RHP is faithful).
 ir = _preprocess({"Response-Header-Transform.txt": _wrap([
     _rule("q3" + "0" * 30, "true", "rewrite",
           {"headers": {"Access-Control-Allow-Origin": {"operation": "set", "value": "*"},
                        "Access-Control-Allow-Methods": {"operation": "set", "value": "GET"}}}, "cors set-only")])})
-check("r9-1: pure-set CORS group stays native (no mix)",
+check("P1: pure-set CORS group stays native (no add)",
       _behavior(ir, "*")["response_headers_policy"]["cors"] is not None
       and not [o for o in _resp_ops(ir, "*") if o["params"].get("name", "").startswith("Access-Control")])
 
@@ -544,6 +545,66 @@ ir = _preprocess({"Cache-Rules.txt": _wrap([
           {"browser_ttl": {"mode": "respect_origin"}, "edge_ttl": {"mode": "override_origin", "default": 60}}, "bttl reset")])})
 check("r9-4: browser_ttl respect_origin (reset) reported non_convertible (not ignored)",
       any("respect_origin" in n.get("reason", "") for n in _all_nc(ir)), f"nc={_all_nc(ir)}")
+
+
+# ── PHASE-1 honesty model: EXACT / LOSSY_WITH_WARNING / NON_CONVERTIBLE ─────────
+def _warns(ir):
+    return ir["metadata"].get("conversion_warnings", [])
+
+
+def _lossy(ir):
+    return [w for w in _warns(ir) if str(w).startswith("LOSSY_WITH_WARNING")]
+
+
+print("== ACCEPTANCE(P1): RHP only for UNCONDITIONAL static set ==")
+# unconditional static security header -> native RHP, EXACT (no nc, no lossy).
+ir = _preprocess({"Response-Header-Transform.txt": _wrap([
+    _rule("t1" + "0" * 30, "true", "rewrite",
+          {"headers": {"X-Frame-Options": {"operation": "set", "value": "DENY"}}}, "static xfo")])})
+check("P1: unconditional static set -> native RHP, EXACT (nc=0, lossy=0)",
+      "X-Frame-Options" in _behavior(ir, "*")["response_headers_policy"]["security_headers"]
+      and len(_all_nc(ir)) == 0 and len(_lossy(ir)) == 0)
+# host-only (site-wide after routing) static set is also EXACT.
+ir = _preprocess({"Response-Header-Transform.txt": _wrap([
+    _rule("t2" + "0" * 30, 'http.host eq "www.example.com"', "rewrite",
+          {"headers": {"X-Frame-Options": {"operation": "set", "value": "DENY"}}}, "host-only xfo")])})
+check("P1: host-only static set -> native RHP, EXACT",
+      "X-Frame-Options" in _behavior(ir, "*")["response_headers_policy"]["security_headers"]
+      and len(_all_nc(ir)) == 0)
+# a path-scoped static set is still native (RHP on that behavior) — EXACT.
+ir = _preprocess({"Response-Header-Transform.txt": _wrap([
+    _rule("t3" + "0" * 30, 'http.request.uri.path eq "/admin"', "rewrite",
+          {"headers": {"X-Frame-Options": {"operation": "set", "value": "DENY"}}}, "path xfo")])})
+check("P1: path-scoped static set -> native RHP on /admin, EXACT",
+      _behavior(ir, "/admin") is not None
+      and "X-Frame-Options" in _behavior(ir, "/admin")["response_headers_policy"]["security_headers"]
+      and len(_all_nc(ir)) == 0)
+
+print("== ACCEPTANCE(P1): add -> non_convertible; conditional header -> non_convertible ==")
+ir = _preprocess({"Response-Header-Transform.txt": _wrap([
+    _rule("t4" + "0" * 30, "true", "rewrite",
+          {"headers": {"X-Custom": {"operation": "add", "value": "v"}}}, "add custom")])})
+check("P1: `add` (append) -> non_convertible (no faithful CloudFront equivalent)",
+      any("`add`" in n.get("reason", "") for n in _all_nc(ir))
+      and not [o for b in ir["cache_behaviors"] for o in b["viewer_response_ops"]], f"nc={_all_nc(ir)}")
+
+print("== ACCEPTANCE(P1): browser_ttl override -> LOSSY_WITH_WARNING (error-response gap) ==")
+ir = _preprocess({"Cache-Rules.txt": _wrap([
+    _rule("t5" + "0" * 30, "true", "x", {"browser_ttl": {"mode": "override_origin", "default": 1000}}, "bttl")])})
+check("P1: browser_ttl override -> deployed (op emitted) AND flagged LOSSY (not EXACT/nc)",
+      len(_lossy(ir)) == 1 and len(_all_nc(ir)) == 0
+      and any(o["params"].get("name") == "cache-control"
+              for b in ir["cache_behaviors"] for o in b["viewer_response_ops"]),
+      f"lossy={_lossy(ir)} nc={_all_nc(ir)}")
+
+print("== ACCEPTANCE(P1): recursive leaf inventory — nested unknown leaf reported ==")
+ir = _preprocess({"Cache-Rules.txt": _wrap([
+    _rule("t6" + "0" * 30, "true", "x",
+          {"edge_ttl": {"mode": "override_origin", "default": 60},
+           "cache_key": {"custom_key": {"cookie": {"include": ["sess"]}}}}, "ttl+cookie-key")])})
+check("P1: nested cache_key.custom_key.cookie leaf reported (TTL still applied)",
+      _cache_ttl(ir, "*") == 60
+      and any("cookie" in n.get("reason", "") for n in _all_nc(ir)), f"nc={_all_nc(ir)}")
 
 
 if __name__ == "__main__":

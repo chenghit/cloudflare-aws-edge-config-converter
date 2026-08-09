@@ -534,6 +534,15 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
     return ir
 
 
+# Conversion outcome vocabulary (Phase-1 honesty model). Only EXACT counts as a
+# successful conversion; LOSSY_WITH_WARNING is deployed but has a KNOWN behavioral
+# gap the user must accept (surfaced in the report, NOT hidden behind nc=0);
+# NON_CONVERTIBLE is not emitted at all. A single rule/leaf carries exactly one.
+OUTCOME_EXACT = "EXACT"
+OUTCOME_LOSSY = "LOSSY_WITH_WARNING"
+OUTCOME_NON_CONVERTIBLE = "NON_CONVERTIBLE"
+
+
 def _mark_result_non_convertible(ir, result, reason, expr=None):
     """Record a native-mechanism result as non-convertible on the default behavior
     (the single sink the report reads). Used when native_placement() rejects a
@@ -542,8 +551,20 @@ def _mark_result_non_convertible(ir, result, reason, expr=None):
     ir["cache_behaviors"][0]["non_convertible"].append({
         "cf_source_rule": result.get("cf_source_rule", ""),
         "description": result.get("description", ""),
+        "outcome": OUTCOME_NON_CONVERTIBLE,
         "reason": f"{reason}. Scope: {result.get('raw_expression') or expr or '(complex)'}",
     })
+
+
+def _mark_result_lossy(ir, result, reason):
+    """Record a LOSSY_WITH_WARNING outcome: the rule IS converted and deployed, but
+    with a known behavioral gap (e.g. a viewer-response CFF header that AWS won't run
+    on origin >=400 / custom-error / WAF-block responses, which the Cloudflare rule
+    WOULD cover). Surfaced in the report's warnings so it is never counted as a clean
+    (EXACT) success. Recorded on the default behavior's warnings sink."""
+    ir["metadata"].setdefault("conversion_warnings", []).append(
+        f"{OUTCOME_LOSSY} — rule {result.get('cf_source_rule', '')}"
+        f"{(': ' + result.get('description', '')) if result.get('description') else ''}: {reason}")
 
 
 # ── Native-effect engine (F2: replay in source-rule order per behavior) ────────
@@ -855,31 +876,26 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         return
 
     if rtype == "response_headers_policy":
-        # A response-headers policy is native (per behavior). Record it as an
-        # ordered native effect; replay attaches it to every behavior its scope
-        # contains. F1: gate on the RESULT's own screened condition, never the
-        # outer re-parsed cond.
+        # A response-headers policy is native (per behavior) and — unlike a
+        # viewer-response CFF — it applies to ERROR responses too (origin 4xx/5xx,
+        # custom error pages), which a Cloudflare Response Header Transform also
+        # covers (confirmed vs AWS docs, dual subagents — see memory
+        # cdn-response-header-mechanism-facts). PHASE-1 NARROWING: RHP is faithful
+        # ONLY for an UNCONDITIONAL/host-only STATIC set. A per-request condition
+        # can't be carried by the RHP, and routing it to a viewer-response CFF
+        # SILENTLY DROPS the header on all error responses / WAF blocks — that is a
+        # known runtime gap, NOT an exact conversion. So report it (non-convertible)
+        # instead of masking the gap as CFF success (reverses the round-9 fallback).
         scope, reason = native_placement(result.get("condition"), _resolved_vpp(ir))
         if reason:
-            # The condition can't reduce to a native path scope (a per-request
-            # header/geo/cookie predicate, or a multi-path OR). A response-headers
-            # policy can't gate that — but a viewer-response CFF CAN (it self-gates
-            # on any condition). Route the static header to the CFF instead of
-            # reporting non-convertible (round-9 #5: "scope first, mechanism last" —
-            # a conditional static HSTS should use the existing viewer-response CFF).
-            params = result["params"]
-            op = params.get("operation", "set")
-            beh = find_or_create_behavior(ir, "*", domain_config, origin_content)
-            beh["viewer_response_ops"].append({
-                "type": f"{op}_response_header",
-                "cf_source_rule": result.get("cf_source_rule", ""),
-                "description": result.get("description", ""),
-                "condition": result.get("condition"),
-                "raw_expression": result.get("raw_expression"),
-                "params": {"name": params["name"], "value": params.get("value")},
-                "scope_pattern": _compute_scope_pattern(result.get("condition")),
-                "seq": ir.get("_seq", 0),
-            })
+            _mark_result_non_convertible(
+                ir, result,
+                "a conditional/complex-scope response header can't be carried by a "
+                "native Response Headers Policy, and a viewer-response CloudFront "
+                "Function would silently NOT apply it to error responses (origin "
+                "4xx/5xx, custom error pages, WAF blocks) that a Cloudflare rule "
+                "covers — no faithful CloudFront equivalent",
+                expr)
             return
         _warn_case_insensitive_native(ir, result.get("condition"), scope, result)
         params = result["params"]
@@ -1201,11 +1217,11 @@ def _record_cache_effects(ir, scope, result, domain_config, origin_content):
 
     # browser_ttl (override_origin): Cloudflare forces the max-age in the
     # Cache-Control header sent to the VIEWER, independent of the edge TTL. A
-    # viewer-response CFF replicates this faithfully — response.headers is
-    # writable there, the value is forced unconditionally, and it self-gates on
-    # the rule condition. Emitted as a set_response_header op (scope_pattern drives
-    # which behaviors the shared CFF attaches to). Caveat: viewer-response CFF does
-    # not run for CloudFront-generated 4xx/5xx, acceptable for browser_ttl.
+    # viewer-response CFF replicates it for NORMAL (origin <400) responses — but that
+    # function does NOT run on origin 4xx/5xx / custom-error / WAF-block responses,
+    # whereas Cloudflare's rule would still set the header there. So this is a KNOWN
+    # gap → LOSSY_WITH_WARNING (deployed, but not counted as a clean EXACT success),
+    # NOT silently treated as faithful (Phase-1 honesty; mechanism-facts memory).
     if "browser_ttl_override" in params:
         beh = find_or_create_behavior(ir, scope, domain_config, origin_content)
         max_age = params["browser_ttl_override"]
@@ -1227,6 +1243,12 @@ def _record_cache_effects(ir, scope, result, domain_config, origin_content):
                 "scope_pattern": _compute_scope_pattern(result.get("condition")),
                 "seq": ir.get("_seq", 0),
             })
+            _mark_result_lossy(
+                ir, result,
+                "browser_ttl (Cache-Control max-age to the viewer) is applied via a "
+                "viewer-response function, which CloudFront does NOT run on origin "
+                "4xx/5xx, custom-error, or WAF-block responses — those responses will "
+                "NOT carry the forced max-age that the Cloudflare rule would set")
     elif params.get("browser_ttl_respect_origin"):
         # A browser_ttl RESET back to the origin's Cache-Control. We can't faithfully
         # restore it: a viewer-response CFF would have to know the origin's original
@@ -1242,28 +1264,32 @@ def _record_cache_effects(ir, scope, result, domain_config, origin_content):
                        "browser cache policy at the origin instead."),
         })
 
-    # EVERY-CONFIGURED-SETTING accounted (round-9 #3), TWO layers so nothing hides:
-    # (a) ORIGINAL action-parameter keys the processor never mapped to any param at
-    #     all (cache_reserve, serve_stale, read_timeout, …) — read from `_configured`,
-    #     not the reduced params, so a wholesale-dropped setting is still visible;
-    # (b) params the processor DID emit but `_record_cache_effects` does NOT apply
-    #     (cache_key device_type/geo/lang/header_contains, origin_cache_control,
-    #     respect_strong_etags) — these have no CloudFront cache-policy equivalent.
-    _mapped_orig = {"cache", "edge_ttl", "browser_ttl", "cache_key"}
-    _applied_params = {"bypass", "edge_ttl_override", "edge_ttl_respect_origin",
-                       "browser_ttl_override", "browser_ttl_respect_origin",
-                       "cache_key_qs", "cache_key_qs_list", "cache_key_qs_exclude",
-                       "cache_key_headers", "status_code_ttl"}
-    unhandled = [k for k in result.get("_configured", [])
-                 if k.split(".", 1)[0] not in _mapped_orig and "=" not in k]
-    unhandled += [k for k in params if k not in _applied_params]
+    # EVERY-CONFIGURED-SETTING accounted, at LEAF granularity (round-10 #2). The
+    # processor recorded every action_parameter LEAF path in `_configured`; a
+    # top-level inventory would treat the whole cache_key/edge_ttl subtree as mapped
+    # and hide a nested leaf the converter never consumed (cache_key.custom_key.
+    # cookie.include, edge_ttl.mode=bypass_by_default). A leaf is accounted iff its
+    # path starts with a prefix we ACTUALLY apply; anything else → non-convertible
+    # with the exact leaf path, so a partially-dropped setting can't hide behind the
+    # rule's other converted settings.
+    _handled_leaf_prefixes = (
+        "cache=", "edge_ttl.mode=override_origin", "edge_ttl.mode=respect_origin",
+        "edge_ttl.default", "edge_ttl.status_code_ttl",   # status_code_ttl already reported nc
+        "browser_ttl.mode=override_origin", "browser_ttl.mode=respect_origin",
+        "browser_ttl.default",
+        "cache_key.custom_key.query_string.",
+        "cache_key.custom_key.header.include",
+    )
+    def _accounted(leaf):
+        return any(leaf == p or leaf.startswith(p) for p in _handled_leaf_prefixes)
+    unhandled = sorted({leaf for leaf in result.get("_configured", []) if not _accounted(leaf)})
     if unhandled:
         ir["cache_behaviors"][0]["non_convertible"].append({
             "cf_source_rule": result.get("cf_source_rule", ""),
             "description": result.get("description", ""),
-            "reason": (f"cache rule setting(s) {sorted(set(unhandled))} have no "
-                       "CloudFront mapping and were not converted (other settings on "
-                       "the same rule were)"),
+            "reason": (f"cache rule setting leaf(s) {unhandled} have no CloudFront "
+                       "mapping and were not converted (other settings on the same "
+                       "rule were)"),
         })
 
 

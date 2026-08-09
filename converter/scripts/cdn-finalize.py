@@ -265,6 +265,12 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         lines.append(f"| {sd.get('hostname', '?')} | — | — | — | — | ⏭ SKIPPED: {sd.get('reason', '?')[:40]} |")
 
     lines += ["", "---", "", "## Non-Convertible Items", ""]
+    lines += [
+        "_Conversion outcomes: **EXACT** — faithful, counted as success (not listed "
+        "here). **LOSSY_WITH_WARNING** — deployed but with a known behavioral gap; see "
+        "the Warnings section. **NON_CONVERTIBLE** — not emitted; listed below._",
+        "",
+    ]
 
     nc_rows = []
     for ir in all_irs:
@@ -1005,11 +1011,17 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     # deploy concerns aren't buried in the report / diluted by later steps).
     total_nc = sum(len(b.get("non_convertible", []))
                    for ir in all_irs for b in ir.get("cache_behaviors", []))
+    # LOSSY_WITH_WARNING: converted-and-deployed but with a KNOWN behavioral gap the
+    # user must accept (e.g. a header a viewer CFF won't apply to error responses).
+    # Counted SEPARATELY from clean warnings so it's never conflated with success —
+    # only EXACT conversions (neither non_convertible nor lossy) are clean.
+    lossy_items = [w for w in all_warnings if str(w).startswith("LOSSY_WITH_WARNING")]
     summary = {
         "domains": len(all_irs),
         "total_policies": len(manifest),
         "non_convertible_items": total_nc,
-        "warnings": all_warnings,               # quota + shadow + limit warnings
+        "lossy_items": len(lossy_items),          # known-gap conversions (not clean successes)
+        "warnings": all_warnings,               # quota + shadow + limit + lossy warnings
         "s3_oac_bucket_policy_required": has_s3,  # every S3 origin needs a manual bucket policy
         "skipped_domains": [sd.get("hostname", "?") for sd in skipped_domains],
     }
