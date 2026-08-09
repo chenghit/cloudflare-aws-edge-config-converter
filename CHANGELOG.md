@@ -1,15 +1,5 @@
 # Changelog
 
-## 2026-08-09
-
-### CDN converter: native-rule placement follow-ups (review round 5)
-
-Remaining fixes after the root-cause placement change in the previous commit.
-
-- A conditional security/CORS header now falls back to a viewer-response CloudFront Function (which gates on the condition) instead of being dropped as non-convertible. A conditional Cloud Connector origin switch stays non-convertible, now with a reason explaining why a CFF can't carry it (unsigned S3/R2/GCS/Azure origin → 403). Confirmed via dual AWS subagents.
-- Site-wide native settings (TTL / compression / security headers) overlay onto ordered behaviors, which are first-match and don't inherit the default; the behavior's own value still wins.
-- Ordered behaviors emit most-specific-first so a broad pattern can't shadow a narrower one; a `full_uri` pattern with a query (`?`) is no longer treated as single-path; config-rule ssl/min_tls accepts a pure-host OR/NOT scope; custom-error rules screen unmappable fields like the other processors.
-
 ## 2026-08-08
 
 ### CDN converter: per-distribution ACM certificate discovery (fixes multi-level subdomains)

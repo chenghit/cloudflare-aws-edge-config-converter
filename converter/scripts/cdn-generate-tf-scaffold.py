@@ -164,18 +164,6 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
     behaviors = ir["cache_behaviors"]
     default_beh = next(b for b in behaviors if b["path_pattern"] == "*")
     ordered_behs = [b for b in behaviors if b["path_pattern"] != "*"]
-    # CloudFront evaluates ordered behaviors top-to-bottom and stops at the FIRST
-    # matching PathPattern, so a more specific pattern MUST precede a broader one
-    # that also matches it — else the specific one is unreachable (e.g. /api/* first
-    # would shadow /api/private/*). Sort most-specific-first: a pattern with no
-    # wildcard is most specific; otherwise by the literal prefix length before the
-    # first `*` (longer prefix = more specific), then lexately for stability.
-    def _specificity(b):
-        p = b["path_pattern"]
-        star = p.find("*")
-        prefix_len = len(p) if star == -1 else star
-        return (star != -1, -prefix_len, p)  # exact (no *) first; then longer prefix
-    ordered_behs = sorted(ordered_behs, key=_specificity)
     ds = default_beh["distribution_settings"]
     has_s3 = any(o["s3_origin"] for o in origins)
     orp_headers = orp_header_union(ir)

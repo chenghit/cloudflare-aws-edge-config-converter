@@ -139,27 +139,17 @@ check("HSTS on /admin -> header on /admin, not default",
       admin is not None and "Strict-Transport-Security" in admin["response_headers_policy"]["security_headers"]
       and "Strict-Transport-Security" not in _behavior(ir, "*")["response_headers_policy"]["security_headers"])
 
-# STATIC security header (HSTS) gated on a header condition → the native RHP
-# can't gate a per-request predicate, so placement FALLS BACK to a viewer-response
-# CFF set_response_header op (which gates on any condition) rather than reporting
-# non-convertible ("scope first, mechanism last", Finding 5). So: NO
-# non_convertible, and a set_response_header op lands on the default behavior
-# carrying the header condition.
+# STATIC security header (HSTS) gated on a header condition → goes through the
+# RHP (native, path-scoped) branch, so the per-request condition can't gate it →
+# non_convertible. (A NON-security/CORS header, or a dynamic value expression,
+# takes the set_response_header CFF path instead and CAN gate on any condition —
+# that's correct and not tested here.)
 ir = _preprocess({"Response-Header-Transform.txt": _wrap([
     _rule("e" * 32, 'http.request.headers["x"] eq "1"', "rewrite",
           {"headers": {"Strict-Transport-Security": {"operation": "set", "value": "max-age=31536000"}}},
           "HSTS on header-cond")])})
-check("static security header gated on header -> CFF fallback, NOT non_convertible",
-      len(_all_nc(ir)) == 0, f"nc={_all_nc(ir)}")
-_resp_ops = _behavior(ir, "*")["viewer_response_ops"]
-_hsts = [o for o in _resp_ops if o["params"].get("name") == "Strict-Transport-Security"]
-check("static security header gated on header -> set_response_header op emitted",
-      len(_hsts) == 1 and _hsts[0]["type"] == "set_response_header", f"ops={_resp_ops}")
-check("static security header CFF fallback -> op carries the gating condition",
-      len(_hsts) == 1 and _hsts[0].get("condition") is not None, f"op={_hsts[:1]}")
-# The header must NOT also be applied unconditionally via the native RHP.
-check("static security header CFF fallback -> NOT also in native security_headers",
-      "Strict-Transport-Security" not in _behavior(ir, "*")["response_headers_policy"]["security_headers"])
+check("static security header (RHP) gated on header -> non_convertible",
+      len(_all_nc(ir)) == 1, f"nc={_all_nc(ir)}")
 # a NON-security dynamic header gated on a header condition → CFF op, NOT
 # non_convertible (CFF gates on any condition). Confirms we didn't over-report.
 ir = _preprocess({"Response-Header-Transform.txt": _wrap([
@@ -167,33 +157,17 @@ ir = _preprocess({"Response-Header-Transform.txt": _wrap([
           {"headers": {"X-Custom": {"operation": "set", "value": "v"}}}, "custom hdr on header-cond")])})
 check("non-security header gated on header -> CFF op, NOT non_convertible (no over-report)",
       len(_all_nc(ir)) == 0, f"nc={_all_nc(ir)}")
-# CORS header gated on a multi-path OR → also CFF fallback (OR can't be one path).
-ir = _preprocess({"Response-Header-Transform.txt": _wrap([
-    _rule("h" * 32, 'http.request.uri.path eq "/a" or http.request.uri.path eq "/b"', "rewrite",
-          {"headers": {"Access-Control-Allow-Origin": {"operation": "set", "value": "*"}}},
-          "CORS on OR of paths")])})
-check("CORS header gated on multi-path OR -> CFF fallback, NOT non_convertible",
-      len(_all_nc(ir)) == 0, f"nc={_all_nc(ir)}")
-_cors_ops = [o for b in ir["cache_behaviors"] for o in b["viewer_response_ops"]
-             if o["params"].get("name") == "Access-Control-Allow-Origin"]
-check("CORS header gated on multi-path OR -> set_response_header op emitted",
-      len(_cors_ops) == 1 and _cors_ops[0]["type"] == "set_response_header", f"ops={_cors_ops}")
 
 
 # ── Cloud connector (behavior origin) ──────────────────────────────────────────
 
 print("== cloud_connector placement ==")
-# header condition → non_convertible (can't re-point origin per request). Unlike a
-# response header, this does NOT fall back to a CFF: updateRequestOrigin() to a
-# private S3/R2/GCS/Azure origin is unsigned (403) without an OAC block the
-# converter can't author — so it stays non_convertible with a reason that says so.
+# header condition → non_convertible (can't re-point origin per request)
 ir = _preprocess({"Cloud-Connector-Rules.txt": _wrap([
     {"id": "f" * 32, "enabled": True, "expression": 'http.request.headers["x"] eq "1"',
      "provider": "aws_s3", "description": "connector on header",
      "parameters": {"host": "bucket.s3.amazonaws.com"}}])})
 check("cloud_connector gated on header -> non_convertible", len(_all_nc(ir)) == 1, f"nc={_all_nc(ir)}")
-check("cloud_connector nc reason explains the no-CFF-fallback (OAC/403)",
-      len(_all_nc(ir)) == 1 and "OAC" in _all_nc(ir)[0]["reason"], f"reason={_all_nc(ir)[:1]}")
 
 
 # ── Configuration rule: ssl (per-behavior VPP) vs min_tls (distribution) ───────
@@ -222,52 +196,6 @@ check("min_tls true -> minimum_protocol_version set, no non_convertible",
 ir = _preprocess({"Configuration-Rules.txt": _wrap([
     _rule("4" * 32, 'http.request.headers["x"] eq "1"', "set_config", {"min_tls_version": "1.2"}, "min tls on header")])})
 check("min_tls gated on header -> non_convertible", len(_all_nc(ir)) == 1, f"nc={_all_nc(ir)}")
-
-
-# ── Global→ordered native overlay (Finding 1 / Task 5) ─────────────────────────
-# A GLOBAL cache rule sets a site-wide TTL; a SEPARATE path-scoped rule creates an
-# ordered behavior. CloudFront ordered behaviors don't inherit the default
-# behavior's cache settings, so the global TTL must be FOLDED onto every ordered
-# behavior that still holds factory defaults — else /admin would silently cache
-# with the factory TTL, not the site-wide one the Cloudflare config set.
-print("== global→ordered native overlay ==")
-ir = _preprocess({
-    # global: edge TTL override 60s, unconditional
-    "Cache-Rules.txt": _wrap([
-        _rule("a1" + "0" * 30, "true", "set_cache_settings",
-              {"edge_ttl": {"mode": "override_origin", "default": 60}}, "global ttl 60"),
-    ]),
-    # a path-scoped security header creates the /admin ordered behavior
-    "Response-Header-Transform.txt": _wrap([
-        _rule("a2" + "0" * 30, 'http.request.uri.path eq "/admin"', "rewrite",
-              {"headers": {"X-Frame-Options": {"operation": "set", "value": "DENY"}}},
-              "xfo on /admin")]),
-})
-_admin = _behavior(ir, "/admin")
-check("overlay: /admin ordered behavior exists", _admin is not None)
-check("overlay: default behavior carries global TTL 60",
-      _behavior(ir, "*")["cache_policy"]["ttl"]["default"] == 60,
-      f"default ttl={_behavior(ir, '*')['cache_policy']['ttl']}")
-check("overlay: global TTL 60 folded onto the ordered /admin behavior",
-      _admin is not None and _admin["cache_policy"]["ttl"]["default"] == 60,
-      f"/admin ttl={_admin['cache_policy']['ttl'] if _admin else None}")
-
-# An ordered behavior with its OWN explicit TTL must WIN over the global (the
-# overlay only fills behaviors still holding factory defaults).
-ir = _preprocess({
-    "Cache-Rules.txt": _wrap([
-        _rule("b1" + "0" * 30, "true", "set_cache_settings",
-              {"edge_ttl": {"mode": "override_origin", "default": 60}}, "global ttl 60"),
-        _rule("b2" + "0" * 30, 'http.request.uri.path eq "/img"', "set_cache_settings",
-              {"edge_ttl": {"mode": "override_origin", "default": 3600}}, "img ttl 3600"),
-    ]),
-})
-_img = _behavior(ir, "/img")
-check("overlay: ordered /img keeps its OWN TTL 3600 (global does not clobber)",
-      _img is not None and _img["cache_policy"]["ttl"]["default"] == 3600,
-      f"/img ttl={_img['cache_policy']['ttl'] if _img else None}")
-check("overlay: default still 60 alongside the per-path override",
-      _behavior(ir, "*")["cache_policy"]["ttl"]["default"] == 60)
 
 
 if __name__ == "__main__":

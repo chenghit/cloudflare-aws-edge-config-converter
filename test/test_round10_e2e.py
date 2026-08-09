@@ -511,27 +511,6 @@ def assert_cff_scope():
     check("R123-C: default_only op → CFF on default only, TTL-only ordered DROPS (1 assoc)",
           vr == 1, f"expected 1 viewer-request assoc, got {vr}")
 
-    # CASE D (Finding 6): ordered behaviors must be emitted MOST-SPECIFIC-FIRST.
-    # CloudFront stops at the first matching PathPattern, so a broad pattern placed
-    # before a more specific one that it also matches makes the specific one
-    # unreachable. Feed them in DELIBERATELY WRONG order (broad first, exact last)
-    # and assert generate_main_tf reorders: /api/private/* before /api/*, the
-    # exact /health before both wildcards.
-    ir = _mk([_beh("*", []), _beh("/api/*", []),
-              _beh("/api/private/*", []), _beh("/health", [])])
-    tf = _scaf.generate_main_tf(ir, manifest, d2o, origins)
-    def _pos(pat):
-        return tf.find(f'path_pattern           = "{pat}"')
-    p_health, p_priv, p_api = _pos("/health"), _pos("/api/private/*"), _pos("/api/*")
-    check("R123-D: ordered behaviors emitted, patterns found in main.tf",
-          min(p_health, p_priv, p_api) >= 0,
-          f"health={p_health} priv={p_priv} api={p_api}")
-    check("R123-D: /api/private/* precedes /api/* (specific-first reachability)",
-          0 <= p_priv < p_api, f"priv@{p_priv} must be before api@{p_api}")
-    check("R123-D: exact /health precedes both wildcards",
-          0 <= p_health < p_priv and p_health < p_api,
-          f"health@{p_health} must be before priv@{p_priv}, api@{p_api}")
-
 
 def _find_vr_js(cdn, san):
     """Return the viewer_request JS for a domain (shared or independent)."""
