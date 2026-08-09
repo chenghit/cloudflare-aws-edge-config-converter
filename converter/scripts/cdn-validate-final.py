@@ -10,22 +10,8 @@ Exit 0 = all PASS, 1 = any FAIL, 2 = fatal error.
 """
 import json, sys, os, re
 
-def specificity_score(pattern):
-    """Compute specificity score for a CloudFront path pattern."""
-    if pattern == "*":
-        return 0
-    if pattern == "/*":
-        return 1
-    if pattern.startswith("*.") and "/" not in pattern:
-        return 5
-    wc_pos = -1
-    for i, ch in enumerate(pattern):
-        if ch in ("*", "?"):
-            wc_pos = i
-            break
-    if wc_pos == -1:
-        return len(pattern) * 10 + 100
-    return wc_pos * 10
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cdn_common import pattern_contains
 
 
 def validate_domain(ir, manifest_policies):
@@ -44,18 +30,27 @@ def validate_domain(ir, manifest_policies):
             )
             break
 
-    # Check 2: specificity sort correct (higher score = lower precedence number)
+    # Check 2: most-specific-first ordering (exact CloudFront-glob containment,
+    # shared with finalize/scaffold — replaces the `?`-blind specificity heuristic).
+    # A behavior must never be preceded by a LATER one that CONTAINS it: if an
+    # earlier pattern is strictly contained by a later pattern, the later (broader)
+    # one would have to sit first to not shadow it — so this ordering is wrong.
     non_default = [b for b in behaviors if b["path_pattern"] != "*"]
-    for i in range(1, len(non_default)):
-        score_prev = specificity_score(non_default[i - 1]["path_pattern"])
-        score_curr = specificity_score(non_default[i]["path_pattern"])
-        if score_curr > score_prev:
-            errors.append(
-                f"Check2: specificity sort wrong at index {i}: "
-                f"'{non_default[i]['path_pattern']}' (score={score_curr}) "
-                f"should come before '{non_default[i-1]['path_pattern']}' (score={score_prev})"
-            )
-            break
+    for i in range(len(non_default)):
+        pi = non_default[i]["path_pattern"]
+        for j in range(i + 1, len(non_default)):
+            pj = non_default[j]["path_pattern"]
+            # pj (later) strictly contains pi (earlier) → pi should be first: OK.
+            # pi (earlier) strictly contains pj (later) → broader-first → WRONG.
+            if pattern_contains(pi, pj) and not pattern_contains(pj, pi):
+                errors.append(
+                    f"Check2: ordering wrong: '{pi}' (index {i}) contains "
+                    f"'{pj}' (index {j}) but precedes it — the broader pattern would "
+                    f"shadow the narrower under CloudFront first-match")
+                break
+        else:
+            continue
+        break
 
     # Check 3: cache behavior count ≤ 75
     if len(behaviors) > 75:

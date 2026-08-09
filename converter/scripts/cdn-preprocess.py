@@ -13,9 +13,10 @@ from cdn_expr_parser import (
     parse_expression, extract_orp_headers, extract_orp_headers_from_raw,
     extract_kvs_triggers, extract_host_filter, extract_path_pattern_single,
     iter_condition_children, host_filter_applies, host_leaf_is_routing,
-    condition_has_path_field, CACHE_BYPASS_HEADER,
+    CACHE_BYPASS_HEADER,
 )
-from cdn_common import emit_result, derive_cert_domain
+from cdn_common import (emit_result, derive_cert_domain,
+                        pattern_contains, patterns_overlap)
 from cdn_rule_processors import (
     process_redirect_rule, process_rewrite_rule, process_config_rule,
     process_origin_rule, process_cache_rule, process_request_header_transform,
@@ -267,12 +268,37 @@ def make_empty_ir(domain_config):
             },
             "kvs_data": [],
             "custom_error_responses": [],
+            # Non-fatal conversion warnings surfaced in the report (e.g. a native
+            # path behavior from a case-INSENSITIVE Cloudflare wildcard — CloudFront
+            # PathPattern is case-sensitive, so case variants won't match).
+            "conversion_warnings": [],
             "lambda_edge": {
                 "origin_request": None,
                 "origin_response": None,
             },
         },
         "cache_behaviors": [],
+        # Ordered log of NATIVE effects (TTL/cache-key/compression/caching-disabled/
+        # response-headers/origin) in SOURCE-RULE order. Native settings are NOT
+        # written onto behaviors during the rule loop; they are recorded here and
+        # replayed per behavior afterward (see _replay_native_effects). This is what
+        # makes Cloudflare's rule-stacking correct on CloudFront: a behavior's
+        # effective value = the LAST source-order rule whose scope CONTAINS that
+        # behavior's path pattern (default `*` inherits nothing — every behavior is
+        # computed independently). Dropped from the IR before it is written out.
+        "_native_effects": [],
+        # Rule-accounting sets for the every-rule-has-an-output invariant (both
+        # internal, stripped before write): IDs that entered processing (passed the
+        # host filter) vs IDs that produced any output.
+        "_entered_rule_ids": set(),
+        "_accounted_rule_ids": set(),
+        # Monotonic source-order counter. Every viewer op and native effect is
+        # stamped with `seq` in the order rules are PROCESSED (Cloudflare phase
+        # order × in-phase file order). The JS generator emits ops sorted by seq —
+        # NOT by cache-behavior order — so first-match redirects and last-wins
+        # header transforms keep their true Cloudflare precedence regardless of how
+        # behaviors are later sorted for CloudFront routing.
+        "_seq": 0,
     }
 
 
@@ -382,6 +408,9 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
             if not rule_applies_to_domain(hosts, hostname, apex):
                 continue
 
+            if rule.get("id"):
+                ir["_entered_rule_ids"].add(rule["id"])
+            ir["_seq"] += 1  # source-processing order for this rule
             result = processor(rule, ip_lists, phase)
 
             # This rule is now scoped to this host's distribution, so the host
@@ -408,6 +437,9 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
         hosts = extract_host_filter(cond, raw_expr or expr)
         if not rule_applies_to_domain(hosts, hostname, apex):
             continue
+        if rule.get("id"):
+            ir["_entered_rule_ids"].add(rule["id"])
+        ir["_seq"] += 1
         result = process_cloud_connector(rule, ip_lists, "")
         cond = _strip_host_condition(cond)
         _strip_host_in_result(result)
@@ -422,6 +454,18 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
     # Process default cache behavior (Lambda@Edge origin-response)
     if domain_config.get("apply_default_cache_behavior"):
         _process_default_cache_behavior(ir, hostname, domain_config, origin_content, all_rules, apex)
+
+    # Before replay: if a header name is handled by BOTH the RHP and the CFF, move
+    # its RHP effects into the CFF so AWS's fixed RHP-then-CFF order can't reverse
+    # the source (Cloudflare) order for that header.
+    _reconcile_mixed_op_headers(ir, domain_config, origin_content)
+
+    # Replay recorded NATIVE effects onto every behavior in source-rule order (F2).
+    # MUST run after ALL effects are recorded (rules + cloud connector + managed
+    # transforms) and after the behavior set is materialized, but BEFORE the ORP /
+    # KVS scans below (they read the finished behaviors). This is what makes
+    # Cloudflare rule-stacking correct on CloudFront's no-inheritance behaviors.
+    _replay_native_effects(ir, domain_config, origin_content)
 
     # Collect ORP headers across all behaviors
     for beh in ir["cache_behaviors"]:
@@ -473,6 +517,20 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
             if CACHE_BYPASS_HEADER not in hdrs:
                 hdrs.append(CACHE_BYPASS_HEADER)
 
+    # INVARIANT (reviewer's "every enabled rule must have an output"): every rule
+    # that entered processing must leave a trace — a native effect, a viewer op, a
+    # distribution setting, a custom-error entry, KVS data, or a non_convertible
+    # record. A rule ID that produced NOTHING was silently dropped (the whole class
+    # of bug this refactor targets). Surface any such orphan as non_convertible so
+    # it lands in the report rather than vanishing. `_accounted_rule_ids` is
+    # populated as outputs are produced; `_entered_rule_ids` as rules pass the host
+    # filter. (Both internal, stripped below with _native_effects.)
+    _enforce_every_rule_accounted(ir)
+
+    # Internal bookkeeping — drop from the emitted IR. (`seq` stays ON each op —
+    # the JS generator sorts by it; it's harmless metadata on the persisted op.)
+    for k in ("_native_effects", "_entered_rule_ids", "_accounted_rule_ids", "_seq"):
+        ir.pop(k, None)
     return ir
 
 
@@ -486,6 +544,231 @@ def _mark_result_non_convertible(ir, result, reason, expr=None):
         "description": result.get("description", ""),
         "reason": f"{reason}. Scope: {result.get('raw_expression') or expr or '(complex)'}",
     })
+
+
+# ── Native-effect engine (F2: replay in source-rule order per behavior) ────────
+# A NATIVE effect is a CloudFront setting that lives ON a cache behavior (not in the
+# shared viewer CFF): edge TTL, cache-key, compression, caching-disabled, response-
+# headers policy entries, and the behavior's origin. Cloudflare rules STACK — a
+# later same-phase rule overrides an earlier one for requests both match — but
+# CloudFront picks ONE behavior per request and it inherits nothing from the
+# default. So we can't write these settings as we see each rule; we record them in
+# source order and, once the full behavior set is known, replay onto each behavior
+# every effect whose SCOPE PATTERN contains that behavior's path (last write wins).
+
+
+def _resolved_vpp(ir):
+    """The distribution's resolved ViewerProtocolPolicy (from the default behavior).
+    Config rules (phase 3) set it before cache rules (phase 5) are placed, so at
+    placement time this is the effective value for the full_uri https-scheme check."""
+    return ir["cache_behaviors"][0]["distribution_settings"].get(
+        "viewer_protocol_policy", "redirect-to-https")
+
+
+def _warn_case_insensitive_native(ir, condition, pattern, source):
+    """Emit a non-fatal case-difference warning when a NATIVE path pattern is
+    derived from a case-INSENSITIVE Cloudflare wildcard (per user's decision: still
+    convert natively, but surface the divergence — CloudFront PathPattern is
+    case-sensitive, so `/Admin/*` won't match a `/admin/x` request Cloudflare would).
+    De-duplicated per (rule, pattern)."""
+    if not isinstance(condition, dict) or "logic" in condition:
+        return
+    if not _pattern_case_insensitive_letters(condition, pattern):
+        return
+    rid = source.get("cf_source_rule", "")
+    msg = (f"Rule {rid or '(cache)'}: path pattern '{pattern}' comes from a "
+           f"case-INSENSITIVE Cloudflare `wildcard`, but the CloudFront cache "
+           f"behavior is CASE-SENSITIVE — requests with different capitalization "
+           f"(e.g. '{pattern.upper()}') that Cloudflare matched will NOT match this "
+           f"behavior. If your paths can vary in case, switch the source rule to "
+           f"`strict wildcard` or normalize case at the origin.")
+    warns = ir["metadata"].setdefault("conversion_warnings", [])
+    if msg not in warns:
+        warns.append(msg)
+
+
+def _record_native_effect(ir, scope_pattern, kind, params, source):
+    """Append a native effect to the ordered replay log. `scope_pattern` is the
+    CloudFront path pattern the effect applies to (`*` = whole distribution).
+    `kind` selects the applier branch in _apply_native_effect; `source` carries
+    cf_source_rule/description for non-convertible reporting."""
+    ir["_native_effects"].append({
+        "scope": scope_pattern, "kind": kind, "params": params,
+        "cf_source_rule": source.get("cf_source_rule", ""),
+        "description": source.get("description", ""),
+        "seq": ir.get("_seq", 0),   # source order (replay is order-sensitive: last wins)
+    })
+
+
+def _apply_native_effect(beh, kind, params):
+    """Apply one native effect onto one behavior. Pure w.r.t. the behavior dict —
+    the replay pass decides WHICH behaviors this runs on. Last-writer-wins is a
+    property of replay ORDER, so each branch just overwrites."""
+    cp = beh["cache_policy"]
+    if kind == "ttl_override":
+        # override_origin forces a fixed TTL — min=default=max is the only way
+        # (a >max value would otherwise fail CloudFront's create API).
+        ttl = params["ttl"]
+        cp["ttl"]["min"] = cp["ttl"]["default"] = cp["ttl"]["max"] = ttl
+    elif kind == "ttl_respect_origin":
+        # RESET to factory TTL (CachingOptimized-like defaults) — undoes a prior
+        # override at this scope. Must match make_default_behavior's ttl.
+        cp["ttl"]["min"], cp["ttl"]["default"], cp["ttl"]["max"] = 0, 7200, 86400
+    elif kind == "caching_enabled":
+        cp["caching_disabled"] = False       # RESET: undoes a prior cache=false
+    elif kind == "cache_key":
+        for k in ("query_strings", "query_strings_list", "query_strings_exclude", "headers"):
+            if k in params:
+                cp["cache_key"][k] = params[k]
+    elif kind == "caching_disabled":
+        cp["caching_disabled"] = True
+    elif kind == "compression":
+        cp["enable_gzip"] = params.get("enable_gzip", True)
+        cp["enable_brotli"] = params.get("enable_brotli", True)
+    elif kind == "rhp_security":
+        sh = beh["response_headers_policy"]["security_headers"]
+        entry = {"value": params["value"], "operation": params.get("operation", "set")}
+        if params.get("_managed"):
+            sh.setdefault(params["name"], entry)   # managed default: explicit rule wins
+        else:
+            sh[params["name"]] = entry
+    elif kind == "rhp_cors":
+        rhp = beh["response_headers_policy"]
+        if rhp["cors"] is None:
+            rhp["cors"] = {}
+        rhp["cors"][params["name"]] = params["value"]
+        # cors_config.origin_override is ONE flag for the whole CORS config, not per
+        # header — so it can't track per-header/per-rule set-vs-add precedence. Any
+        # `add` anywhere makes it False (conservative: don't override the origin's
+        # CORS headers). A later `set` does NOT flip it back True, because that would
+        # also change behavior for the OTHER headers sharing this flag. When set/add
+        # are genuinely mixed the faithful answer isn't representable in one flag;
+        # False is the safe choice (deferring to origin). Documented limitation.
+        if params.get("operation") == "add":
+            rhp["cors"]["_origin_override"] = False
+    elif kind == "rhp_custom":
+        beh["response_headers_policy"]["custom_headers"].append({
+            "name": params["name"], "value": params["value"],
+            "operation": params.get("operation", "set"),
+        })
+    elif kind == "origin":
+        beh["origin"]["domain"] = params.get("origin_host", beh["origin"]["domain"])
+        beh["origin"]["s3_origin"] = "s3." in (params.get("origin_host") or "")
+
+
+def _replay_native_effects(ir, domain_config, origin_content):
+    """Compute each behavior's EFFECTIVE native config by replaying every recorded
+    effect, in source-rule order (last write wins — Cloudflare rule stacking), onto
+    the behaviors it applies to. Effects that name a concrete path first MATERIALIZE
+    that behavior, so `TTL on /files/*` creates the /files/* behavior.
+
+    For each (effect scope S, behavior pattern B), exactly one of:
+      - pattern_contains(S, B): every request routed to B matches S → APPLY.
+      - pattern_contains(B, S) (B strictly broader): S is a sub-region of B that is
+        served by ITS OWN (more-specific) behavior, so B never actually serves an
+        S request → the effect does NOT apply to B and is NOT a conflict. (This is
+        why an ordered `/img` effect doesn't touch — or flag — the default `*`.)
+      - otherwise, if they still OVERLAP: a genuine cross-overlap (e.g. `*.js` vs
+        `/api/*`) — some requests match both, route to whichever behavior is listed
+        first, and the effect can't be scoped to just them. CloudFront can't express
+        a native setting on part of a behavior's traffic → report non-convertible
+        rather than widen or drop.
+      - disjoint: nothing to do.
+    """
+    effects = ir.get("_native_effects", [])
+    for e in effects:
+        if e["scope"] != "*":
+            find_or_create_behavior(ir, e["scope"], domain_config, origin_content)
+
+    for beh in ir["cache_behaviors"]:
+        bp = beh["path_pattern"]
+        for e in effects:
+            scope = e["scope"]
+            if pattern_contains(scope, bp):
+                _apply_native_effect(beh, e["kind"], e["params"])
+            elif pattern_contains(bp, scope):
+                continue                     # S is a narrower sibling behavior's job
+            elif patterns_overlap(scope, bp):
+                beh["non_convertible"].append({
+                    "cf_source_rule": e["cf_source_rule"],
+                    "description": e["description"],
+                    "reason": (f"native {e['kind']} scoped to '{scope}' cross-overlaps "
+                               f"behavior '{bp}' (neither contains the other) — "
+                               "CloudFront can't apply a native setting to only part "
+                               "of a behavior's traffic; scope them so one path "
+                               "contains the other, or apply it at the origin"),
+                })
+
+
+def _reconcile_mixed_op_headers(ir, domain_config, origin_content):
+    """AWS executes a Response Headers Policy BEFORE the viewer-response function.
+    So if the SAME header name is set via the RHP (native) but ALSO removed/changed
+    via a CFF op (e.g. `remove` isn't RHP-expressible), the two mechanisms run in
+    RHP-then-CFF order — which REVERSES Cloudflare's source order when the CFF op
+    came from an EARLIER rule. Fix: when a header name has both an RHP effect and a
+    CFF response-header op, move ALL of that header's RHP effects into the CFF too,
+    so every op for the header lives in one mechanism and emits in `seq` order
+    (last-wins preserved). Runs before replay, so the moved effects never reach the
+    RHP."""
+    # header names (lowercased) that already have a CFF response-header op
+    cff_hdr_names = set()
+    for beh in ir["cache_behaviors"]:
+        for op in beh.get("viewer_response_ops", []):
+            if op.get("type", "").endswith("_response_header"):
+                nm = op.get("params", {}).get("name")
+                if nm:
+                    cff_hdr_names.add(nm.lower())
+    if not cff_hdr_names:
+        return
+    kept = []
+    for e in ir.get("_native_effects", []):
+        if e["kind"] in ("rhp_security", "rhp_cors") and not e["params"].get("_managed") \
+                and e["params"].get("name", "").lower() in cff_hdr_names:
+            # Move this header's native set/add into the CFF as a source-ordered op.
+            op_type = "add_response_header" if e["params"].get("operation") == "add" \
+                else "set_response_header"
+            beh = find_or_create_behavior(ir, e["scope"], domain_config, origin_content)
+            beh["viewer_response_ops"].append({
+                "type": op_type,
+                "cf_source_rule": e.get("cf_source_rule", ""),
+                "description": e.get("description", ""),
+                "condition": {"always": True},
+                "raw_expression": None,
+                "params": {"name": e["params"]["name"], "value": e["params"]["value"]},
+                "scope_pattern": e["scope"],
+                "seq": e.get("seq", 0),
+            })
+        else:
+            kept.append(e)
+    ir["_native_effects"] = kept
+
+
+def _enforce_every_rule_accounted(ir):
+    """Every rule that entered processing (passed the host filter) must leave a
+    trace: a native effect, a viewer op, a distribution/custom-error/KVS output, or
+    a non_convertible record. A rule ID with NO trace was silently dropped — the
+    exact failure class this refactor targets — so record it as non_convertible
+    rather than letting it vanish. Scans all output sinks for cf_source_rule."""
+    accounted = set(ir.get("_accounted_rule_ids", set()))
+    for e in ir.get("_native_effects", []):
+        accounted.add(e.get("cf_source_rule"))
+    for beh in ir["cache_behaviors"]:
+        for nc in beh.get("non_convertible", []):
+            accounted.add(nc.get("cf_source_rule"))
+        for op in beh.get("viewer_request_ops", []) + beh.get("viewer_response_ops", []):
+            accounted.add(op.get("cf_source_rule"))
+    # metadata sinks (custom errors, kvs data carry the source in their own ids;
+    # distribution settings are recorded in _accounted_rule_ids at placement time).
+    orphans = ir.get("_entered_rule_ids", set()) - accounted
+    for rid in sorted(orphans):
+        ir["cache_behaviors"][0]["non_convertible"].append({
+            "cf_source_rule": rid,
+            "description": "(rule produced no output)",
+            "reason": ("INTERNAL: this enabled rule matched the domain but produced "
+                       "no CloudFront output (native setting, function op, or "
+                       "non-convertible record) — a silent drop. Reported so it is "
+                       "never lost; please file it as a converter bug."),
+        })
 
 
 def _place_result(ir, result, domain_config, origin_content, cond, expr):
@@ -510,57 +793,47 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         value = result.get("value")
         if setting in default_beh["distribution_settings"]:
             default_beh["distribution_settings"][setting] = value
+        if result.get("cf_source_rule"):
+            ir.setdefault("_accounted_rule_ids", set()).add(result["cf_source_rule"])
         return
 
     if rtype == "custom_error_response":
         ir["metadata"]["custom_error_responses"].append(result["params"])
+        if result.get("cf_source_rule"):
+            ir.setdefault("_accounted_rule_ids", set()).add(result["cf_source_rule"])
         return
 
     if rtype == "compression_setting":
-        # Compression is a cache-policy attribute (native, path-scoped only). A
-        # condition that can't reduce to one path can't gate it — report rather
-        # than apply it to `*` (which would toggle compression site-wide).
-        path, reason = native_placement(result.get("condition") or cond)
+        # Compression is a cache-policy attribute (native). Record it as an ordered
+        # native effect scoped to its path; the replay pass applies it to every
+        # behavior that path contains (and reports a cross-overlap). A scope that
+        # isn't a single pattern (raw / multi-path OR) can't be honored → report.
+        scope, reason = native_placement(result.get("condition") or cond, _resolved_vpp(ir))
         if reason:
             _mark_result_non_convertible(ir, result, reason, expr)
             return
-        beh = find_or_create_behavior(ir, path, domain_config, origin_content)
-        params = result.get("params", {})
-        beh["cache_policy"]["enable_gzip"] = params.get("enable_gzip", True)
-        beh["cache_policy"]["enable_brotli"] = params.get("enable_brotli", True)
+        _warn_case_insensitive_native(ir, result.get("condition") or cond, scope, result)
+        _record_native_effect(ir, scope, "compression", result.get("params", {}), result)
         return
 
     if rtype == "response_headers_policy":
-        # A response-headers policy is native and attaches to a cache BEHAVIOR
-        # (chosen by path). A condition that can't reduce to one path can't gate
-        # it — a header/geo predicate would silently become unconditional, and a
-        # path condition would otherwise be dropped and the header applied to the
-        # WRONG (default) behavior. Reduce → place on that behavior; else report.
-        path, reason = native_placement(result.get("condition") or cond)
+        # A response-headers policy is native (per behavior). Record it as an
+        # ordered native effect; replay attaches it to every behavior its scope
+        # contains. F1: gate on the RESULT's own screened condition, never the
+        # outer re-parsed cond.
+        scope, reason = native_placement(result.get("condition"), _resolved_vpp(ir))
         if reason:
             _mark_result_non_convertible(ir, result, reason, expr)
             return
-        beh = find_or_create_behavior(ir, path, domain_config, origin_content)
+        _warn_case_insensitive_native(ir, result.get("condition"), scope, result)
         params = result["params"]
-        op = params.get("operation", "set")
         if params.get("is_cors"):
-            if beh["response_headers_policy"]["cors"] is None:
-                beh["response_headers_policy"]["cors"] = {}
-            beh["response_headers_policy"]["cors"][params["name"]] = params["value"]
-            # Track if any CORS header uses "add" (origin_override = false).
-            # If mixed set/add across multiple rules, we use false (conservative
-            # — don't override origin). CloudFront cors_config.origin_override
-            # is per-config, not per-header.
-            if op == "add":
-                beh["response_headers_policy"]["cors"]["_origin_override"] = False
+            kind = "rhp_cors"
         elif params.get("is_security"):
-            beh["response_headers_policy"]["security_headers"][params["name"]] = {
-                "value": params["value"], "operation": op,
-            }
+            kind = "rhp_security"
         else:
-            beh["response_headers_policy"]["custom_headers"].append({
-                "name": params["name"], "value": params["value"], "operation": params["operation"],
-            })
+            kind = "rhp_custom"
+        _record_native_effect(ir, scope, kind, params, result)
         return
 
     if rtype == "serve_error_inline":
@@ -607,9 +880,12 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
             _mark_cache_non_convertible(ir, result, expr)
             return
         if bcond is None or bcond.get("always"):
+            # Unconditional (after host-strip) → CachingDisabled on the scoped
+            # behavior. Record as a native effect so it stacks in source order and
+            # covers every behavior its path contains (a site-wide `*` bypass turns
+            # caching off on every ordered behavior too — none inherit the default).
             path = _extract_path_from_result(result, cond, expr)
-            beh = find_or_create_behavior(ir, path, domain_config, origin_content)
-            beh["cache_policy"]["caching_disabled"] = True
+            _record_native_effect(ir, path, "caching_disabled", {}, result)
             return
         # Conditional → re-tag as a cache_bypass viewer-request op and fall
         # through to the generic viewer_request_ops placement below.
@@ -626,15 +902,15 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
            (result.get("raw_expression") and not result_cond):
             or_paths = _try_split_or_cache_paths(result_cond)
             if or_paths:
+                # One native effect per path branch (each a single pattern); replay
+                # stacks them in source order like any other cache effect.
                 for path in or_paths:
-                    beh = find_or_create_behavior(ir, path, domain_config, origin_content)
-                    _apply_cache_setting(beh, result)
+                    _record_cache_effects(ir, path, result, domain_config, origin_content)
                 return
             # Non-splittable OR → can't be expressed as CloudFront path behaviors.
             _mark_cache_non_convertible(ir, result, expr)
             return
-        path = _extract_path_from_result(result, cond, expr)
-        # Fan out to one *.ext behavior per extension ONLY when the condition is
+        # Fan out to one *.ext effect per extension ONLY when the condition is
         # PURELY an extension set. A sibling scope (host eq x and ext in [...])
         # must NOT fan out — that would apply the cache setting to *.pdf on every
         # host, dropping the host scope. In that case fall through to the normal
@@ -643,37 +919,32 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         exts = _extract_extensions_from_condition(result_cond)
         if len(exts) > 1 and _condition_is_pure_extension(result_cond):
             for ext in exts:
-                ext_path = f"*.{ext}"
-                beh = find_or_create_behavior(ir, ext_path, domain_config, origin_content)
-                _apply_cache_setting(beh, result)
+                _record_cache_effects(ir, f"*.{ext}", result, domain_config, origin_content)
             return
-        # A cache setting is applied to a specific behavior (not via the shared
-        # CFF), so its condition MUST be representable as that behavior's single
-        # path pattern. After host-stripping, a still-compound scope (e.g.
-        # ip.src.country, a multi-field AND, a NOT) can't be — placing it on
-        # `_extract_path_from_result`'s best-effort path (often `*`) would apply
-        # the setting site-wide. There is no working Lambda@Edge conditional-cache
-        # generator (the origin_response template only emits error pages), so
-        # report these as non-convertible instead of silently dropping them.
-        if not _cache_cond_is_single_path(result_cond):
+        # A cache setting is native (per behavior), so its condition MUST be
+        # representable as a single path pattern. After host-stripping, a still-
+        # compound scope (ip.src.country, a multi-field AND, a NOT) can't be —
+        # applying it to `_extract_path_from_result`'s best-effort `*` would widen
+        # it site-wide. Report non-convertible instead of silently dropping.
+        if not _cache_cond_is_single_path(result_cond, _resolved_vpp(ir)):
             _mark_cache_non_convertible(ir, result, expr)
             return
-        beh = find_or_create_behavior(ir, path, domain_config, origin_content)
-        _apply_cache_setting(beh, result)
+        path = _extract_path_from_result(result, cond, expr)
+        _warn_case_insensitive_native(ir, result_cond, path, result)
+        _record_cache_effects(ir, path, result, domain_config, origin_content)
         return
 
     if rtype == "cloud_connector":
-        # A cloud connector switches the ORIGIN of a cache behavior (native,
-        # path-scoped). A condition that can't reduce to one path can't gate it —
-        # applying it to `*` would re-point the whole distribution's origin.
-        path, reason = native_placement(result.get("condition") or cond)
+        # A cloud connector switches the ORIGIN of a cache behavior (native).
+        # Record as an ordered origin effect; replay re-points every behavior its
+        # scope contains. A non-single-pattern scope → report (would re-point the
+        # whole distribution or drop).
+        scope, reason = native_placement(result.get("condition") or cond, _resolved_vpp(ir))
         if reason:
             _mark_result_non_convertible(ir, result, reason, expr)
             return
-        beh = find_or_create_behavior(ir, path, domain_config, origin_content)
-        params = result.get("params", {})
-        beh["origin"]["domain"] = params.get("origin_host", beh["origin"]["domain"])
-        beh["origin"]["s3_origin"] = "s3." in params.get("origin_host", "")
+        _warn_case_insensitive_native(ir, result.get("condition") or cond, scope, result)
+        _record_native_effect(ir, scope, "origin", result.get("params", {}), result)
         return
 
     # Drop a redundant S3 origin-override. Cloudflare pointing at an S3 bucket
@@ -710,7 +981,8 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         "condition": result.get("condition"),
         "raw_expression": result.get("raw_expression"),
         "params": result.get("params", {}),
-        "scope": _op_scope(path, result, cond),
+        "scope_pattern": _op_scope_pattern(path),
+        "seq": ir.get("_seq", 0),   # source-processing order (see make_empty_ir)
     }
 
     # Generate KVS entries for in_kvs conditions (IP list lookup)
@@ -797,61 +1069,73 @@ def _extract_path_from_result(result, cond, expr):
     return extract_path_pattern_single(c)
 
 
-def _op_scope(path, result, cond):
-    """Classify how far a viewer op's effect reaches, so the scaffold can attach
-    the shared CFF only to the behaviors that need it (a Cloudflare rule's scope
-    = distribution × cache-behavior, decided BEFORE the mechanism). Returns:
-      'behavior'     — landed on a specific ordered behavior (path→pattern
-                       worked); runs only there.
-      'default_only' — landed on the default behavior AND the condition DID scope
-                       by path, but the path couldn't reduce to a CloudFront
-                       pattern (regex/negated/multi-ext/OR-of-paths). The rule
-                       only ever meant those (default-behavior) requests → attach
-                       to the default behavior only, NOT the ordered ones.
-      'all'          — landed on the default behavior with NO path field at all
-                       (zone-wide: matched host and/or header/cookie/qs). Must
-                       run on EVERY behavior of the distribution, since any path
-                       could match and each behavior has its own function assoc.
-    """
-    if path != "*":
-        return "behavior"
-    c = result.get("condition") or cond
-    return "default_only" if condition_has_path_field(c) else "all"
+def _op_scope_pattern(path):
+    """The CloudFront path pattern a viewer op's effect COULD reach, so the scaffold
+    attaches the shared CFF to every behavior that OVERLAPS it (a shared CFF that
+    isn't attached to the behavior serving a matching request silently drops the
+    op — CloudFront function associations are strictly per-behavior, no inheritance).
+
+    `path` is _extract_path_from_result's best-effort pattern:
+      - a concrete pattern (e.g. `/api/*`) when the op reduced to one path → it can
+        only match there;
+      - `"*"` otherwise. That covers BOTH the old 'all' (zone-wide: host/header/
+        cookie, no path field) AND the old 'default_only' (a path field that
+        couldn't reduce to a CloudFront pattern — regex/negated/multi-ext/OR-of-
+        paths — so it can still match requests served by ORDERED behaviors). The old
+        model attached default_only to the default behavior ONLY, which was UNSOUND:
+        a request routed to an ordered behavior would never run the op. `*` overlaps
+        every behavior — over-attaching is only cost, a miss is a silent drop.
+    So this is just `path` today, but named to document the scope-not-placement
+    intent (the value feeds overlap-based CFF attachment, not where the op lives)."""
+    return path
 
 
-def _apply_cache_setting(beh, result):
-    """Apply cache rule settings to a behavior.
+def _record_cache_effects(ir, scope, result, domain_config, origin_content):
+    """Record a cache rule's NATIVE effects (edge TTL, cache-key) as ordered
+    effects at `scope`, and emit its browser_ttl (a viewer-response op) directly.
 
-    Bypass is NOT handled here — _place_result intercepts every bypass cache
-    rule before this runs (unconditional → CachingDisabled policy; conditional →
-    a cache_bypass viewer-request op), so only TTL / cache-key settings reach it.
+    Bypass is NOT handled here — _place_result intercepts every bypass cache rule
+    (unconditional → caching_disabled effect; conditional → cache_bypass op), so
+    only TTL / cache-key / browser_ttl reach here.
     """
     params = result.get("params", {})
-    cp = beh["cache_policy"]
 
     if "edge_ttl_override" in params:
-        # override_origin means CloudFront must cache for exactly this long
-        # regardless of origin headers — min=default=max is the only way to
-        # force a fixed TTL. Leaving min/max at their behavior defaults let a
-        # >86400s override exceed max_ttl, which CloudFront's create API rejects.
-        ttl = params["edge_ttl_override"]
-        cp["ttl"]["min"] = ttl
-        cp["ttl"]["default"] = ttl
-        cp["ttl"]["max"] = ttl
-    if "edge_ttl_respect_origin" in params:
-        pass  # default behavior
+        _record_native_effect(ir, scope, "ttl_override",
+                              {"ttl": params["edge_ttl_override"]}, result)
+    elif params.get("edge_ttl_respect_origin"):
+        # respect_origin is a RESET back to factory TTL. It must be a real effect so
+        # a LATER respect_origin rule overrides an EARLIER override_origin at the
+        # same scope (Cloudflare last-match). Without this the earlier fixed TTL
+        # would silently persist (reviewer F2).
+        _record_native_effect(ir, scope, "ttl_respect_origin", {}, result)
+
+    # cache=true is a RESET of a prior cache=false at the same scope. bypass=True is
+    # intercepted earlier (caching_disabled effect / cache_bypass op); an explicit
+    # bypass=False here re-enables caching so a later cache=true beats an earlier
+    # cache=false (reviewer F2 — was silently stuck disabled).
+    if params.get("bypass") is False:
+        _record_native_effect(ir, scope, "caching_enabled", {}, result)
+
+    ck = {}
+    for src, dst in (("cache_key_qs", "query_strings"),
+                     ("cache_key_qs_list", "query_strings_list"),
+                     ("cache_key_qs_exclude", "query_strings_exclude"),
+                     ("cache_key_headers", "headers")):
+        if src in params:
+            ck[dst] = params[src]
+    if ck:
+        _record_native_effect(ir, scope, "cache_key", ck, result)
 
     # browser_ttl (override_origin): Cloudflare forces the max-age in the
     # Cache-Control header sent to the VIEWER, independent of the edge TTL. A
     # viewer-response CFF replicates this faithfully — response.headers is
-    # writable there, the value is forced unconditionally (unlike a
-    # response-headers policy in override mode, which only fires when the origin
-    # already sent Cache-Control), and the CFF stays scoped to THIS behavior's
-    # path. Emitted as a set_response_header op so it reuses the normal codegen.
-    # Caveat: viewer-response CFF does not run for 4xx/5xx CloudFront-generated
-    # responses, so error responses won't carry the forced max-age — acceptable,
-    # browser_ttl is about how long normal content lives in the browser cache.
+    # writable there, the value is forced unconditionally, and it self-gates on
+    # the rule condition. Emitted as a set_response_header op (scope_pattern drives
+    # which behaviors the shared CFF attaches to). Caveat: viewer-response CFF does
+    # not run for CloudFront-generated 4xx/5xx, acceptable for browser_ttl.
     if "browser_ttl_override" in params:
+        beh = find_or_create_behavior(ir, scope, domain_config, origin_content)
         max_age = params["browser_ttl_override"]
         already = any(
             op.get("cf_source_rule") == result.get("cf_source_rule")
@@ -859,10 +1143,6 @@ def _apply_cache_setting(beh, result):
             for op in beh["viewer_response_ops"]
         )
         if not already:
-            # scope drives which behaviors get the CFF (tf-scaffold #123). A
-            # zone-wide browser_ttl (no path field) lands on the default behavior
-            # and MUST run on every behavior → scope='all'; a path-scoped one
-            # runs only on its own behavior.
             beh["viewer_response_ops"].append({
                 "type": "set_response_header",
                 "cf_source_rule": result.get("cf_source_rule", ""),
@@ -870,17 +1150,9 @@ def _apply_cache_setting(beh, result):
                 "condition": result.get("condition"),
                 "raw_expression": result.get("raw_expression"),
                 "params": {"name": "cache-control", "value": f"max-age={max_age}"},
-                "scope": _op_scope(beh["path_pattern"], result, result.get("condition")),
+                "scope_pattern": scope,
+                "seq": ir.get("_seq", 0),
             })
-
-    if "cache_key_qs" in params:
-        cp["cache_key"]["query_strings"] = params["cache_key_qs"]
-    if "cache_key_qs_list" in params:
-        cp["cache_key"]["query_strings_list"] = params["cache_key_qs_list"]
-    if "cache_key_qs_exclude" in params:
-        cp["cache_key"]["query_strings_exclude"] = params["cache_key_qs_exclude"]
-    if "cache_key_headers" in params:
-        cp["cache_key"]["headers"] = params["cache_key_headers"]
 
 
 def _process_bulk_redirects(ir, hostname, apex, bulk_redirects, domain_config, origin_content):
@@ -954,7 +1226,8 @@ def _process_bulk_redirects(ir, hostname, apex, bulk_redirects, domain_config, o
             "condition": {"always": True},
             "raw_expression": None,
             "params": {"entry_count": len(kvs_entries)},
-            "scope": "all",  # unconditional zone-wide → runs on every behavior
+            "scope_pattern": "*",  # unconditional zone-wide → overlaps every behavior
+            "seq": ir.get("_seq", 0) + 1,  # after all rules (Cloudflare runs bulk late)
         })
 
 
@@ -972,17 +1245,25 @@ def _process_managed_transforms(ir, managed_transforms, default_beh):
                 "condition": {"always": True},
                 "raw_expression": None,
                 "params": {"name": "True-Client-IP", "value": "$viewer_ip"},
-                "scope": "all",  # unconditional zone-wide → runs on every behavior
+                "scope_pattern": "*",  # unconditional zone-wide → overlaps every behavior
+                "seq": ir.get("_seq", 0) + 1,
             })
 
     for h in resp_headers:
         if h.get("enabled") and h.get("id") == "add_security_headers":
-            default_beh["response_headers_policy"]["security_headers"].setdefault(
-                "X-Content-Type-Options", {"value": "nosniff", "operation": "add"}
-            )
-            default_beh["response_headers_policy"]["security_headers"].setdefault(
-                "X-Frame-Options", {"value": "SAMEORIGIN", "operation": "add"}
-            )
+            # Zone-wide managed security headers — record as `*`-scoped native
+            # effects so replay applies them to EVERY behavior (ordered behaviors
+            # don't inherit the default's RHP). Recorded at the head of the effect
+            # log with operation="add" (setdefault semantics: a later explicit rule
+            # for the same header still wins on replay order).
+            src = {"cf_source_rule": "managed_transform_security_headers",
+                   "description": "Managed Transform: security headers"}
+            _record_native_effect(ir, "*", "rhp_security",
+                                  {"name": "X-Content-Type-Options", "value": "nosniff",
+                                   "operation": "add", "_managed": True}, src)
+            _record_native_effect(ir, "*", "rhp_security",
+                                  {"name": "X-Frame-Options", "value": "SAMEORIGIN",
+                                   "operation": "add", "_managed": True}, src)
 
 
 def _mark_cache_non_convertible(ir, result, expr=None):
@@ -1146,9 +1427,11 @@ def _extract_extensions_from_condition(condition):
     return []
 
 
-def _cache_cond_is_single_path(condition):
+def _cache_cond_is_single_path(condition, vpp=None):
     """True if a cache-rule condition can be represented by ONE specific
     CloudFront path pattern (so applying the setting to one behavior is faithful).
+    `vpp` is the resolved viewer_protocol_policy for the scope (used only for the
+    full_uri https-scheme check — see below); None = assume redirect-to-https.
 
     Unconditional (→ default `*` behavior) is fine. Otherwise the leaf must
     actually yield a SPECIFIC path pattern — verified by asking
@@ -1167,7 +1450,53 @@ def _cache_cond_is_single_path(condition):
     # path_pattern), so it IS a single-path scope for this host's distribution.
     if condition.get("field") not in ("uri.path", "uri", "uri.path.extension", "full_uri"):
         return False
-    return extract_path_pattern_single(condition) != "*"
+    pattern = extract_path_pattern_single(condition)
+    if pattern == "*":
+        return False
+    # A CloudFront path pattern matches ONLY the URI path — never the query string.
+    # A full_uri that pins a query (`?`) can't be reduced to a path pattern (the `?`
+    # would be a literal/path wildcard char, silently mis-matching), so reject it.
+    # SCHEME (confirmed vs AWS docs by dual subagents): redirect-to-https (the
+    # default VPP) issues the 301 BEFORE cache-behavior/function execution, so every
+    # request a behavior actually serves is HTTPS. Thus an `https://`-pinned full_uri
+    # reduces faithfully to a path pattern (the scheme is already guaranteed —
+    # redundant), while an `http://`-pinned rule matches ~no served traffic (http is
+    # redirected before routing) and scheme is never a CloudFront routing key → a
+    # path pattern can't express it, reject as non-single-path. (Caveat: under
+    # allow-all VPP an https rule mapped to path-only would widen to http too; the
+    # default VPP is redirect-to-https, where accept-https is exact.)
+    if condition.get("field") == "full_uri":
+        scheme = condition.get("scheme")
+        # http-only is never a CloudFront path (scheme isn't a routing key; under
+        # redirect-to-https http is redirected before routing).
+        if scheme == "http":
+            return False
+        # https-only is faithful ONLY when the effective VPP redirects/forces https
+        # (then all served traffic is https — scheme redundant). Under allow-all,
+        # http is served too, so dropping the scheme to a path would WIDEN the rule
+        # to http traffic (reviewer F5). `vpp` is the resolved viewer_protocol_policy
+        # for this scope; None means "not yet known" → assume the default
+        # redirect-to-https (safe/common) rather than reject.
+        if scheme == "https" and vpp == "allow-all":
+            return False
+        if "?" in (condition.get("path_pattern") or ""):
+            return False
+    if "?" in pattern:
+        return False
+    return True
+
+
+def _pattern_case_insensitive_letters(condition, pattern):
+    """True if this native path pattern comes from a CASE-INSENSITIVE Cloudflare
+    match (`wildcard`, incl. full_uri wildcard) AND contains cased letters — so the
+    case-SENSITIVE CloudFront behavior would miss case variants Cloudflare matched.
+    Per Cloudflare docs `eq`/`starts_with`/`ends_with`/`strict wildcard` are already
+    case-sensitive (faithful); only plain `wildcard` is case-insensitive. Used to
+    emit a NON-fatal case-difference warning — the rule is still converted natively
+    (user's call), the divergence is surfaced in the report, not silently dropped."""
+    if condition.get("op") != "wildcard":
+        return False
+    return any(c.isalpha() for c in pattern or "")
 
 
 def _is_pure_host_routing(condition):
@@ -1188,7 +1517,7 @@ def _is_pure_host_routing(condition):
     return host_leaf_is_routing(condition)
 
 
-def native_placement(condition):
+def native_placement(condition, vpp=None):
     """The placement decision for a rule mapped to a NATIVE CloudFront mechanism
     (distribution setting / cache-behavior setting / response-headers policy /
     compression / cloud-connector origin) — mechanisms that can only be scoped by
@@ -1203,10 +1532,11 @@ def native_placement(condition):
     Returns (path, None) when placeable — `path` is the pattern to attach to
     (`*` for unconditional / pure-host-routing) — or (None, reason) when the
     condition can't be represented, so the caller marks it non-convertible.
-    `condition` must already be host-stripped (the caller strips before placing)."""
+    `condition` must already be host-stripped (the caller strips before placing).
+    `vpp` is the resolved viewer_protocol_policy (for the full_uri https check)."""
     if _is_pure_host_routing(condition):
         return "*", None
-    if _cache_cond_is_single_path(condition):
+    if _cache_cond_is_single_path(condition, vpp):
         return extract_path_pattern_single(condition), None
     return None, ("condition cannot be scoped to a single CloudFront path pattern "
                   "(a native cache/behavior/header/compression/origin setting can't "

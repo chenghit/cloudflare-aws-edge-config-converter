@@ -1078,6 +1078,21 @@ def _generate_op_js(op, target="cff", indent="  "):
     return lines
 
 
+def _ops_in_source_order(ir, ops_key):
+    """Collect a domain's viewer ops (across all behaviors) for one event and return
+    them in SOURCE-PROCESSING order — sorted by the `seq` stamped in preprocess.
+
+    The shared CFF body is the union of every behavior's ops; the behaviors were
+    re-sorted by path specificity in finalize, so iterating them would emit ops in
+    the WRONG precedence (a narrow behavior's redirect before a broad one's, or a
+    later header transform before an earlier one). Cloudflare precedence is source
+    order — first-match for redirects, last-wins for header sets — so we sort by
+    seq. Stable; ops predating the seq stamp sort as 0 (front)."""
+    ops = [op for beh in ir.get("cache_behaviors", [])
+           for op in beh.get(ops_key, [])]
+    return sorted(ops, key=lambda o: o.get("seq", 0))
+
+
 def _ops_need_kvs(ops):
     """Check if a specific handler's op list needs a cf.kvs() handle at runtime.
 
@@ -1284,8 +1299,12 @@ def _generate_continent_preamble(ops, indent="  "):
 def generate_viewer_request_js(ir, target="cff"):
     """Generate complete viewer_request.js content."""
     lines = []
-    request_ops = [op for beh in ir.get("cache_behaviors", [])
-                   for op in beh.get("viewer_request_ops", [])]
+    # Collect ops across ALL behaviors, then order by `seq` (the source-processing
+    # order stamped in preprocess) — NOT by behavior iteration order, which finalize
+    # re-sorts by path specificity. Within a type-section (redirects, rewrites, …)
+    # emission follows Cloudflare precedence: first-match redirects fire in source
+    # order (the first matching one wins), last-in-source header transforms win.
+    request_ops = _ops_in_source_order(ir, "viewer_request_ops")
     # Compute KVS need from THIS handler's ops (not the domain-wide flag) so a
     # response-only KVS need doesn't emit an unused cf.kvs() here (finding #5).
     needs_kvs_flag = _ops_need_kvs(request_ops)
@@ -1361,9 +1380,9 @@ def generate_viewer_request_js(ir, target="cff"):
 
 def generate_viewer_response_js(ir):
     """Generate viewer_response.js content. Returns None if not needed."""
-    all_ops = []
-    for beh in ir.get("cache_behaviors", []):
-        all_ops.extend(beh.get("viewer_response_ops", []))
+    # Source-order (seq) sorted, so a later Cloudflare response-header rule wins over
+    # an earlier one for the same header (last-wins), independent of behavior order.
+    all_ops = _ops_in_source_order(ir, "viewer_response_ops")
     if not all_ops:
         return None
 

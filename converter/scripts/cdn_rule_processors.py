@@ -453,9 +453,15 @@ def _config_setting_scope_ok(cond, raw_expr):
     if cond is None or cond.get("always"):
         return True
     if "logic" in cond:
-        if cond["logic"] != "and":
-            return False  # OR / NOT can't reduce to "this whole distribution"
-        return all(_config_setting_scope_ok(p, None) for p in cond.get("parts", []))
+        if cond["logic"] == "not":
+            return _config_setting_scope_ok(cond.get("item"), None)
+        # AND or OR: sound iff EVERY branch is pure host-routing. A pure-host OR
+        # (host eq a or host eq b) is fine — the router already dispatched it, so on
+        # each distribution it reached it's site-wide (a distribution setting needs
+        # site-wide-after-routing, not ONE path). A branch with a path/header/geo
+        # leaf still fails (not host-routing), so mixed scopes stay rejected.
+        parts = cond.get("parts", [])
+        return bool(parts) and all(_config_setting_scope_ok(p, None) for p in parts)
     # a single leaf: OK only if it's a host-ROUTING leaf (consumed by the router)
     return host_leaf_is_routing(cond)
 
@@ -748,11 +754,17 @@ def process_response_header_transform(rule, ip_lists, phase):
         )
 
         if (is_cors or is_security) and value and not expression:
-            # Static security/CORS header → response_headers_policy
+            # Static security/CORS header → response_headers_policy (native).
+            # F1: carry the SCREENED cond/raw_expr (post _screen_unmappable) on the
+            # result so placement gates on the authoritative condition and never
+            # re-parses the raw rule expression (which would restore an already
+            # pruned unmappable OR branch and render the whole thing `false`).
             ops.append({
                 "type": "response_headers_policy",
                 "cf_source_rule": rule.get("id", ""),
                 "description": rule.get("description", ""),
+                "condition": cond,
+                "raw_expression": raw_expr,
                 "params": {
                     "name": header_name,
                     "value": value,
@@ -812,6 +824,14 @@ def process_custom_error_rule(rule, ip_lists, phase):
     # Parse expression to check for http.response.code (at any depth, incl.
     # under a NOT node).
     cond, raw_expr = parse_expression(expr)
+    # Screen unmappable condition fields like every other processor. Without this a
+    # PARSEABLE-but-unmappable condition (cf.bot_management.score, an ip.src $list)
+    # slipped past into serve_error_inline and rendered `if (false)` — a silent
+    # drop (non_convertible=0, ip list never resolved to KVS). Response-phase, so
+    # response.code stays mappable.
+    cond, raw_expr, _nc = _screen_unmappable(rule, cond, raw_expr, ip_lists, target="response")
+    if _nc:
+        return _nc
     response_code = _find_response_code_value(cond)
 
     # Path 4: inline content

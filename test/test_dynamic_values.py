@@ -259,6 +259,28 @@ def req_js(op):
           "cache_behaviors": [{"viewer_request_ops": [op], "viewer_response_ops": []}]}
     return _gen.generate_viewer_request_js(ir)
 
+print("== F1 (r7): viewer ops emit in source (seq) order, not behavior order ==")
+# Two redirects live on DIFFERENT behaviors; finalize sorts behaviors by specificity
+# so the narrow one would iterate first. The JS must still emit them in SOURCE order
+# (seq) so Cloudflare first-match precedence holds: rule seq=1 (broad) before seq=2
+# (narrow). Behaviors are deliberately listed narrow-first to prove seq wins.
+def _redir(target, seq):
+    return {"type": "redirect", "cf_source_rule": "r", "description": "d",
+            "condition": {"always": True}, "raw_expression": None,
+            "params": {"target_url": target, "status_code": 301, "preserve_query_string": False},
+            "scope_pattern": "*", "seq": seq}
+_ord_ir = {"metadata": {"hostname": "h", "sanitized_name": "h"},
+           "cache_behaviors": [
+               {"path_pattern": "/api/private/*", "viewer_request_ops": [_redir("https://x/narrow", 2)],
+                "viewer_response_ops": []},
+               {"path_pattern": "/api/*", "viewer_request_ops": [_redir("https://x/broad", 1)],
+                "viewer_response_ops": []}]}
+_ord_js = _gen.generate_viewer_request_js(_ord_ir)
+_bi, _ni = _ord_js.find("broad"), _ord_js.find("narrow")
+# "yes" only when broad is present and precedes narrow.
+check("F1: broad (seq=1) emitted before narrow (seq=2) despite behavior order",
+      "yes" if (0 <= _bi < _ni) else f"NO broad@{_bi} narrow@{_ni}", expect_substr="yes")
+
 print("== #5 response-side sha256 header pulls import crypto (runtime fix) ==")
 ops = _proc.process_response_header_transform(
     header_rule("true", {"x-sig": {"operation": "set", "expression": "encode_base64(sha256(http.host))"}}), {}, "")
@@ -1288,6 +1310,9 @@ def _place_bypass(expr):
     cond2 = _pre._strip_host_condition(cond)
     _pre._strip_host_in_result(result)
     _pre._place_result(ir, result, dc, "o.net", cond2, expr)
+    # Native effects (caching_disabled/TTL/…) are recorded during _place_result and
+    # applied by the replay pass — run it, as process_domain does, before reading.
+    _pre._replay_native_effects(ir, dc, "o.net")
     return ir
 _irc = _place_bypass('http.cookie contains "wordpress_logged_in"')
 _ops_c = [o["type"] for b in _irc["cache_behaviors"] for o in b["viewer_request_ops"]]
@@ -1379,7 +1404,9 @@ check("scope: full_uri cond HAS a path field",
 check("scope: header+path AND cond HAS a path field (descends parts)",
       str(_parser.condition_has_path_field(_parser.parse_expression('http.request.headers["x"] eq "1" and http.request.uri.path matches "^/z.*$"')[0])),
       expect_substr="True")
-# _op_scope on placed ops: no-path→all, unconvertible-path→default_only, pattern→behavior
+# scope_pattern on placed ops: no-path→"*", concrete-path→that pattern,
+# unconvertible-path (regex/AND-with-non-path)→"*" (could match anywhere → attach
+# everywhere; the OLD 'default_only' attach-to-default-only was unsound).
 def _scope_of(expr):
     dc = {"hostname": "shop.example.com", "apex_domain": "example.com",
           "origin_type": "custom", "origin_content": "o.net",
@@ -1392,32 +1419,39 @@ def _scope_of(expr):
     _pre._place_result(ir, result, dc, "o.net", cond2, expr)
     for b in ir["cache_behaviors"]:
         for o in b["viewer_request_ops"]:
-            return o.get("scope"), b["path_pattern"]
+            return o.get("scope_pattern"), b["path_pattern"]
     return None, None
-check("scope: cookie bypass (no path) -> scope=all on *",
-      str(_scope_of('http.cookie contains "wp"')), expect_substr="('all', '*')")
-check("scope: path-pattern bypass -> scope=behavior on the ordered behavior",
-      str(_scope_of('http.request.uri.path eq "/checkout"')), expect_substr="('behavior', '/checkout')")
-check("scope: unconvertible-path bypass -> scope=default_only on *",
+check("scope: cookie bypass (no path) -> scope_pattern='*' on *",
+      str(_scope_of('http.cookie contains "wp"')), expect_substr="('*', '*')")
+check("scope: path-pattern bypass -> scope_pattern='/checkout' on the ordered behavior",
+      str(_scope_of('http.request.uri.path eq "/checkout"')), expect_substr="('/checkout', '/checkout')")
+check("scope: unconvertible-path bypass -> scope_pattern='*' (attach everywhere, not default_only)",
       str(_scope_of('http.request.uri.path matches "^/a.*b$" and http.cookie contains "wp"')),
-      expect_substr="('default_only', '*')")
-# _behavior_needs_cff: the CFF-attachment automation
+      expect_substr="('*', '*')")
+# _behavior_needs_cff: routing-aware CFF-attachment (scope_pattern + overlap).
 def _needs_map(behs):
     ir = {"metadata": {}, "cache_behaviors": behs}
     return {b["path_pattern"]: _scaf._behavior_needs_cff(ir, b, "viewer_request_ops") for b in behs}
 def _b(pp, ops): return {"path_pattern": pp, "viewer_request_ops": ops, "viewer_response_ops": []}
-_zonewide = [{"type": "set_request_header", "scope": "all"}]
-_pathop = [{"type": "rewrite", "scope": "behavior"}]
-_defonly = [{"type": "cache_bypass", "scope": "default_only"}]
+_zonewide = [{"type": "set_request_header", "scope_pattern": "*"}]
+_pathop = [{"type": "rewrite", "scope_pattern": "/api/*"}]
 check("needs_cff: zone-wide default op -> ALL behaviors attach",
       str(_needs_map([_b("*", _zonewide), _b("/files/*", [])])),
       expect_substr="{'*': True, '/files/*': True}")
-check("needs_cff: default clean, only ordered op -> default DROPS, ordered attaches",
+check("needs_cff: default clean, only ordered /api/* op -> default DROPS (routing), ordered attaches",
       str(_needs_map([_b("*", []), _b("/api/*", _pathop)])),
       expect_substr="{'*': False, '/api/*': True}")
-check("needs_cff: default_only op -> default attaches, TTL-only ordered DROPS",
-      str(_needs_map([_b("*", _defonly), _b("/files/*", [])])),
-      expect_substr="{'*': True, '/files/*': False}")
+# F3 fix: an op scoped to a multi-path/unconvertible region ('*') MUST attach to
+# EVERY behavior it overlaps — the old default_only dropped it on ordered behaviors.
+_wideop = [{"type": "cache_bypass", "scope_pattern": "*"}]
+check("needs_cff: '*'-scoped op on default -> attaches to default AND ordered (F3, was silent-drop)",
+      str(_needs_map([_b("*", _wideop), _b("/files/*", [])])),
+      expect_substr="{'*': True, '/files/*': True}")
+# cross-overlap op (*.js) must attach to an overlapping /api/* behavior too.
+_crossop = [{"type": "rewrite", "scope_pattern": "*.js"}]
+check("needs_cff: cross-overlap *.js op attaches to overlapping /api/* behavior",
+      str(_needs_map([_b("*", []), _b("/api/*", _crossop)])),
+      expect_substr="'/api/*': True")
 
 print()
 if FAILURES:

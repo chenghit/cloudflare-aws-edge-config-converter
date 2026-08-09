@@ -121,6 +121,124 @@ def cert_covers(cert_names, hostname):
     return False
 
 
+# ── CloudFront PathPattern algebra ─────────────────────────────────────────────
+# CloudFront selects the ONE cache behavior to serve a request by first-match in
+# list order (default `*` last); overlapping patterns do NOT merge, and a behavior
+# inherits NOTHING from the default. VERIFIED vs AWS docs by dual subagents
+# (2026-08): the only wildcards are `*` (0+ chars, CROSSES `/`) and `?` (exactly 1
+# char); matching is against the URI path only (query string excluded).
+#
+# Two primitives the placement/scaffold logic rests on:
+#   pattern_contains(outer, inner) — SOUND: True only when every path matching
+#     `inner` also matches `outer` (P_inner ⊆ P_outer). Used to decide whether a
+#     native effect scoped to `outer` must be replayed onto behavior `inner`. When
+#     unsure it returns False (never over-claim coverage — that would widen).
+#   patterns_overlap(a, b) — True when SOME path matches both (P_a ∩ P_b ≠ ∅).
+#     Used to decide which behaviors a shared viewer CFF must attach to (attach on
+#     any overlap — over-attach is only cost, a miss is a silent drop) and to spot
+#     cross-overlap (overlap but neither contains the other), whose intersection is
+#     not expressible as one CloudFront behavior → caller reports non-convertible.
+# Both are exact for the `*`/`?` glob language via a standard two-pointer / DP glob
+# matcher, plus a symbolic emptiness check for pattern∩pattern.
+
+
+def _glob_closure(pattern, states):
+    """ε-closure: a `*` can be skipped entirely (match empty), so from a position
+    on a `*` you may also stand just past it. Returns the closed frozenset."""
+    out = set(states)
+    changed = True
+    while changed:
+        changed = False
+        for i in list(out):
+            if i < len(pattern) and pattern[i] == "*" and (i + 1) not in out:
+                out.add(i + 1)
+                changed = True
+    return frozenset(out)
+
+
+def _glob_step(pattern, states, ch):
+    """Advance an NFA position-set by consuming one character `ch`."""
+    nxt = set()
+    for i in _glob_closure(pattern, states):
+        if i >= len(pattern):
+            continue
+        c = pattern[i]
+        if c == "*":
+            nxt.add(i)                      # `*` absorbs the char, stay put
+        elif c == "?" or c == ch:
+            nxt.add(i + 1)                  # `?` or matching literal advances
+    return _glob_closure(pattern, nxt)
+
+
+def _glob_accepts(pattern, states):
+    return len(pattern) in _glob_closure(pattern, states)
+
+
+def pattern_contains(outer, inner):
+    """True iff EVERY path matching glob `inner` also matches glob `outer`
+    (language containment P_inner ⊆ P_outer). Patterns are over the CloudFront glob
+    language (`*` = 0+ chars including `/`, `?` = exactly 1 char). EXACT — decided
+    by NFA language containment (validated exhaustively vs a brute-force oracle in
+    the test suite), NOT a token heuristic: outer's leading `*` and its trailing
+    tokens interact non-locally (e.g. `*?` ⊇ `a*`), which a positional DP gets
+    wrong.
+
+    Method: containment fails iff some string is matched by `inner` but NOT by
+    `outer`. Simulate `inner` and `outer` as position-set NFAs in lockstep over the
+    product of their reachable state-sets; a product state where inner accepts but
+    outer does not is a counterexample. The alphabet need only distinguish the
+    literal characters appearing in either pattern plus ONE sentinel standing for
+    "every other character" (all such chars behave identically under `*`/`?`/literal
+    transitions), so the search is finite and small."""
+    alphabet = set(c for c in outer + inner if c not in ("*", "?"))
+    alphabet.add("\x00")                    # sentinel: any char not a named literal
+    start = (_glob_closure(inner, {0}), _glob_closure(outer, {0}))
+    seen = {start}
+    stack = [start]
+    while stack:
+        istates, ostates = stack.pop()
+        if _glob_accepts(inner, istates) and not _glob_accepts(outer, ostates):
+            return False                    # a string in inner that outer rejects
+        for ch in alphabet:
+            nxt = (_glob_step(inner, istates, ch), _glob_step(outer, ostates, ch))
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    return True
+
+
+def patterns_overlap(a, b):
+    """True iff SOME path matches BOTH glob patterns (P_a ∩ P_b ≠ ∅). EXACT for the
+    `*`/`?` language (validated vs brute force in the test suite). Used to decide
+    which behaviors a shared viewer CFF attaches to (attach on any overlap — a miss
+    is a silent drop, an extra attach is only cost) and to detect cross-overlap
+    (overlap with neither pattern containing the other → their intersection is not
+    one CloudFront behavior → caller reports non-convertible)."""
+    memo = {}
+
+    def go(i, j):
+        key = (i, j)
+        if key in memo:
+            return memo[key]
+        la, lb = len(a), len(b)
+        if i == la and j == lb:
+            r = True                         # both consumed by a common string
+        elif i < la and a[i] == "*":
+            r = go(i + 1, j) or (j < lb and go(i, j + 1))
+        elif j < lb and b[j] == "*":
+            r = go(i, j + 1) or (i < la and go(i + 1, j))
+        elif i == la or j == lb:
+            r = False                        # one side has a real token, other empty
+        elif a[i] == "?" or b[j] == "?" or a[i] == b[j]:
+            r = go(i + 1, j + 1)             # one common char satisfies both tokens
+        else:
+            r = False
+        memo[key] = r
+        return r
+
+    return go(0, 0)
+
+
 # STATUS → exit code (SCRIPT_STANDARDS). BLOCKED is a completed run with an
 # undeployable artifact, not a script failure → exit 0 (the block carries the
 # don't-deploy signal). OK also 0; ERROR 1; FATAL 2; PARTIAL 3.

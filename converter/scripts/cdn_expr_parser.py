@@ -26,10 +26,16 @@ def _parse_in_set(raw):
 
 
 def _parse_full_uri_wildcard(pattern):
-    """Split full_uri wildcard pattern into (host_pattern, path_pattern).
+    """Split full_uri wildcard pattern into (host_pattern, path_pattern, scheme).
 
-    e.g. 'https://*.c.example.com/files/*' → ('*.c.example.com', '/files/*')
-         'https://cdn.c.example.com/host/*' → ('cdn.c.example.com', '/host/*')
+    e.g. 'https://*.c.example.com/files/*' → ('*.c.example.com', '/files/*', 'https')
+         'http://cdn.c.example.com/host/*' → ('cdn.c.example.com', '/host/*', 'http')
+         '*://host/p'                       → ('host', '/p', None)  (scheme wildcard)
+
+    `scheme` is 'http' or 'https' when the pattern pins ONE scheme, else None (a
+    `*://` or scheme-wildcard prefix). A pinned scheme can't be represented by a
+    CloudFront path pattern (a behavior serves both schemes), so the caller treats
+    a scheme-pinned full_uri as NOT single-path — see _cache_cond_is_single_path.
     """
     # Strip optional r prefix and quotes
     p = pattern.strip()
@@ -38,10 +44,14 @@ def _parse_full_uri_wildcard(pattern):
     elif p.startswith('"') or p.startswith("'"):
         p = p[1:-1]
 
-    m = re.match(r'https?://([^/]+)(/.*)$', p)
+    m = re.match(r'(https?)://([^/]+)(/.*)$', p)
     if m:
-        return m.group(1), m.group(2)
-    return None, None
+        return m.group(2), m.group(3), m.group(1)
+    # A non-scheme-specific prefix (e.g. '*://' or '*') still yields host/path.
+    m2 = re.match(r'[^/]*://([^/]+)(/.*)$', p)
+    if m2:
+        return m2.group(1), m2.group(2), None
+    return None, None, None
 
 
 # Header injected by the conditional cache-bypass CFF to force a guaranteed
@@ -558,7 +568,7 @@ def _scan_host_from_expression(expr):
     # full_uri wildcard with host
     m = re.search(r'http\.request\.full_uri\s+wildcard\s+r?"([^"]*)"', expr)
     if m:
-        host, _ = _parse_full_uri_wildcard(m.group(1))
+        host, _, _ = _parse_full_uri_wildcard(m.group(1))
         if host:
             return [host]
     return None
@@ -598,7 +608,7 @@ def extract_path_pattern_single(cond):
     if op.startswith("not_"):
         return "*"
     if field in ("uri.path", "uri"):
-        if op == "wildcard":
+        if op in ("wildcard", "strict_wildcard"):
             return val
         if op == "eq":
             return val
@@ -908,10 +918,11 @@ class _CDNParser:
         if op in ("wildcard", "strict_wildcard"):
             value = self._read_value()
             if mapped == "full_uri":
-                host_pat, path_pat = _parse_full_uri_wildcard(value)
+                host_pat, path_pat, scheme = _parse_full_uri_wildcard(value)
                 if host_pat and path_pat:
                     return {"field": "full_uri", "op": "wildcard", "value": value,
-                            "host_pattern": host_pat, "path_pattern": path_pat}
+                            "host_pattern": host_pat, "path_pattern": path_pat,
+                            "scheme": scheme}
             return {"field": mapped, "op": "wildcard" if op == "wildcard" else "strict_wildcard", "value": value, **extra}
 
         # matches — keep regex as-is, try simple wildcard conversion

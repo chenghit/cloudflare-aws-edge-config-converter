@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdn_expr_parser import orp_header_union
-from cdn_common import QUOTA_RAISE, QUOTA_REDESIGN, derive_cert_domain
+from cdn_common import (QUOTA_RAISE, QUOTA_REDESIGN, derive_cert_domain,
+                        pattern_contains)
 
 
 def _nbytes(v):
@@ -35,30 +36,13 @@ def _combined_name_len(*name_lists):
     return total
 
 
-def specificity_score(pattern):
-    """Compute specificity score for a CloudFront path pattern."""
-    if pattern == "*":
-        return 0
-    if pattern == "/*":
-        return 1
-    # Extension pattern: *.jpg, *.css (no slash)
-    if pattern.startswith("*.") and "/" not in pattern:
-        return 5
-    # Find first wildcard
-    wc_pos = -1
-    for i, ch in enumerate(pattern):
-        if ch in ("*", "?"):
-            wc_pos = i
-            break
-    if wc_pos == -1:
-        # Exact match
-        return len(pattern) * 10 + 100
-    return wc_pos * 10
-
-
 def sort_behaviors(behaviors):
-    """Sort cache behaviors by specificity (descending) and assign precedence."""
-    # Separate default from rest
+    """Order ordered behaviors MOST-SPECIFIC-FIRST and assign precedence. Uses the
+    exact containment primitive (shared with the scaffold, single source of truth):
+    if pattern A contains B (A broader) then B must precede A, else CloudFront's
+    first-match would let A shadow B. The old `specificity_score` heuristic was
+    `?`-blind and prefix-only; this handles `*`/`?`/`*.ext` correctly and can't
+    diverge from the scaffold's emission order."""
     default = None
     rest = []
     for b in behaviors:
@@ -67,18 +51,25 @@ def sort_behaviors(behaviors):
         else:
             rest.append(b)
 
-    # Sort by score descending, then lexicographic ascending for ties
-    rest.sort(key=lambda b: (-specificity_score(b["path_pattern"]), b["path_pattern"]))
+    # Stable insertion under the containment partial order: place each behavior
+    # BEFORE the first already-placed one that CONTAINS it (so the narrower wins).
+    ordered = []
+    for b in rest:
+        bp = b["path_pattern"]
+        idx = len(ordered)
+        for i, placed in enumerate(ordered):
+            pp = placed["path_pattern"]
+            if pattern_contains(pp, bp) and not pattern_contains(bp, pp):
+                idx = i
+                break
+        ordered.insert(idx, b)
 
-    # Assign precedence
-    for i, b in enumerate(rest):
+    for i, b in enumerate(ordered):
         b["precedence"] = i + 1
-
     if default:
         default["precedence"] = 999
-        rest.append(default)
-
-    return rest
+        ordered.append(default)
+    return ordered
 
 
 def detect_shadows(behaviors):
@@ -115,14 +106,11 @@ def detect_shadows(behaviors):
 
 
 def _path_covers(a_pat, b_pat):
-    """Check if path pattern A covers (is superset of) B."""
-    if a_pat in ("*", "/*"):
-        return True
-    # A is prefix wildcard covering B: /api/* covers /api/v2/*
-    if a_pat.endswith("/*"):
-        prefix = a_pat[:-1]  # "/api/"
-        return b_pat.startswith(prefix)
-    return False
+    """True if path pattern A covers (is a superset of) B — every request matching
+    B also matches A. Uses the exact CloudFront-glob primitive (handles `*` across
+    `/`, `?`, extension patterns like `*.js`), the single source of truth shared
+    with placement/scaffold; the old prefix-string heuristic missed those."""
+    return pattern_contains(a_pat, b_pat)
 
 
 def normalize_policy(policy):
@@ -336,6 +324,12 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     if skipped_domains:
         for sd in skipped_domains:
             all_warnings.append(f"Domain skipped: {sd.get('hostname', '?')} — {sd.get('reason', '?')}")
+
+    # Per-domain conversion warnings recorded in preprocess (e.g. case-insensitive
+    # wildcard → case-sensitive CloudFront behavior).
+    for ir in all_irs:
+        for w in ir["metadata"].get("conversion_warnings", []):
+            all_warnings.append(w)
 
     # KVS size estimation per domain
     for ir in all_irs:
@@ -564,7 +558,7 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     cff_no_ops = []
     for ir in all_irs:
         hostname = ir["metadata"]["hostname"]
-        has_zonewide = any(op.get("scope") == "all"
+        has_zonewide = any(op.get("scope_pattern", "*") == "*"
                            for b in ir["cache_behaviors"]
                            for op in b.get("viewer_request_ops", []) + b.get("viewer_response_ops", []))
         if not has_zonewide:

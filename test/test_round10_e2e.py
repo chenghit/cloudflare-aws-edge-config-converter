@@ -477,39 +477,44 @@ def assert_cff_scope():
     manifest = {"policies": {}}
     d2o = {"o.net": "origin_z"}
 
-    # CASE A: default clean, only an ordered behavior has an op → default DROPS
-    # its CFF, the ordered behavior keeps it.
+    # CASE A: default clean, only an ordered /api/* behavior has an op. A /api/*
+    # scope_pattern is siphoned away from the default `*` behavior by routing, so
+    # default DROPS its CFF and only the ordered behavior keeps it (1 assoc).
     ir = _mk([_beh("*", []),
-              _beh("/api/*", [{"type": "rewrite", "scope": "behavior",
+              _beh("/api/*", [{"type": "rewrite", "scope_pattern": "/api/*",
                                "cf_source_rule": "r", "description": "d",
                                "condition": None, "raw_expression": None, "params": {}}])])
     tf = _scaf.generate_main_tf(ir, manifest, d2o, origins)
     vr = tf.count('event_type = "viewer-request"')
-    check("R123-A: default-clean domain → CFF only on the ordered behavior (1 assoc)",
+    check("R123-A: /api/*-scoped op → CFF on the ordered behavior only (1 assoc)",
           vr == 1, f"expected 1 viewer-request assoc, got {vr}")
 
-    # CASE B: default has a zone-wide (scope='all') op → EVERY behavior attaches.
-    ir = _mk([_beh("*", [{"type": "set_request_header", "scope": "all",
+    # CASE B: a zone-wide (scope_pattern='*') op on default → EVERY behavior
+    # attaches (a `*` scope overlaps and is not siphoned by any narrower behavior).
+    ir = _mk([_beh("*", [{"type": "set_request_header", "scope_pattern": "*",
                           "cf_source_rule": "r", "description": "d",
                           "condition": {"always": True}, "raw_expression": None,
                           "params": {"name": "X", "value": "1"}}]),
               _beh("/files/*", [])])
     tf = _scaf.generate_main_tf(ir, manifest, d2o, origins)
     vr = tf.count('event_type = "viewer-request"')
-    check("R123-B: zone-wide default op → CFF on ALL behaviors (2 assocs)",
+    check("R123-B: zone-wide '*' op → CFF on ALL behaviors (2 assocs)",
           vr == 2, f"expected 2 viewer-request assocs, got {vr}")
 
-    # CASE C: default has only a 'default_only' op (path present, unconvertible)
-    # → default attaches, the TTL-only ordered behavior DROPS.
-    ir = _mk([_beh("*", [{"type": "cache_bypass", "scope": "default_only",
+    # CASE C (F3 fix): an op with an UNCONVERTIBLE path scope (regex) on the default
+    # gets scope_pattern='*' — it could match a request served by ANY behavior, so
+    # it MUST attach everywhere (2 assocs). The OLD 'default_only' model attached it
+    # to the default only and silently dropped it on the /files/* behavior — that
+    # was the Finding-3 bug this refactor fixes.
+    ir = _mk([_beh("*", [{"type": "cache_bypass", "scope_pattern": "*",
                           "cf_source_rule": "r", "description": "d",
                           "condition": {"field": "uri.path", "op": "matches", "value": "^/a.*$"},
                           "raw_expression": None, "params": {}}]),
               _beh("/files/*", [])])
     tf = _scaf.generate_main_tf(ir, manifest, d2o, origins)
     vr = tf.count('event_type = "viewer-request"')
-    check("R123-C: default_only op → CFF on default only, TTL-only ordered DROPS (1 assoc)",
-          vr == 1, f"expected 1 viewer-request assoc, got {vr}")
+    check("R123-C: unconvertible-path op (scope '*') → CFF on ALL behaviors (2 assocs, F3 fix)",
+          vr == 2, f"expected 2 viewer-request assocs, got {vr}")
 
 
 def _find_vr_js(cdn, san):

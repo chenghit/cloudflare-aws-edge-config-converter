@@ -13,6 +13,7 @@ import json, sys, os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdn_expr_parser import custom_orp_hash, orp_header_union
+from cdn_common import patterns_overlap, pattern_contains
 
 
 def load_ir(final_dir, hostname):
@@ -59,25 +60,41 @@ def _default_beh(ir):
     return next(b for b in ir["cache_behaviors"] if b["path_pattern"] == "*")
 
 
-def _has_zonewide_op(ir, ops_key):
-    """True if the DEFAULT behavior carries a scope='all' op — a zone-wide rule
-    (no path field) that must run on EVERY behavior, since CloudFront behaviors
-    don't inherit function associations. A scope='default_only' op (had a path
-    that couldn't reduce to a pattern) does NOT count — it belongs to the
-    default behavior alone."""
-    return any(op.get("scope") == "all" for op in _default_beh(ir).get(ops_key, []))
+def _op_runs_on_behavior(scope, bp):
+    """True if a viewer op scoped to pattern `scope` can execute for a request that
+    behavior `bp` actually SERVES. CloudFront routes each request to the first
+    behavior whose pattern matches, so `bp` serves the requests matching `bp` that
+    a more-specific behavior didn't already take. The op runs on `bp` iff:
+      - pattern_contains(scope, bp): every request `bp` serves matches scope (a
+        zone-wide `*` op runs on every behavior); OR
+      - genuine cross-overlap — they overlap and `bp` is NOT strictly broader than
+        scope. When `bp` is strictly broader (contains scope but scope doesn't
+        contain bp, e.g. bp=`*`, scope=`/api/*`), the scope region is served by its
+        own narrower behavior and never reaches `bp`, so the op does NOT run here.
+    Mirrors _replay_native_effects' routing model; over/under-attaching a CFF is a
+    silent drop or wasted assoc, so this must match routing exactly."""
+    if pattern_contains(scope, bp):
+        return True
+    if pattern_contains(bp, scope):
+        return False                         # scope siphoned to a narrower behavior
+    return patterns_overlap(scope, bp)       # true cross-overlap → can serve both
 
 
 def _behavior_needs_cff(ir, beh, ops_key):
     """Whether a behavior needs the shared viewer CFF for a given event
-    (viewer_request_ops / viewer_response_ops). This is the #123 automation:
-    stop attaching the shared CFF to behaviors that would only ever run it as a
-    no-op. A behavior needs the CFF iff it has its OWN ops for that event, OR the
-    default behavior has a zone-wide (scope='all') op that must run everywhere.
-    The default behavior itself needs it iff it has ANY op for that event."""
-    if beh["path_pattern"] == "*":
-        return len(beh.get(ops_key, [])) > 0
-    return len(beh.get(ops_key, [])) > 0 or _has_zonewide_op(ir, ops_key)
+    (viewer_request_ops / viewer_response_ops). CloudFront function associations
+    are strictly PER-BEHAVIOR with no inheritance (verified vs AWS docs), and the
+    shared CFF body is the UNION of every behavior's ops each self-gating on its
+    own condition — so a behavior attaches the CFF iff SOME op could execute for a
+    request it serves (see _op_runs_on_behavior). This replaces the old unsound
+    'default_only' scope, which attached such ops to the default behavior only and
+    silently dropped them on any overlapping ordered behavior."""
+    bp = beh["path_pattern"]
+    for b in ir["cache_behaviors"]:
+        for op in b.get(ops_key, []):
+            if _op_runs_on_behavior(op.get("scope_pattern", "*"), bp):
+                return True
+    return False
 
 
 # ── HCL generation helpers ───────────────────────────────────────────────────
@@ -154,6 +171,49 @@ def _orp_reference(beh, orp_headers, san):
     return f'"{_MANAGED_ORP_ALL_VIEWER}"'
 
 
+# ── ordered-behavior precedence ────────────────────────────────────────────────
+
+def _order_behaviors_most_specific_first(ordered_behs, meta=None):
+    """Sort ordered cache behaviors so a MORE-SPECIFIC pattern precedes any broader
+    pattern that contains it. CloudFront evaluates behaviors first-match in list
+    order (verified vs AWS docs), so if `/api/*` were listed before `/api/private/*`
+    the specific one would be unreachable. Precedence is decided by the exact
+    pattern algebra (handles `*` AND `?`), NOT a prefix-length heuristic:
+      - if pattern_contains(A, B) and not contains(B, A): B is strictly more
+        specific → B first.
+      - cross-overlap (overlap, neither contains the other, e.g. `*.js` vs
+        `/api/*`): CloudFront can't honor both — whichever is first shadows the
+        overlap region of the other. Precedence is genuinely ambiguous, so record a
+        conflict (surfaced in the report) rather than silently pick an order.
+    Stable insertion sort under the containment partial order; equal/incomparable
+    (disjoint) patterns keep their original relative order for determinism."""
+    conflicts = []
+    result = []
+    for b in ordered_behs:
+        bp = b["path_pattern"]
+        # find the earliest position whose pattern bp CONTAINS (bp is broader than
+        # it) — bp must go AFTER all patterns it contains, i.e. at/after that point
+        # we still need bp before any pattern that contains bp. Insert bp before the
+        # first already-placed pattern that CONTAINS bp (so bp, the more specific,
+        # comes first).
+        insert_at = len(result)
+        for i, placed in enumerate(result):
+            pp = placed["path_pattern"]
+            if pattern_contains(pp, bp) and not pattern_contains(bp, pp):
+                insert_at = i           # placed is broader → bp goes before it
+                break
+            if (patterns_overlap(pp, bp) and not pattern_contains(pp, bp)
+                    and not pattern_contains(bp, pp)):
+                conflicts.append((pp, bp))
+        result.insert(insert_at, b)
+    if conflicts and meta is not None:
+        w = meta.setdefault("pattern_precedence_conflicts", [])
+        for a, c in conflicts:
+            if [a, c] not in w and [c, a] not in w:
+                w.append([a, c])
+    return result
+
+
 # ── main.tf generation ───────────────────────────────────────────────────────
 
 def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
@@ -164,6 +224,7 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
     behaviors = ir["cache_behaviors"]
     default_beh = next(b for b in behaviors if b["path_pattern"] == "*")
     ordered_behs = [b for b in behaviors if b["path_pattern"] != "*"]
+    ordered_behs = _order_behaviors_most_specific_first(ordered_behs, meta)
     ds = default_beh["distribution_settings"]
     has_s3 = any(o["s3_origin"] for o in origins)
     orp_headers = orp_header_union(ir)
