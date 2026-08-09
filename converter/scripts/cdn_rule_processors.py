@@ -453,9 +453,16 @@ def _config_setting_scope_ok(cond, raw_expr):
     if cond is None or cond.get("always"):
         return True
     if "logic" in cond:
-        if cond["logic"] != "and":
-            return False  # OR / NOT can't reduce to "this whole distribution"
-        return all(_config_setting_scope_ok(p, None) for p in cond.get("parts", []))
+        if cond["logic"] == "not":
+            return _config_setting_scope_ok(cond.get("item"), None)
+        # AND or OR: sound iff EVERY branch is pure host-routing. A pure-host OR
+        # (host eq a or host eq b) is fine — the router already dispatched it, so
+        # on each distribution it reached it's site-wide (was wrongly rejected as
+        # "OR can't reduce to one path"; a distribution setting doesn't need ONE
+        # path, it needs site-wide-after-routing). A branch with a path/header/geo
+        # leaf still fails here (not host-routing), so mixed scopes stay rejected.
+        parts = cond.get("parts", [])
+        return bool(parts) and all(_config_setting_scope_ok(p, None) for p in parts)
     # a single leaf: OK only if it's a host-ROUTING leaf (consumed by the router)
     return host_leaf_is_routing(cond)
 
@@ -812,6 +819,14 @@ def process_custom_error_rule(rule, ip_lists, phase):
     # Parse expression to check for http.response.code (at any depth, incl.
     # under a NOT node).
     cond, raw_expr = parse_expression(expr)
+    # Screen unmappable condition fields (like every other processor). Without
+    # this, a PARSEABLE-but-unmappable condition (cf.bot_management.score, an
+    # ip.src $list, etc.) slipped past the raw-parse check into serve_error_inline
+    # and rendered `if (false)` — a silent drop (non_convertible=0, and an ip.src
+    # list never resolved to KVS). Response-phase, so response.code is mappable.
+    cond, raw_expr, _nc = _screen_unmappable(rule, cond, raw_expr, ip_lists, target="response")
+    if _nc:
+        return _nc
     response_code = _find_response_code_value(cond)
 
     # Path 4: inline content

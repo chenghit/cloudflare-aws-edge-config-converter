@@ -343,6 +343,49 @@ def find_or_create_behavior(ir, path_pattern, domain_config, origin_content):
     return b
 
 
+def _overlay_global_native_settings(ir, domain_config, origin_content):
+    """Fold the default (`*`) behavior's GLOBALLY-set native settings onto every
+    ordered behavior that still holds the factory default for them. Cloudflare
+    native rules stack (a global rule applies to path-matched requests too), but
+    CloudFront's ordered behaviors are first-match and don't inherit the default,
+    so a behavior created for a path rule would otherwise drop the global overlay.
+
+    Only copies a value when the default differs from factory AND the ordered
+    behavior still equals factory — so the ordered behavior's OWN (more specific)
+    settings always win, and an untouched global setting stays factory everywhere.
+    Runs after all rules are placed, so global-rule ordering doesn't matter."""
+    default_beh = ir["cache_behaviors"][0]
+    if default_beh["path_pattern"] != "*":
+        return
+    factory = make_default_behavior(domain_config, origin_content)
+
+    for beh in ir["cache_behaviors"][1:]:
+        # cache_policy: TTL sub-keys + gzip/brotli (global cache/compression rules)
+        for k in ("min", "default", "max"):
+            d, f, o = (default_beh["cache_policy"]["ttl"][k],
+                       factory["cache_policy"]["ttl"][k],
+                       beh["cache_policy"]["ttl"][k])
+            if d != f and o == f:
+                beh["cache_policy"]["ttl"][k] = d
+        for k in ("enable_gzip", "enable_brotli", "caching_disabled"):
+            d, f, o = (default_beh["cache_policy"][k], factory["cache_policy"][k],
+                       beh["cache_policy"][k])
+            if d != f and o == f:
+                beh["cache_policy"][k] = d
+        # response_headers_policy: a global security/CORS header (or custom header)
+        # must also cover the ordered path. Merge default's entries the ordered
+        # behavior doesn't already define (ordered's own value wins on a clash).
+        drp, orp = default_beh["response_headers_policy"], beh["response_headers_policy"]
+        for name, val in drp.get("security_headers", {}).items():
+            orp.setdefault("security_headers", {}).setdefault(name, val)
+        if drp.get("cors") and orp.get("cors") is None:
+            orp["cors"] = dict(drp["cors"])
+        have = {(h.get("name"), h.get("operation")) for h in orp.get("custom_headers", [])}
+        for h in drp.get("custom_headers", []):
+            if (h.get("name"), h.get("operation")) not in have:
+                orp["custom_headers"].append(dict(h))
+
+
 # ── main processing ──────────────────────────────────────────────────────────
 
 def process_domain(hostname, domain_config, all_rules, ip_lists,
@@ -473,6 +516,16 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
             if CACHE_BYPASS_HEADER not in hdrs:
                 hdrs.append(CACHE_BYPASS_HEADER)
 
+    # Overlay pass: Cloudflare native rules STACK — a global rule (e.g. TTL=60 on
+    # `true`, or site-wide compression-off) applies to EVERY request, including
+    # ones that also match a path rule. CloudFront behaviors are first-match and
+    # DON'T inherit the default (`*`) behavior, so an ordered behavior created for
+    # a path rule would otherwise use factory defaults and lose the global overlay
+    # (verified: global TTL=60 but /admin stayed 7200). Fold the default behavior's
+    # globally-set native values onto each ordered behavior that still holds the
+    # factory default — the ordered behavior's own (more specific) settings win.
+    _overlay_global_native_settings(ir, domain_config, origin_content)
+
     return ir
 
 
@@ -532,36 +585,51 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
 
     if rtype == "response_headers_policy":
         # A response-headers policy is native and attaches to a cache BEHAVIOR
-        # (chosen by path). A condition that can't reduce to one path can't gate
-        # it — a header/geo predicate would silently become unconditional, and a
-        # path condition would otherwise be dropped and the header applied to the
-        # WRONG (default) behavior. Reduce → place on that behavior; else report.
+        # (chosen by path). If the condition reduces to one path, place it there.
+        # If it CAN'T (a per-request header/geo/cookie predicate, or a multi-path
+        # OR), the native RHP can't gate it — but a viewer-response CloudFront
+        # Function CAN gate on any such condition, so fall back to a
+        # set/add/remove_response_header op rather than reporting non-convertible
+        # ("scope first, mechanism last"). A response-phase CFF still sees
+        # event.request, so request-header/geo/cookie predicates evaluate fine
+        # there. The op carries `cond` (the host-stripped rule condition) so the
+        # generated function gates on it — without that it would apply the header
+        # unconditionally (site-wide widening).
         path, reason = native_placement(result.get("condition") or cond)
         if reason:
-            _mark_result_non_convertible(ir, result, reason, expr)
-            return
-        beh = find_or_create_behavior(ir, path, domain_config, origin_content)
-        params = result["params"]
-        op = params.get("operation", "set")
-        if params.get("is_cors"):
-            if beh["response_headers_policy"]["cors"] is None:
-                beh["response_headers_policy"]["cors"] = {}
-            beh["response_headers_policy"]["cors"][params["name"]] = params["value"]
-            # Track if any CORS header uses "add" (origin_override = false).
-            # If mixed set/add across multiple rules, we use false (conservative
-            # — don't override origin). CloudFront cors_config.origin_override
-            # is per-config, not per-header.
-            if op == "add":
-                beh["response_headers_policy"]["cors"]["_origin_override"] = False
-        elif params.get("is_security"):
-            beh["response_headers_policy"]["security_headers"][params["name"]] = {
-                "value": params["value"], "operation": op,
+            operation = result["params"].get("operation", "set")
+            result["type"] = f"{operation}_response_header"
+            result["condition"] = cond
+            result["raw_expression"] = None
+            result["params"] = {
+                "name": result["params"]["name"],
+                "value": result["params"]["value"],
             }
+            rtype = result["type"]
+            # fall through to the generic viewer_response_ops placement below
         else:
-            beh["response_headers_policy"]["custom_headers"].append({
-                "name": params["name"], "value": params["value"], "operation": params["operation"],
-            })
-        return
+            beh = find_or_create_behavior(ir, path, domain_config, origin_content)
+            params = result["params"]
+            op = params.get("operation", "set")
+            if params.get("is_cors"):
+                if beh["response_headers_policy"]["cors"] is None:
+                    beh["response_headers_policy"]["cors"] = {}
+                beh["response_headers_policy"]["cors"][params["name"]] = params["value"]
+                # Track if any CORS header uses "add" (origin_override = false).
+                # If mixed set/add across multiple rules, we use false (conservative
+                # — don't override origin). CloudFront cors_config.origin_override
+                # is per-config, not per-header.
+                if op == "add":
+                    beh["response_headers_policy"]["cors"]["_origin_override"] = False
+            elif params.get("is_security"):
+                beh["response_headers_policy"]["security_headers"][params["name"]] = {
+                    "value": params["value"], "operation": op,
+                }
+            else:
+                beh["response_headers_policy"]["custom_headers"].append({
+                    "name": params["name"], "value": params["value"], "operation": params["operation"],
+                })
+            return
 
     if rtype == "serve_error_inline":
         # Inline error page served via CFF + KVS
@@ -666,9 +734,25 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         # A cloud connector switches the ORIGIN of a cache behavior (native,
         # path-scoped). A condition that can't reduce to one path can't gate it —
         # applying it to `*` would re-point the whole distribution's origin.
+        #
+        # Unlike a response header, this one CANNOT fall back to a viewer CFF: a
+        # Cloudflare Cloud Connector always targets a private object store (S3 /
+        # R2 / GCS / Azure). Switching origin to one via cf.updateRequestOrigin()
+        # sends an UNSIGNED request unless the function also emits an inline
+        # originAccessControlConfig SigV4 block AND the target bucket's policy
+        # trusts THIS distribution's ARN (confirmed w/ AWS docs). The converter
+        # can't author the external bucket's policy, and R2/GCS/Azure can't be
+        # SigV4-signed from a viewer function at all — a blind CFF fallback would
+        # silently 403 at runtime. A clear non-convertible is the honest outcome.
         path, reason = native_placement(result.get("condition") or cond)
         if reason:
-            _mark_result_non_convertible(ir, result, reason, expr)
+            _mark_result_non_convertible(
+                ir, result,
+                reason + " — and a conditional origin switch can't fall back to a "
+                "CloudFront Function here: updateRequestOrigin() to a private "
+                "S3/R2/GCS/Azure origin would be unsigned (403) without an OAC "
+                "block the converter can't generate",
+                expr)
             return
         beh = find_or_create_behavior(ir, path, domain_config, origin_content)
         params = result.get("params", {})
@@ -1167,7 +1251,23 @@ def _cache_cond_is_single_path(condition):
     # path_pattern), so it IS a single-path scope for this host's distribution.
     if condition.get("field") not in ("uri.path", "uri", "uri.path.extension", "full_uri"):
         return False
-    return extract_path_pattern_single(condition) != "*"
+    pattern = extract_path_pattern_single(condition)
+    if pattern == "*":
+        return False
+    # A CloudFront path pattern matches ONLY the URI path — never the query string.
+    # A full_uri (or uri) wildcard can carry a query, e.g.
+    # `full_uri wildcard "https://h/admin/*?x=*"` reduces to `/admin/*?x=*`; the `?`
+    # is not a query delimiter to CloudFront (it's a literal/path wildcard char), so
+    # this behavior would silently NOT match what the rule meant (or over-match).
+    # Such a pattern is NOT representable as one path pattern → not single-path.
+    # (Scheme is likewise unrepresentable in a path pattern; a full_uri whose only
+    # real constraint is http-vs-https collapses http:// and https:// to the same
+    # behavior, but the path check below already routes a query-bearing one out;
+    # a pure scheme+path like /admin/* is intentionally treated as path-only, which
+    # matches how CloudFront serves both schemes on one behavior.)
+    if "?" in pattern:
+        return False
+    return True
 
 
 def _is_pure_host_routing(condition):
