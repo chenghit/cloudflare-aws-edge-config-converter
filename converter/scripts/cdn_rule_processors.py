@@ -201,6 +201,26 @@ def _prune_unmappable(condition, target="cff"):
     return None, bad[0][1]
 
 
+def _raw_condition_unparseable_reason(raw_expr):
+    """If `raw_expr` is a deferred condition the FULL parser also can't structure
+    (e.g. a legal Cloudflare array form `headers["x"][0]` / `any(headers["x"][*]…)`,
+    or any syntax we don't model), return a non-convertible reason string; else
+    None. Shared by _resolve_unmappable_in_condition (the _screen_unmappable path)
+    and the processors that DON'T route through it (compression, cloud connector),
+    so an unparseable gate is reported the SAME way everywhere instead of being
+    silently dropped by the generator's comment-only guard. Single judgement point
+    — the generator uses this very parser and would just drop the action, so a raw
+    that fails here can never be salvaged downstream."""
+    if not raw_expr:
+        return None
+    try:
+        parse_expression_full(raw_expr)
+    except Exception:
+        return ("condition could not be parsed to a CloudFront-evaluable form: "
+                f"{raw_expr}")
+    return None
+
+
 def _resolve_unmappable_in_condition(condition, raw_expr=None, target="cff"):
     """Handle match-condition fields with no CloudFront equivalent.
 
@@ -217,10 +237,14 @@ def _resolve_unmappable_in_condition(condition, raw_expr=None, target="cff"):
         new_cond, reason = _prune_unmappable(condition, target)
         return new_cond, raw_expr, reason
     if raw_expr:
-        try:
-            full = parse_expression_full(raw_expr)
-        except Exception:
-            return condition, raw_expr, None  # generator has its own guard
+        # A raw the FULL parser can't structure would have its guarded action
+        # silently dropped by the generator (comment-only, unseen by the validator
+        # and the report). Report non-convertible here instead. Shared judgement
+        # with the non-_screen_unmappable processors via _raw_condition_unparseable_reason.
+        unparse_reason = _raw_condition_unparseable_reason(raw_expr)
+        if unparse_reason:
+            return condition, raw_expr, unparse_reason
+        full = parse_expression_full(raw_expr)  # now guaranteed to parse
         if not condition_unmappable_fields(full, target):
             return condition, raw_expr, None  # nothing unmappable; leave deferred
         new_cond, reason = _prune_unmappable(full, target)
@@ -827,6 +851,11 @@ def process_compression_rule(rule, ip_lists, phase):
             "ip.src condition in Compression Rules cannot be converted; "
             "CFF cannot control compression"
         )
+    # An unstructurable condition would be silently dropped downstream — report it
+    # (this processor doesn't route through _screen_unmappable).
+    _unparse = _raw_condition_unparseable_reason(raw_expr)
+    if _unparse:
+        return _make_non_convertible(rule, _unparse)
 
     return {
         "type": "compression_setting",
@@ -849,6 +878,11 @@ def process_cloud_connector(rule, ip_lists, phase):
     host = params.get("host", "")
 
     cond, raw_expr = parse_expression(expr)
+    # An unstructurable condition would be silently dropped downstream — report it
+    # (this processor doesn't route through _screen_unmappable).
+    _unparse = _raw_condition_unparseable_reason(raw_expr)
+    if _unparse:
+        return _make_non_convertible(rule, _unparse)
 
     return {
         "type": "cloud_connector",

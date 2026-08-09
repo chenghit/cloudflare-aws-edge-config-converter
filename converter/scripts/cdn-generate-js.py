@@ -446,10 +446,12 @@ def _condition_to_js(cond, target="cff", indent=2):
             # General occurrence-count form (rare: len gt 3, len eq 2, len lt 1, …).
             # CFF splits repeated headers into multiValue; a single occurrence has
             # none. CRITICAL: a MISSING field's len is `missing` in Cloudflare, so
-            # ANY comparison against it is FALSE — NOT length 0. So guard existence
-            # FIRST (else `len eq 0` / `ge 0` / `lt 1` fire on an absent field →
-            # silent widening). Inside the guard entry is present, count = 1 or the
-            # multiValue length. Negated keeps missing→false via `=== undefined ||`.
+            # the un-negated comparison `missing OP v` is FALSE — NOT length 0. So
+            # guard existence FIRST (else `len eq 0` / `ge 0` / `lt 1` fire on an
+            # absent field → silent widening). Inside the guard entry is present,
+            # count = 1 or the multiValue length. Under negation, `not(missing OP v)`
+            # = not(false) = TRUE, which `entry === undefined || !(…)` yields
+            # correctly (absent → the left disjunct is true).
             count = f"({entry}.multiValue ? {entry}.multiValue.length : 1)"
             js_cond = _op_to_js(count, base_op, value, field)
             if js_cond is _NEVER:

@@ -736,7 +736,10 @@ for _op in ('eq 0', 'ge 0', 'lt 1', 'le 0'):
     check(f"W-C1b-missing len(headers[x]) {_op} guards existence (missing->false, no widening)",
           _cjs(f'len(http.request.headers["x"]) {_op}'),
           expect_substr="request.headers['x'] !== undefined &&", forbid_substr="=== undefined ? 0")
-check("W-C1b-missing negated count keeps missing->false via `=== undefined ||`",
+# Negated: `not (len eq 0)` on a MISSING field is `not(missing eq 0)` = not(false)
+# = TRUE. The `entry === undefined || !(…)` form yields that (absent → left disjunct
+# true), which is correct — NOT missing->false.
+check("W-C1b-missing negated count: absent field -> TRUE via `=== undefined ||` (not(missing)=true)",
       _cjs('not (len(http.request.headers["x"]) eq 0)'),
       expect_substr="request.headers['x'] === undefined ||", forbid_substr="=== undefined ? 0")
 
@@ -778,13 +781,57 @@ check("W-C1c-robust uri.args[mode] in {set} carries name",
 
 # W-C1d: the LEGAL array forms Cloudflare actually uses — `headers["x"][0]` (one
 # element) and `any(headers["x"][*] ...)` — are NOT structured by our parser; they
-# must degrade to raw_expression (→ non-convertible / WARNING downstream), i.e.
-# FAIL-VISIBLE, never silently mis-rendered. Assert parse_expression returns raw.
+# must NOT be silently dropped. Round 3 found the old behavior WAS silent: the
+# parser deferred to raw, the processor emitted a plain op with a raw_expression,
+# and the generator then dropped the guarded action leaving only a
+# `// NON_CONVERTIBLE` comment that neither the JS validator nor
+# conversion_report.md surfaced. Fix: _resolve_unmappable_in_condition now reports
+# a raw condition the full parser can't structure as NON_CONVERTIBLE, so it lands
+# in the report instead of vanishing. Assert at the PROCESSOR level (the true
+# fail-visible signal), not just that the parser returned raw.
 for _legal in ('http.request.headers["x"][0] eq "1"',
                'any(http.request.headers["x"][*] eq "1")'):
     _c, _raw = _parser.parse_expression(_legal)
-    check(f"W-C1d legal array form {_legal[:38]}… -> raw (fail-visible, not silent)",
+    check(f"W-C1d {_legal[:34]}… -> parser defers to raw",
           "raw" if (_c is None and _raw) else f"structured:{_c}", expect_substr="raw")
+    # the header-transform processor must mark it non_convertible (was a plain op)
+    _res = _proc.process_request_header_transform(
+        header_rule(_legal, {"X-Foo": {"operation": "set", "value": "bar"}}),
+        {}, "http_request_late_transform")
+    _reslist = _res if isinstance(_res, list) else [_res]
+    _types = [r.get("type") for r in _reslist]
+    check(f"W-C1d {_legal[:34]}… -> processor marks NON_CONVERTIBLE (not a silent op)",
+          "non_convertible" if "non_convertible" in _types else f"types:{_types}",
+          expect_substr="non_convertible", forbid_substr="set_request_header")
+
+# W-C1d control: a normally-gated header transform (host eq) must STAY a real op —
+# the round-3 tightening must not over-report legitimate rules as non-convertible.
+_ctl = _proc.process_request_header_transform(
+    header_rule('http.host eq "www.x.com"', {"X-Foo": {"operation": "set", "value": "bar"}}),
+    {}, "http_request_late_transform")
+_ctllist = _ctl if isinstance(_ctl, list) else [_ctl]
+check("W-C1d control: host-gated header transform stays a real op (no over-report)",
+      str([r.get("type") for r in _ctllist]),
+      expect_substr="set_request_header", forbid_substr="non_convertible")
+
+# W-C1d-all: the fix covers EVERY condition-bearing processor, not just header
+# transform — incl. the two that DON'T route through _screen_unmappable
+# (compression, cloud connector), which also silently dropped an unstructurable
+# gate before. Assert both mark it non_convertible.
+_unp = 'http.request.headers["x"][0] eq "1"'
+def _nc(res):
+    rl = res if isinstance(res, list) else [res]
+    return "non_convertible" if any(isinstance(r, dict) and r.get("type") == "non_convertible" for r in rl) else str([r.get("type") for r in rl])
+check("W-C1d-all compression rule w/ unparseable cond -> non_convertible",
+      _nc(_proc.process_compression_rule(
+          {"id": "r", "description": "d", "enabled": True, "expression": _unp,
+           "action": "set_config", "action_parameters": {"algorithms": [{"name": "gzip"}]}}, {}, "")),
+      expect_substr="non_convertible")
+check("W-C1d-all cloud connector w/ unparseable cond -> non_convertible",
+      _nc(_proc.process_cloud_connector(
+          {"id": "r", "description": "d", "enabled": True, "expression": _unp,
+           "provider": "aws_s3", "parameters": {"host": "h"}}, {}, "")),
+      expect_substr="non_convertible")
 
 # C2: custom error — intercepted code from the CONDITION, returned code from the
 # action. Compound/OR/no-code conditions can't map -> non_convertible.
