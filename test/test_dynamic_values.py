@@ -707,57 +707,84 @@ check("W-C1 upper(uri.path) eq renders .toUpperCase()",
       _gen.condition_to_js(_parser.parse_expression_full('upper(http.request.uri.path) eq "/A"'), "cff"),
       expect_substr=".toUpperCase() === '/A'")
 
-# W-C1b: an INDEXED cookie/header/arg wrapped in len()/lower()/upper()/
-# starts_with()/ends_with() must resolve to the named-field accessor (with an
-# existence guard), NOT leak the raw "headers[\"x\"]" string and get screened
-# "unmappable" -> `false`. That silent-false killed the real-world Next.js RSC
-# cache-bypass gate `len(http.request.headers["rsc"]) > 0`. All three func
-# branches in _CDNParser._func_call must go through _map_field.
 def _cjs(expr):
     return _gen.condition_to_js(_parser.parse_expression_full(expr), "cff")
-# the exact image rule's gate (after host-strip). len() on an INDEXED field is
-# Cloudflare's "exists" idiom (a cookies/headers/uri.args value is Map<Array<String>>,
-# so len = element COUNT, not string length). len>0 / >=1 / !=0 therefore reduce to
-# a pure existence check — verified on a real CloudFront Function: a present-but-EMPTY
-# header ("") has value "" length 0, yet CF's len is 1, so `.value.length>0` was a
-# silent false-negative; `!== undefined` matches CF for empty, valued, and absent.
+
+# ── W-C1b: len() on an INDEXED cookie/header/arg — the REAL, Cloudflare-LEGAL case.
+# In Cloudflare a cookies/headers/uri.args value is Map<Array<String>>, and len()
+# accepts an Array, so `len(http.request.headers["rsc"])` is LEGAL and means the
+# element COUNT (how many times the name appears), NOT the string length of a value.
+# The dashboard "exists" operator emits `len(...) > 0`. Verified on a real CloudFront
+# Function: a present-but-EMPTY header ("") has value "" / length 0 yet CF's len is 1,
+# so `.value.length > 0` was a silent false-negative. The exists idiom (>0 / >=1 / !=0)
+# renders as a pure existence check; other comparisons render the multiValue count,
+# existence-GUARDED (a MISSING field's len is `missing` → every comparison is false).
 check("W-C1b len(headers[rsc])>0 -> pure existence (CF exists idiom, NOT .value.length)",
       _cjs('len(http.request.headers["rsc"]) > 0'),
       expect_substr="request.headers['rsc'] !== undefined",
       forbid_substr=".value.length")
-# non-exists count form (len gt 3 = header appears >3 times) -> multiValue count,
-# NOT string length (also runtime-verified: multiValue.length is the occurrence count)
-check("W-C1b len(cookies[sid]) gt 3 -> occurrence count via multiValue",
+check("W-C1b len(cookies[sid]) gt 3 -> guarded occurrence count via multiValue",
       _cjs('len(http.request.cookies["sid"]) gt 3'),
-      expect_substr="request.cookies['sid'].multiValue.length : 1)) > 3", forbid_substr="false")
-check("W-C1b lower(headers[x-env]) eq -> named-header toLowerCase",
-      _cjs('lower(http.request.headers["x-env"]) eq "prod"'),
-      expect_substr="request.headers['x-env'].value.toLowerCase() === 'prod'", forbid_substr="false")
-check("W-C1b upper(cookies[Theme]) eq -> named-cookie toUpperCase",
-      _cjs('upper(http.request.cookies["Theme"]) eq "DARK"'),
-      expect_substr="request.cookies['Theme'].value.toUpperCase() === 'DARK'", forbid_substr="false")
-check("W-C1b starts_with(headers[ref], ..) -> named-header startsWith",
-      _cjs('starts_with(http.request.headers["ref"], "http")'),
-      expect_substr="request.headers['ref'].value.startsWith('http')", forbid_substr="false")
-check("W-C1b ends_with(uri.args[p], ..) -> named-arg endsWith",
-      _cjs('ends_with(http.request.uri.args["p"], ".json")'),
-      expect_substr="request.querystring['p'].value.endsWith('.json')", forbid_substr="false")
+      expect_substr="request.cookies['sid'] !== undefined && (request.cookies['sid'].multiValue ? request.cookies['sid'].multiValue.length : 1) > 3",
+      forbid_substr=".value.length")
 
-# W-C1c: an INDEXED field with `in {set}` must keep its name too — the _field_expr
-# `in` return paths (both {set} and $list) were dropping **extra, so the name
-# resolved to "" and rendered `request.cookies[''] ...` (empty-string key ->
-# silently never matches, invisible to both the unmappable screen and
-# cdn-validate-js). Same bug class as W-C1b's _func_call fix, sibling branch.
-check("W-C1c cookies[env] in {set} -> real key, not empty string",
+# W-C1b-missing: a MISSING indexed field's len is `missing` in Cloudflare, so ANY
+# comparison is FALSE — never length 0. So every count form must be existence-guarded
+# (else `len eq 0` / `ge 0` / `lt 1` fire on an absent field → silent widening).
+# Assert the guard is present and it's NOT the raw-0 form `=== undefined ? 0`.
+for _op in ('eq 0', 'ge 0', 'lt 1', 'le 0'):
+    check(f"W-C1b-missing len(headers[x]) {_op} guards existence (missing->false, no widening)",
+          _cjs(f'len(http.request.headers["x"]) {_op}'),
+          expect_substr="request.headers['x'] !== undefined &&", forbid_substr="=== undefined ? 0")
+check("W-C1b-missing negated count keeps missing->false via `=== undefined ||`",
+      _cjs('not (len(http.request.headers["x"]) eq 0)'),
+      expect_substr="request.headers['x'] === undefined ||", forbid_substr="=== undefined ? 0")
+
+# ── W-C1b-robust: lower()/upper()/starts_with()/ends_with() wrapping a BARE indexed
+# field, and `in {set}` / `eq` on a bare indexed field. NOTE these are NOT valid
+# Cloudflare syntax — a Map<Array<String>> value can't be used directly as a String;
+# Cloudflare requires `headers["x"][0]` (one element) or `headers["x"][*]` inside
+# any()/all(). A real backup will NEVER contain these forms. These are ROBUSTNESS
+# tests: the parser is lenient (it doesn't validate CF type rules), so if such an
+# expression ever reaches it (edge/malformed input), the fix must still route the
+# field through _map_field and carry the name — NOT leak `headers['']` (empty key,
+# silent never-match). They assert the name survives, not that the form is legal.
+check("W-C1b-robust lower(headers[x-env]) carries name (parser leniency, not legal CF)",
+      _cjs('lower(http.request.headers["x-env"]) eq "prod"'),
+      expect_substr="request.headers['x-env'].value.toLowerCase() === 'prod'", forbid_substr="headers['']")
+check("W-C1b-robust upper(cookies[Theme]) carries name",
+      _cjs('upper(http.request.cookies["Theme"]) eq "DARK"'),
+      expect_substr="request.cookies['Theme'].value.toUpperCase() === 'DARK'", forbid_substr="cookies['']")
+check("W-C1b-robust starts_with(headers[ref]) carries name",
+      _cjs('starts_with(http.request.headers["ref"], "http")'),
+      expect_substr="request.headers['ref'].value.startsWith('http')", forbid_substr="headers['']")
+check("W-C1b-robust ends_with(uri.args[p]) carries name",
+      _cjs('ends_with(http.request.uri.args["p"], ".json")'),
+      expect_substr="request.querystring['p'].value.endsWith('.json')", forbid_substr="querystring['']")
+
+# W-C1c-robust: `in {set}` on a bare indexed field — also not legal CF syntax (same
+# array-as-string issue), a robustness test that the _field_expr `in` return carries
+# the name (was dropping **extra → `request.cookies[''] ...`, silent never-match).
+check("W-C1c-robust cookies[env] in {set} carries name, not empty key",
       _cjs('http.request.cookies["env"] in {"prod" "staging"}'),
       expect_substr="['prod', 'staging'].includes(request.cookies['env'].value)",
       forbid_substr="cookies['']")
-check("W-C1c headers[x-env] in {set} -> real key (lowercased), not empty",
+check("W-C1c-robust headers[x-env] in {set} carries name (lowercased)",
       _cjs('http.request.headers["x-env"] in {"a" "b"}'),
       expect_substr="request.headers['x-env']", forbid_substr="headers['']")
-check("W-C1c uri.args[mode] in {set} -> real key, not empty",
+check("W-C1c-robust uri.args[mode] in {set} carries name",
       _cjs('http.request.uri.args["mode"] in {"1"}'),
       expect_substr="request.querystring['mode']", forbid_substr="querystring['']")
+
+# W-C1d: the LEGAL array forms Cloudflare actually uses — `headers["x"][0]` (one
+# element) and `any(headers["x"][*] ...)` — are NOT structured by our parser; they
+# must degrade to raw_expression (→ non-convertible / WARNING downstream), i.e.
+# FAIL-VISIBLE, never silently mis-rendered. Assert parse_expression returns raw.
+for _legal in ('http.request.headers["x"][0] eq "1"',
+               'any(http.request.headers["x"][*] eq "1")'):
+    _c, _raw = _parser.parse_expression(_legal)
+    check(f"W-C1d legal array form {_legal[:38]}… -> raw (fail-visible, not silent)",
+          "raw" if (_c is None and _raw) else f"structured:{_c}", expect_substr="raw")
 
 # C2: custom error — intercepted code from the CONDITION, returned code from the
 # action. Compound/OR/no-code conditions can't map -> non_convertible.

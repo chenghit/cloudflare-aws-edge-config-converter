@@ -443,14 +443,20 @@ def _condition_to_js(cond, target="cff", indent=2):
             EXISTS_IDIOM = {("gt", 0), ("ge", 1), ("ne", 0)}
             if (base_op, _num) in EXISTS_IDIOM:
                 return f"{entry} === undefined" if negated else f"{entry} !== undefined"
-            # General occurrence-count form (rare: len gt 3, len eq 2, …). CFF splits
-            # repeated headers into multiValue; a single occurrence has no multiValue.
-            count = (f"({entry} === undefined ? 0 : "
-                     f"({entry}.multiValue ? {entry}.multiValue.length : 1))")
+            # General occurrence-count form (rare: len gt 3, len eq 2, len lt 1, …).
+            # CFF splits repeated headers into multiValue; a single occurrence has
+            # none. CRITICAL: a MISSING field's len is `missing` in Cloudflare, so
+            # ANY comparison against it is FALSE — NOT length 0. So guard existence
+            # FIRST (else `len eq 0` / `ge 0` / `lt 1` fire on an absent field →
+            # silent widening). Inside the guard entry is present, count = 1 or the
+            # multiValue length. Negated keeps missing→false via `=== undefined ||`.
+            count = f"({entry}.multiValue ? {entry}.multiValue.length : 1)"
             js_cond = _op_to_js(count, base_op, value, field)
             if js_cond is _NEVER:
                 return _NEVER
-            return f"!({js_cond})" if negated else js_cond
+            if negated:
+                return f"{entry} === undefined || !({js_cond})"
+            return f"{entry} !== undefined && {js_cond}"
         # scalar value comparison: guard existence, then compare .value
         val_expr = _apply_leaf_modifiers(f"{entry}.value", cond)
         js_cond = _op_to_js(val_expr, base_op, value, field)
