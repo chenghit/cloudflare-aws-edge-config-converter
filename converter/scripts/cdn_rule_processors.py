@@ -646,25 +646,36 @@ def process_cache_rule(rule, ip_lists, phase):
             # placement layer decides whether a CFF can faithfully restore it.
             result["params"]["browser_ttl_respect_origin"] = True
 
-    # Cache key
+    # Cache key. Cloudflare's cache_key.custom_key.query_string has TWO documented
+    # shapes and we must not chain .get() blindly on either (a wrong assumption
+    # crashed preprocess with "'list' object has no attribute 'get'"):
+    #   - list form:  {"include": ["*"]}  or  {"include": ["a","b"]}  (["*"] = all)
+    #                 {"exclude": ["*"]}                              (["*"] = none)
+    #   - object form:{"include": {"all": true}} / {"include": {"list": [...]}} / …
+    # `_qs_selector` decodes both to (mode, list) and returns (None, None) for an
+    # unrecognized shape so the leaf-inventory reports it NC rather than crashing.
     if custom_key:
         qs = custom_key.get("query_string", {})
-        if qs.get("exclude", {}).get("all"):
-            result["params"]["cache_key_qs"] = "none"
-        elif qs.get("include", {}).get("all"):
-            result["params"]["cache_key_qs"] = "all"
-        elif qs.get("include", {}).get("list"):
-            result["params"]["cache_key_qs"] = "whitelist"
-            result["params"]["cache_key_qs_list"] = qs["include"]["list"]
-        elif qs.get("exclude", {}).get("list"):
-            result["params"]["cache_key_qs"] = "allExcept"
-            result["params"]["cache_key_qs_exclude"] = qs["exclude"]["list"]
+        if isinstance(qs, dict):
+            mode, qlist = _qs_selector(qs)
+            if mode == "all":
+                result["params"]["cache_key_qs"] = "all"
+            elif mode == "none":
+                result["params"]["cache_key_qs"] = "none"
+            elif mode == "whitelist":
+                result["params"]["cache_key_qs"] = "whitelist"
+                result["params"]["cache_key_qs_list"] = qlist
+            elif mode == "allExcept":
+                result["params"]["cache_key_qs"] = "allExcept"
+                result["params"]["cache_key_qs_exclude"] = qlist
+            # mode None → unrecognized shape: left for the leaf inventory to flag NC.
 
         headers = custom_key.get("header", {})
-        if headers.get("include"):
-            result["params"]["cache_key_headers"] = headers["include"]
-        if headers.get("contains"):
-            result["params"]["cache_key_header_contains"] = headers["contains"]
+        if isinstance(headers, dict):
+            if headers.get("include"):
+                result["params"]["cache_key_headers"] = headers["include"]
+            if headers.get("contains"):
+                result["params"]["cache_key_header_contains"] = headers["contains"]
 
         user = custom_key.get("user", {})
         if user.get("device_type"):
@@ -694,6 +705,40 @@ def process_cache_rule(rule, ip_lists, phase):
     result["_configured"] = _leaf_paths(action_params)
 
     return result
+
+
+def _qs_selector(qs):
+    """Decode a Cloudflare cache_key query_string selector to (mode, list).
+
+    mode ∈ {"all","none","whitelist","allExcept", None}; list is the explicit names
+    for whitelist/allExcept else None. Handles BOTH documented shapes and returns
+    (None, None) for anything unrecognized (caller reports it non-convertible rather
+    than crashing). `["*"]` means all (include) / none (exclude); `[]` or missing is
+    treated as unrecognized.
+    """
+    inc = qs.get("include")
+    exc = qs.get("exclude")
+    # list form: {"include": [...]}, {"exclude": [...]}  (["*"] = all/none)
+    if isinstance(inc, list):
+        if inc == ["*"]:
+            return "all", None
+        return ("whitelist", inc) if inc else (None, None)
+    if isinstance(exc, list):
+        if exc == ["*"]:
+            return "none", None
+        return ("allExcept", exc) if exc else (None, None)
+    # object form: {"include": {"all": true}} / {"include": {"list": [...]}} / exclude
+    if isinstance(inc, dict):
+        if inc.get("all"):
+            return "all", None
+        if inc.get("list"):
+            return "whitelist", inc["list"]
+    if isinstance(exc, dict):
+        if exc.get("all"):
+            return "none", None
+        if exc.get("list"):
+            return "allExcept", exc["list"]
+    return None, None
 
 
 def _leaf_paths(obj, prefix=""):

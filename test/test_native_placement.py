@@ -606,6 +606,29 @@ check("P1: nested cache_key.custom_key.cookie leaf reported (TTL still applied)"
       _cache_ttl(ir, "*") == 60
       and any("cookie" in n.get("reason", "") for n in _all_nc(ir)), f"nc={_all_nc(ir)}")
 
+print("== ACCEPTANCE(L4): Cloudflare query_string schema shapes don't crash preprocess ==")
+# The real Cloudflare API shape is a LIST ({"include": ["*"]}); the old code assumed
+# a dict and crashed preprocess FATAL. Both shapes must parse; ["*"] = all.
+ir = _preprocess({"Cache-Rules.txt": _wrap([
+    _rule("u1" + "0" * 30, "true", "x",
+          {"cache": True, "cache_key": {"custom_key": {"query_string": {"include": ["*"]}}}},
+          "qs list all")])})
+check("L4: query_string include=['*'] (list form) -> cache_key qs=all, no crash",
+      _behavior(ir, "*")["cache_policy"]["cache_key"]["query_strings"] == "all")
+ir = _preprocess({"Cache-Rules.txt": _wrap([
+    _rule("u2" + "0" * 30, "true", "x",
+          {"cache": True, "cache_key": {"custom_key": {"query_string": {"include": ["a", "b"]}}}},
+          "qs list whitelist")])})
+check("L4: query_string include=['a','b'] (list form) -> whitelist [a,b]",
+      _behavior(ir, "*")["cache_policy"]["cache_key"]["query_strings"] == "whitelist"
+      and _behavior(ir, "*")["cache_policy"]["cache_key"]["query_strings_list"] == ["a", "b"])
+ir = _preprocess({"Cache-Rules.txt": _wrap([
+    _rule("u3" + "0" * 30, "true", "x",
+          {"cache": True, "cache_key": {"custom_key": {"query_string": {"include": {"all": True}}}}},
+          "qs object all")])})
+check("L4: query_string include={all:true} (object form) -> qs=all",
+      _behavior(ir, "*")["cache_policy"]["cache_key"]["query_strings"] == "all")
+
 
 if __name__ == "__main__":
     print()
