@@ -476,6 +476,18 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
     return ir
 
 
+def _mark_result_non_convertible(ir, result, reason, expr=None):
+    """Record a native-mechanism result as non-convertible on the default behavior
+    (the single sink the report reads). Used when native_placement() rejects a
+    condition — so the rule lands in conversion_report.md instead of being
+    silently applied to `*` (widening) or dropped."""
+    ir["cache_behaviors"][0]["non_convertible"].append({
+        "cf_source_rule": result.get("cf_source_rule", ""),
+        "description": result.get("description", ""),
+        "reason": f"{reason}. Scope: {result.get('raw_expression') or expr or '(complex)'}",
+    })
+
+
 def _place_result(ir, result, domain_config, origin_content, cond, expr):
     """Place a processed rule result into the appropriate IR location."""
     if result is None:
@@ -505,7 +517,13 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         return
 
     if rtype == "compression_setting":
-        path = _extract_path_from_result(result, cond, expr)
+        # Compression is a cache-policy attribute (native, path-scoped only). A
+        # condition that can't reduce to one path can't gate it — report rather
+        # than apply it to `*` (which would toggle compression site-wide).
+        path, reason = native_placement(result.get("condition") or cond)
+        if reason:
+            _mark_result_non_convertible(ir, result, reason, expr)
+            return
         beh = find_or_create_behavior(ir, path, domain_config, origin_content)
         params = result.get("params", {})
         beh["cache_policy"]["enable_gzip"] = params.get("enable_gzip", True)
@@ -513,26 +531,34 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         return
 
     if rtype == "response_headers_policy":
-        # Static header → RHP on default behavior
-        default_beh = ir["cache_behaviors"][0]
+        # A response-headers policy is native and attaches to a cache BEHAVIOR
+        # (chosen by path). A condition that can't reduce to one path can't gate
+        # it — a header/geo predicate would silently become unconditional, and a
+        # path condition would otherwise be dropped and the header applied to the
+        # WRONG (default) behavior. Reduce → place on that behavior; else report.
+        path, reason = native_placement(result.get("condition") or cond)
+        if reason:
+            _mark_result_non_convertible(ir, result, reason, expr)
+            return
+        beh = find_or_create_behavior(ir, path, domain_config, origin_content)
         params = result["params"]
         op = params.get("operation", "set")
         if params.get("is_cors"):
-            if default_beh["response_headers_policy"]["cors"] is None:
-                default_beh["response_headers_policy"]["cors"] = {}
-            default_beh["response_headers_policy"]["cors"][params["name"]] = params["value"]
+            if beh["response_headers_policy"]["cors"] is None:
+                beh["response_headers_policy"]["cors"] = {}
+            beh["response_headers_policy"]["cors"][params["name"]] = params["value"]
             # Track if any CORS header uses "add" (origin_override = false).
             # If mixed set/add across multiple rules, we use false (conservative
             # — don't override origin). CloudFront cors_config.origin_override
             # is per-config, not per-header.
             if op == "add":
-                default_beh["response_headers_policy"]["cors"]["_origin_override"] = False
+                beh["response_headers_policy"]["cors"]["_origin_override"] = False
         elif params.get("is_security"):
-            default_beh["response_headers_policy"]["security_headers"][params["name"]] = {
+            beh["response_headers_policy"]["security_headers"][params["name"]] = {
                 "value": params["value"], "operation": op,
             }
         else:
-            default_beh["response_headers_policy"]["custom_headers"].append({
+            beh["response_headers_policy"]["custom_headers"].append({
                 "name": params["name"], "value": params["value"], "operation": params["operation"],
             })
         return
@@ -637,7 +663,13 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         return
 
     if rtype == "cloud_connector":
-        path = _extract_path_from_result(result, cond, expr)
+        # A cloud connector switches the ORIGIN of a cache behavior (native,
+        # path-scoped). A condition that can't reduce to one path can't gate it —
+        # applying it to `*` would re-point the whole distribution's origin.
+        path, reason = native_placement(result.get("condition") or cond)
+        if reason:
+            _mark_result_non_convertible(ir, result, reason, expr)
+            return
         beh = find_or_create_behavior(ir, path, domain_config, origin_content)
         params = result.get("params", {})
         beh["origin"]["domain"] = params.get("origin_host", beh["origin"]["domain"])
@@ -1136,6 +1168,49 @@ def _cache_cond_is_single_path(condition):
     if condition.get("field") not in ("uri.path", "uri", "uri.path.extension", "full_uri"):
         return False
     return extract_path_pattern_single(condition) != "*"
+
+
+def _is_pure_host_routing(condition):
+    """True if `condition` is ENTIRELY host-routing leaves the router consumed —
+    including an OR of them (`host eq a or host eq b`), which _strip_host_condition
+    deliberately leaves intact (the classifier already routed it). After routing,
+    such a condition is unconditional on each distribution it reached, so a native
+    mechanism can honor it globally on that distribution. A full_uri leaf is NOT
+    pure host-routing (its path part still matters). Fixes the pure-host-OR
+    false-negative."""
+    if condition is None or condition.get("always"):
+        return True
+    if "logic" in condition:
+        if condition["logic"] == "not":
+            return _is_pure_host_routing(condition.get("item"))
+        parts = condition.get("parts", [])
+        return bool(parts) and all(_is_pure_host_routing(p) for p in parts)
+    return host_leaf_is_routing(condition)
+
+
+def native_placement(condition):
+    """The placement decision for a rule mapped to a NATIVE CloudFront mechanism
+    (distribution setting / cache-behavior setting / response-headers policy /
+    compression / cloud-connector origin) — mechanisms that can only be scoped by
+    a single path pattern, NOT by a per-request predicate (header/cookie/geo/…).
+
+    THE INVARIANT (was enforced only in the cache_setting branch; this generalizes
+    it to every native mechanism): after host-routing is consumed, the condition
+    must reduce to ONE CloudFront path pattern, else the mechanism can't carry it
+    faithfully and it must be reported non-convertible — never silently placed on
+    `*` (which widens a scoped setting site-wide) or dropped.
+
+    Returns (path, None) when placeable — `path` is the pattern to attach to
+    (`*` for unconditional / pure-host-routing) — or (None, reason) when the
+    condition can't be represented, so the caller marks it non-convertible.
+    `condition` must already be host-stripped (the caller strips before placing)."""
+    if _is_pure_host_routing(condition):
+        return "*", None
+    if _cache_cond_is_single_path(condition):
+        return extract_path_pattern_single(condition), None
+    return None, ("condition cannot be scoped to a single CloudFront path pattern "
+                  "(a native cache/behavior/header/compression/origin setting can't "
+                  "be gated per-request on headers/cookies/geo or a multi-path OR)")
 
 
 def _condition_is_pure_extension(condition):

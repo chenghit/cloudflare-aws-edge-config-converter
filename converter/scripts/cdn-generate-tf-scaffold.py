@@ -362,7 +362,12 @@ def generate_main_tf(ir, manifest, domain_to_origin_id, origins):
             w('    {')
             w(f'      path_pattern           = "{b["path_pattern"]}"')
             w(f'      target_origin_id       = "{b_origin_id}"')
-            w(f'      viewer_protocol_policy = "redirect-to-https"')
+            # ViewerProtocolPolicy is REQUIRED per behavior and NOT inherited
+            # (verified against AWS docs). An `ssl` Configuration Rule sets it, so
+            # every behavior must carry the SAME value as the default, or an
+            # allow-all default would sit next to a hardcoded redirect-to-https
+            # ordered behavior (inconsistent). Read the shared value, don't hardcode.
+            w(f'      viewer_protocol_policy = "{ds.get("viewer_protocol_policy", "redirect-to-https")}"')
             w(f'      compress               = true')
             b_cp = b.get("cache_policy_id")
             if b_cp:

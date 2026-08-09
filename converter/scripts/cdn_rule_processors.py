@@ -485,17 +485,22 @@ def process_config_rule(rule, ip_lists, phase):
                 "reason": reason,
             })
         elif setting == "ssl":
-            # SSL mode → distribution setting, but ONLY if the condition is
-            # unconditional / pure host-routing (else it would widen to the whole
-            # distribution — see _config_setting_scope_ok).
+            # ssl mode → ViewerProtocolPolicy, which is PER-CACHE-BEHAVIOR in
+            # CloudFront (required on each, not inherited — verified vs AWS docs).
+            # The scaffold applies this one value to the default AND every ordered
+            # behavior, so it's a site-wide policy. That's only faithful when the
+            # rule is unconditional / pure host-routing (site-wide after routing);
+            # a per-request condition (path/header/geo) can't select a subset of
+            # behaviors here, so report it rather than apply site-wide (widening).
             if not _scope_ok:
                 results.append({
                     "type": "non_convertible",
                     "cf_source_rule": rule.get("id", ""),
                     "description": f"{rule.get('description', '')}: {setting}",
-                    "reason": ("ssl mode is a distribution-level setting and can't be "
-                               "gated by a per-request condition; applying it "
-                               f"unconditionally would widen it. Condition: {expr}"),
+                    "reason": ("ssl mode maps to ViewerProtocolPolicy applied to all "
+                               "cache behaviors (site-wide); it can't be gated by a "
+                               "per-request condition without widening. "
+                               f"Condition: {expr}"),
                 })
             else:
                 results.append({
