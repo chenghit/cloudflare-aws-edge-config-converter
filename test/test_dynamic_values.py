@@ -715,14 +715,21 @@ check("W-C1 upper(uri.path) eq renders .toUpperCase()",
 # branches in _CDNParser._func_call must go through _map_field.
 def _cjs(expr):
     return _gen.condition_to_js(_parser.parse_expression_full(expr), "cff")
-# the exact image rule's gate (after host-strip): must be a real rsc-present test
-check("W-C1b len(headers[rsc])>0 -> named-header length test (NOT false)",
+# the exact image rule's gate (after host-strip). len() on an INDEXED field is
+# Cloudflare's "exists" idiom (a cookies/headers/uri.args value is Map<Array<String>>,
+# so len = element COUNT, not string length). len>0 / >=1 / !=0 therefore reduce to
+# a pure existence check — verified on a real CloudFront Function: a present-but-EMPTY
+# header ("") has value "" length 0, yet CF's len is 1, so `.value.length>0` was a
+# silent false-negative; `!== undefined` matches CF for empty, valued, and absent.
+check("W-C1b len(headers[rsc])>0 -> pure existence (CF exists idiom, NOT .value.length)",
       _cjs('len(http.request.headers["rsc"]) > 0'),
-      expect_substr="request.headers['rsc'] !== undefined && request.headers['rsc'].value.length > 0",
-      forbid_substr="false")
-check("W-C1b len(cookies[sid]) gt 3 -> named-cookie length",
+      expect_substr="request.headers['rsc'] !== undefined",
+      forbid_substr=".value.length")
+# non-exists count form (len gt 3 = header appears >3 times) -> multiValue count,
+# NOT string length (also runtime-verified: multiValue.length is the occurrence count)
+check("W-C1b len(cookies[sid]) gt 3 -> occurrence count via multiValue",
       _cjs('len(http.request.cookies["sid"]) gt 3'),
-      expect_substr="request.cookies['sid'].value.length > 3", forbid_substr="false")
+      expect_substr="request.cookies['sid'].multiValue.length : 1)) > 3", forbid_substr="false")
 check("W-C1b lower(headers[x-env]) eq -> named-header toLowerCase",
       _cjs('lower(http.request.headers["x-env"]) eq "prod"'),
       expect_substr="request.headers['x-env'].value.toLowerCase() === 'prod'", forbid_substr="false")

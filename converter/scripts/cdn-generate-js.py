@@ -427,6 +427,30 @@ def _condition_to_js(cond, target="cff", indent=2):
         entry = f"{base}[{js_string(name)}]"
         if value is True:  # existence form
             return f"{entry} === undefined" if negated else f"{entry} !== undefined"
+        # len(indexed field): a cookies/headers/uri.args value is a Map<Array<String>>
+        # in Cloudflare, so `len(...)` is the NUMBER OF ELEMENTS (how many times the
+        # name appears), NOT the string length of a value — verified against CF docs
+        # and CFF runtime (a present-but-empty header has value "" / length 0, yet
+        # Cloudflare's len is 1). So `.value.length` was WRONG: it under-fired for a
+        # present-but-empty value (silent false-negative). Render the real occurrence
+        # count instead. The common `len(...) > 0 | >= 1 | ne 0` "exists" idiom then
+        # reduces to a pure existence check (matches CF and is crash-free — a missing
+        # key is `undefined`, guarded here; a present key always has a string .value,
+        # runtime-verified).
+        if cond.get("size_check"):
+            _num = value if isinstance(value, (int, float)) else None
+            # The "exists" idiom: len > 0 / len >= 1 / len != 0 all mean "present".
+            EXISTS_IDIOM = {("gt", 0), ("ge", 1), ("ne", 0)}
+            if (base_op, _num) in EXISTS_IDIOM:
+                return f"{entry} === undefined" if negated else f"{entry} !== undefined"
+            # General occurrence-count form (rare: len gt 3, len eq 2, …). CFF splits
+            # repeated headers into multiValue; a single occurrence has no multiValue.
+            count = (f"({entry} === undefined ? 0 : "
+                     f"({entry}.multiValue ? {entry}.multiValue.length : 1))")
+            js_cond = _op_to_js(count, base_op, value, field)
+            if js_cond is _NEVER:
+                return _NEVER
+            return f"!({js_cond})" if negated else js_cond
         # scalar value comparison: guard existence, then compare .value
         val_expr = _apply_leaf_modifiers(f"{entry}.value", cond)
         js_cond = _op_to_js(val_expr, base_op, value, field)
