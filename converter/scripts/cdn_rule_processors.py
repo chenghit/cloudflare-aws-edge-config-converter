@@ -603,7 +603,6 @@ def process_cache_rule(rule, ip_lists, phase):
     if nc:
         return nc
 
-    cache_enabled = action_params.get("cache", True)
     edge_ttl = action_params.get("edge_ttl", {})
     browser_ttl = action_params.get("browser_ttl", {})
     cache_key = action_params.get("cache_key", {})
@@ -615,10 +614,16 @@ def process_cache_rule(rule, ip_lists, phase):
         "description": rule.get("description", ""),
         "condition": cond,
         "raw_expression": raw_expr,
-        "params": {
-            "bypass": not cache_enabled,
-        },
+        "params": {},
     }
+
+    # Cache eligibility is TRI-STATE: only emit `bypass` when the rule EXPLICITLY
+    # sets `cache`. A rule that only tweaks TTL/cache-key leaves `bypass` ABSENT, so
+    # it neither disables nor re-enables caching — a prior cache=false rule's
+    # setting must survive (Cloudflare: an unspecified setting doesn't reset it).
+    # bypass=True → disable; bypass=False → an explicit re-enable (cache=true).
+    if "cache" in action_params:
+        result["params"]["bypass"] = not action_params["cache"]
 
     # TTL
     if edge_ttl:

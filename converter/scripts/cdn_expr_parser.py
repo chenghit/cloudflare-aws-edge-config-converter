@@ -920,7 +920,10 @@ class _CDNParser:
             if mapped == "full_uri":
                 host_pat, path_pat, scheme = _parse_full_uri_wildcard(value)
                 if host_pat and path_pat:
-                    return {"field": "full_uri", "op": "wildcard", "value": value,
+                    # Preserve the ORIGINAL op — a full_uri STRICT wildcard is
+                    # case-sensitive; collapsing it to "wildcard" would render a
+                    # case-insensitive match and wrongly match case variants.
+                    return {"field": "full_uri", "op": op, "value": value,
                             "host_pattern": host_pat, "path_pattern": path_pat,
                             "scheme": scheme}
             return {"field": mapped, "op": "wildcard" if op == "wildcard" else "strict_wildcard", "value": value, **extra}

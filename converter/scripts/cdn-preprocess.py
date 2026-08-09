@@ -591,11 +591,16 @@ def _record_native_effect(ir, scope_pattern, kind, params, source):
     """Append a native effect to the ordered replay log. `scope_pattern` is the
     CloudFront path pattern the effect applies to (`*` = whole distribution).
     `kind` selects the applier branch in _apply_native_effect; `source` carries
-    cf_source_rule/description for non-convertible reporting."""
+    cf_source_rule/description for non-convertible reporting. `condition` is the
+    processor's SCREENED, host-stripped condition — kept so that if this effect is
+    later re-homed to the CFF (mixed-op header reconciliation) it carries its
+    authoritative runtime predicate, not the behavior association as a stand-in."""
     ir["_native_effects"].append({
         "scope": scope_pattern, "kind": kind, "params": params,
         "cf_source_rule": source.get("cf_source_rule", ""),
         "description": source.get("description", ""),
+        "condition": source.get("condition"),
+        "raw_expression": source.get("raw_expression"),
         "seq": ir.get("_seq", 0),   # source order (replay is order-sensitive: last wins)
     })
 
@@ -701,30 +706,52 @@ def _replay_native_effects(ir, domain_config, origin_content):
 
 
 def _reconcile_mixed_op_headers(ir, domain_config, origin_content):
-    """AWS executes a Response Headers Policy BEFORE the viewer-response function.
-    So if the SAME header name is set via the RHP (native) but ALSO removed/changed
-    via a CFF op (e.g. `remove` isn't RHP-expressible), the two mechanisms run in
-    RHP-then-CFF order — which REVERSES Cloudflare's source order when the CFF op
-    came from an EARLIER rule. Fix: when a header name has both an RHP effect and a
-    CFF response-header op, move ALL of that header's RHP effects into the CFF too,
-    so every op for the header lives in one mechanism and emits in `seq` order
-    (last-wins preserved). Runs before replay, so the moved effects never reach the
-    RHP."""
-    # header names (lowercased) that already have a CFF response-header op
-    cff_hdr_names = set()
+    """ONE MECHANISM PER HEADER NAME. A response header can be served natively (RHP,
+    which AWS runs BEFORE the viewer-response function) OR by the CFF, but if BOTH
+    touch the same header the fixed RHP-then-CFF order can't reproduce arbitrary
+    Cloudflare source order (e.g. remove(rule1)+set(rule2) → RHP-set + CFF-remove →
+    wrongly removed). And CORS `origin_override` is a single policy-level flag that
+    can't represent mixed add/set across rules. So: decide the mechanism per
+    lowercased header name over ALL its ops; if the group is NOT pure-RHP-safe, move
+    every RHP effect for that name into the CFF, PRESERVING each effect's own
+    screened condition/raw/seq (never a stand-in `always` — that widened /Admin/*
+    to every path). Runs before replay so moved effects never reach the RHP.
+
+    A group is NOT pure-RHP-safe when the header already has ANY CFF response-header
+    op (remove / dynamic value / per-request condition), OR it is a CORS header with
+    MIXED add/set operations (the shared origin_override flag can't encode both).
+    """
+    # Per lowercased header name: RHP effect indices, and CFF-op / CORS-op presence.
+    effects = ir.get("_native_effects", [])
+    rhp_by_name = {}          # name -> list of effect dicts (rhp_security/rhp_cors)
+    for e in effects:
+        if e["kind"] in ("rhp_security", "rhp_cors") and not e["params"].get("_managed"):
+            rhp_by_name.setdefault(e["params"]["name"].lower(), []).append(e)
+    cff_names = set()         # names with an existing CFF response-header op
     for beh in ir["cache_behaviors"]:
         for op in beh.get("viewer_response_ops", []):
             if op.get("type", "").endswith("_response_header"):
                 nm = op.get("params", {}).get("name")
                 if nm:
-                    cff_hdr_names.add(nm.lower())
-    if not cff_hdr_names:
+                    cff_names.add(nm.lower())
+
+    def _must_move(name, group):
+        if name in cff_names:
+            return True                      # already handled by a CFF op → unify
+        # CORS header with mixed add/set → the one origin_override flag can't encode it.
+        if any(e["kind"] == "rhp_cors" for e in group):
+            ops = {e["params"].get("operation", "set") for e in group}
+            if "add" in ops and any(o != "add" for o in ops):
+                return True
+        return False
+
+    move = {n for n, g in rhp_by_name.items() if _must_move(n, g)}
+    if not move:
         return
     kept = []
-    for e in ir.get("_native_effects", []):
-        if e["kind"] in ("rhp_security", "rhp_cors") and not e["params"].get("_managed") \
-                and e["params"].get("name", "").lower() in cff_hdr_names:
-            # Move this header's native set/add into the CFF as a source-ordered op.
+    for e in effects:
+        nm = e["params"].get("name", "").lower() if e["kind"] in ("rhp_security", "rhp_cors") else None
+        if nm in move and not e["params"].get("_managed"):
             op_type = "add_response_header" if e["params"].get("operation") == "add" \
                 else "set_response_header"
             beh = find_or_create_behavior(ir, e["scope"], domain_config, origin_content)
@@ -732,8 +759,11 @@ def _reconcile_mixed_op_headers(ir, domain_config, origin_content):
                 "type": op_type,
                 "cf_source_rule": e.get("cf_source_rule", ""),
                 "description": e.get("description", ""),
-                "condition": {"always": True},
-                "raw_expression": None,
+                # PRESERVE the effect's authoritative screened condition — a native
+                # RHP effect scoped to a path was recorded with that condition, and
+                # dropping it to `always` would fire the header on every path.
+                "condition": e.get("condition") if e.get("condition") is not None else {"always": True},
+                "raw_expression": e.get("raw_expression"),
                 "params": {"name": e["params"]["name"], "value": e["params"]["value"]},
                 "scope_pattern": e["scope"],
                 "seq": e.get("seq", 0),
@@ -981,7 +1011,7 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         "condition": result.get("condition"),
         "raw_expression": result.get("raw_expression"),
         "params": result.get("params", {}),
-        "scope_pattern": _op_scope_pattern(path),
+        "scope_pattern": _op_scope_pattern(path, result.get("condition")),
         "seq": ir.get("_seq", 0),   # source-processing order (see make_empty_ir)
     }
 
@@ -1069,7 +1099,7 @@ def _extract_path_from_result(result, cond, expr):
     return extract_path_pattern_single(c)
 
 
-def _op_scope_pattern(path):
+def _op_scope_pattern(path, condition=None):
     """The CloudFront path pattern a viewer op's effect COULD reach, so the scaffold
     attaches the shared CFF to every behavior that OVERLAPS it (a shared CFF that
     isn't attached to the behavior serving a matching request silently drops the
@@ -1077,16 +1107,20 @@ def _op_scope_pattern(path):
 
     `path` is _extract_path_from_result's best-effort pattern:
       - a concrete pattern (e.g. `/api/*`) when the op reduced to one path → it can
-        only match there;
-      - `"*"` otherwise. That covers BOTH the old 'all' (zone-wide: host/header/
-        cookie, no path field) AND the old 'default_only' (a path field that
-        couldn't reduce to a CloudFront pattern — regex/negated/multi-ext/OR-of-
-        paths — so it can still match requests served by ORDERED behaviors). The old
-        model attached default_only to the default behavior ONLY, which was UNSOUND:
-        a request routed to an ordered behavior would never run the op. `*` overlaps
-        every behavior — over-attaching is only cost, a miss is a silent drop.
-    So this is just `path` today, but named to document the scope-not-placement
-    intent (the value feeds overlap-based CFF attachment, not where the op lives)."""
+        only match there — EXCEPT when that path came from a CASE-INSENSITIVE
+        Cloudflare wildcard (letters): the case-SENSITIVE `/Admin/*` behavior won't
+        receive a `/admin/x` request (it routes to the default), so a CFF attached
+        only to `/Admin/*` would never run for the case variants the source rule
+        matches. The op's own JS condition already lower-cases, so widen the ATTACH
+        scope to `*` (all behaviors) — the op self-gates, attach-everywhere is only
+        cost, a miss is a silent drop.
+      - `"*"` otherwise (zone-wide, or a path that couldn't reduce to a pattern —
+        regex/negated/multi-ext/OR-of-paths — which can still match requests served
+        by ordered behaviors). Attaching to the default behavior ONLY was UNSOUND.
+    """
+    if path != "*" and _pattern_case_insensitive_letters(
+            condition if isinstance(condition, dict) and "logic" not in condition else {}, path):
+        return "*"
     return path
 
 
@@ -1153,6 +1187,23 @@ def _record_cache_effects(ir, scope, result, domain_config, origin_content):
                 "scope_pattern": scope,
                 "seq": ir.get("_seq", 0),
             })
+
+    # EVERY-SETTING-ACCOUNTED backstop: a cache rule can configure several settings
+    # (cache eligibility, edge/browser TTL, cache-key). Each is handled above; any
+    # param key NOT in this known set was configured by the rule but produced no
+    # output — a silently dropped SETTING that the per-RULE invariant would miss
+    # (the rule still emitted other effects). Report it so it can't vanish.
+    _handled = {"bypass", "edge_ttl_override", "edge_ttl_respect_origin",
+                "caching_enabled", "cache_key_qs", "cache_key_qs_list",
+                "cache_key_qs_exclude", "cache_key_headers", "browser_ttl_override"}
+    unhandled = [k for k in params if k not in _handled]
+    if unhandled:
+        ir["cache_behaviors"][0]["non_convertible"].append({
+            "cf_source_rule": result.get("cf_source_rule", ""),
+            "description": result.get("description", ""),
+            "reason": (f"cache rule setting(s) {unhandled} have no CloudFront mapping "
+                       "and were not converted (other settings on the same rule were)"),
+        })
 
 
 def _process_bulk_redirects(ir, hostname, apex, bulk_redirects, domain_config, origin_content):
@@ -1456,19 +1507,21 @@ def _cache_cond_is_single_path(condition, vpp=None):
     # A CloudFront path pattern matches ONLY the URI path — never the query string.
     # A full_uri that pins a query (`?`) can't be reduced to a path pattern (the `?`
     # would be a literal/path wildcard char, silently mis-matching), so reject it.
-    # SCHEME (confirmed vs AWS docs by dual subagents): redirect-to-https (the
-    # default VPP) issues the 301 BEFORE cache-behavior/function execution, so every
-    # request a behavior actually serves is HTTPS. Thus an `https://`-pinned full_uri
-    # reduces faithfully to a path pattern (the scheme is already guaranteed —
-    # redundant), while an `http://`-pinned rule matches ~no served traffic (http is
-    # redirected before routing) and scheme is never a CloudFront routing key → a
-    # path pattern can't express it, reject as non-single-path. (Caveat: under
-    # allow-all VPP an https rule mapped to path-only would widen to http too; the
-    # default VPP is redirect-to-https, where accept-https is exact.)
+    # SCHEME (confirmed vs AWS docs by dual subagents): CloudFront selects the cache
+    # behavior FIRST, then applies THAT behavior's ViewerProtocolPolicy. Scheme is
+    # never a routing/matching key (no PathPattern or behavior setting keys off
+    # http-vs-https) — it's only enforced by the VPP. So under redirect-to-https/
+    # https-only, an http viewer request to a matched behavior gets a 301/redirect
+    # instead of being served, i.e. every request the behavior actually SERVES is
+    # https. Thus an `https://`-pinned full_uri reduces faithfully to a path pattern
+    # (scheme already guaranteed — redundant), while an `http://`-pinned rule matches
+    # ~no served traffic → a path pattern can't express it. (Caveat: under allow-all
+    # VPP both schemes are served and a behavior can't distinguish them, so an https
+    # rule mapped to path-only would widen to http — handled below.)
     if condition.get("field") == "full_uri":
         scheme = condition.get("scheme")
         # http-only is never a CloudFront path (scheme isn't a routing key; under
-        # redirect-to-https http is redirected before routing).
+        # redirect-to-https http gets the redirect, not the behavior's content).
         if scheme == "http":
             return False
         # https-only is faithful ONLY when the effective VPP redirects/forces https

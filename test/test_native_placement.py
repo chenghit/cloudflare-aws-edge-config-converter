@@ -390,6 +390,87 @@ check("F5: https full_uri under allow-all (ssl=flexible) -> non_convertible (no 
       f"paths={[b['path_pattern'] for b in ir['cache_behaviors']]} nc={_all_nc(ir)}")
 
 
+# ── round-8 review: tri-state settings, per-header mechanism, scope kind ────────
+print("== ACCEPTANCE(r8): cache eligibility is tri-state (unspecified != cache=true) ==")
+# cache=false THEN a TTL-only rule (no `cache` field) must NOT re-enable caching.
+ir = _preprocess({"Cache-Rules.txt": _wrap([
+    _rule("m1" + "0" * 30, "true", "x", {"cache": False}, "no-cache"),
+    _rule("m2" + "0" * 30, "true", "x", {"edge_ttl": {"mode": "override_origin", "default": 60}}, "ttl only")])})
+check("r8-1: cache=false then TTL-only -> stays disabled (unspecified doesn't reset)",
+      _behavior(ir, "*")["cache_policy"]["caching_disabled"] is True
+      and _cache_ttl(ir, "*") == 60, f"cp={_behavior(ir, '*')['cache_policy']}")
+# but an EXPLICIT cache=true after cache=false DOES re-enable.
+ir = _preprocess({"Cache-Rules.txt": _wrap([
+    _rule("m3" + "0" * 30, "true", "x", {"cache": False}, "no-cache"),
+    _rule("m4" + "0" * 30, "true", "x", {"cache": True}, "explicit cache")])})
+check("r8-1: cache=false then explicit cache=true -> re-enabled",
+      _behavior(ir, "*")["cache_policy"]["caching_disabled"] is False)
+
+print("== ACCEPTANCE(r8): cross-scope mixed header keeps its real condition (no widen) ==")
+# *.html remove HSTS (rule1) + /Admin/* set HSTS (rule2): both go to CFF, and the
+# SET keeps its /Admin/* condition — a /other.html request must NOT get HSTS.
+ir = _preprocess({"Response-Header-Transform.txt": _wrap([
+    _rule("n1" + "0" * 30, 'http.request.uri.path wildcard "*.html"', "rewrite",
+          {"headers": {"Strict-Transport-Security": {"operation": "remove"}}}, "remove on html"),
+    _rule("n2" + "0" * 30, 'http.request.uri.path wildcard "/Admin/*"', "rewrite",
+          {"headers": {"Strict-Transport-Security": {"operation": "set", "value": "max-age=1"}}}, "set on admin")])})
+_set_ops = [o for o in _resp_ops(ir, "/Admin/*")
+            if o["type"] == "set_response_header" and o["params"].get("name") == "Strict-Transport-Security"]
+check("r8-2: cross-scope HSTS set keeps its /Admin/* condition (not always-true)",
+      len(_set_ops) == 1 and _set_ops[0].get("condition", {}).get("value") == "/Admin/*",
+      f"set_ops={_set_ops}")
+check("r8-2: HSTS fully in CFF, none left in native RHP",
+      "Strict-Transport-Security" not in _behavior(ir, "*")["response_headers_policy"]["security_headers"]
+      and "Strict-Transport-Security" not in _behavior(ir, "/Admin/*")["response_headers_policy"]["security_headers"])
+
+print("== ACCEPTANCE(r8): CORS mixed add/set -> CFF (shared origin_override can't encode) ==")
+for order, a, b in [("add-then-set", "add", "set"), ("set-then-add", "set", "add")]:
+    ir = _preprocess({"Response-Header-Transform.txt": _wrap([
+        _rule("o1" + "0" * 30, "true", "rewrite",
+              {"headers": {"Access-Control-Allow-Origin": {"operation": a, "value": "*"}}}, "cors a"),
+        _rule("o2" + "0" * 30, "true", "rewrite",
+              {"headers": {"Access-Control-Allow-Origin": {"operation": b, "value": "https://x"}}}, "cors b")])})
+    _cors = _behavior(ir, "*")["response_headers_policy"]["cors"]
+    _cff = [o for o in _resp_ops(ir, "*") if o["params"].get("name") == "Access-Control-Allow-Origin"]
+    check(f"r8-4 {order}: mixed CORS -> CFF (2 ops, seq-ordered), not native cors",
+          _cors is None and len(_cff) == 2 and _cff[0]["seq"] < _cff[1]["seq"],
+          f"cors={_cors} cff={[(o['type'], o.get('seq')) for o in _cff]}")
+
+print("== ACCEPTANCE(r8): full_uri strict wildcard keeps case-sensitive op ==")
+sys.path.insert(0, SCRIPTS)
+import cdn_expr_parser as _p2  # noqa
+_c_strict, _ = _p2.parse_expression('http.request.full_uri strict wildcard "https://x.com/Admin/*"')
+_c_plain, _ = _p2.parse_expression('http.request.full_uri wildcard "https://x.com/Admin/*"')
+check("r8-5: full_uri strict wildcard preserves strict_wildcard op",
+      _c_strict.get("op") == "strict_wildcard", f"op={_c_strict.get('op')}")
+check("r8-5: full_uri plain wildcard stays wildcard (case-insensitive)",
+      _c_plain.get("op") == "wildcard", f"op={_c_plain.get('op')}")
+
+print("== ACCEPTANCE(r8): case-insensitive wildcard viewer op scopes to all behaviors ==")
+# A /Admin/* (case-insensitive) redirect: the case-SENSITIVE /Admin/* behavior
+# won't receive /admin/x (routes to default), so the op's CFF-attach scope must be
+# `*` (all behaviors), not /Admin/* — else the redirect silently never runs for the
+# case variants Cloudflare matches. (scope_pattern="*" → _behavior_needs_cff attaches
+# to every behavior; verified in test_dynamic_values needs_cff.)
+ir = _preprocess({"Redirect-Rules.txt": _wrap([
+    _rule("p1" + "0" * 30, 'http.request.uri.path wildcard "/Admin/*"', "redirect",
+          {"from_value": {"status_code": 301, "preserve_query_string": False,
+                          "target_url": {"value": "https://x/y"}}}, "admin redirect")])})
+_redir = [o for b in ir["cache_behaviors"] for o in b["viewer_request_ops"] if o["type"] == "redirect"]
+check("r8-3: case-insensitive /Admin/* redirect -> scope_pattern '*' (attach all behaviors)",
+      len(_redir) == 1 and _redir[0].get("scope_pattern") == "*",
+      f"redir scope={[o.get('scope_pattern') for o in _redir]}")
+# control: a strict/case-sensitive path keeps its exact pattern (no over-attach).
+ir = _preprocess({"Redirect-Rules.txt": _wrap([
+    _rule("p2" + "0" * 30, 'http.request.uri.path strict wildcard "/Admin/*"', "redirect",
+          {"from_value": {"status_code": 301, "preserve_query_string": False,
+                          "target_url": {"value": "https://x/y"}}}, "strict admin redirect")])})
+_redir = [o for b in ir["cache_behaviors"] for o in b["viewer_request_ops"] if o["type"] == "redirect"]
+check("r8-3: strict-wildcard /Admin/* redirect -> exact scope_pattern (case-sensitive, no over-attach)",
+      len(_redir) == 1 and _redir[0].get("scope_pattern") == "/Admin/*",
+      f"redir scope={[o.get('scope_pattern') for o in _redir]}")
+
+
 if __name__ == "__main__":
     print()
     if FAILURES:
