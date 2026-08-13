@@ -23,9 +23,13 @@ from pathlib import Path
 
 # Add scripts dir to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
-from cdn_expr_parser import (parse_expression_full, parse_dynamic_expression,
+from cdn_expr_parser import (parse_expression_full,
+                             dynamic_expression_result_type, validate_lowered_value,
+                             validate_viewer_op,
                              CF_FIELD_MAP, iter_condition_children,
-                             CACHE_BYPASS_HEADER)
+                             CACHE_BYPASS_HEADER,
+                             SLOT_REQUEST_HEADER_VALUE, SLOT_RESPONSE_HEADER_VALUE,
+                             SLOT_REWRITE_PATH, SLOT_REWRITE_QUERY, SLOT_REDIRECT_TARGET)
 from cdn_common import QUOTA_RAISE, load_summary_or_fatal, emit_result
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -697,8 +701,20 @@ def dyn_expr_to_js(node, target="cff"):
     args = node["args"]
 
     if func == "concat":
+        # concat is POLYMORPHIC. Branch on the SAME inferred type the contract gate used
+        # (round-22) — the generator must NOT independently guess. Cloudflare semantics:
+        #   all-string args  → string concatenation  → parenthesized JS `+`
+        #   all-array args   → array concatenation    → a1.concat(a2, ...)
+        #   else (mixed / bytes / unknown) → NC upstream, so this branch is never reached; guard.
+        rtype = dynamic_expression_result_type(node)
         parts = [dyn_expr_to_js(a, target) for a in args]
-        return " + ".join(parts)
+        if rtype == "array":
+            return f"{parts[0]}.concat({', '.join(parts[1:])})" if len(parts) > 1 else parts[0]
+        if rtype == "string":
+            return "(" + " + ".join(parts) + ")"
+        # Unreachable for a converted op (the gate NC's a non-string/array concat); emit a
+        # loud marker rather than a silently-wrong value if a caller bypasses the gate.
+        return f"/* WARNING: unconvertible concat result type {rtype} */ ''"
 
     if func == "regex_replace":
         field_js = dyn_expr_to_js(args[0], target)
@@ -819,6 +835,11 @@ def dyn_expr_to_js(node, target="cff"):
         return f"{field_js}.replace(/[{regex_chars}]/g, '')"
 
     if func == "uuidv4":
+        # DORMANT (round-21/22): uuidv4 is TARGET-UNSUPPORTED — the contract marks it NC in every
+        # context (contexts=frozenset()) because THIS renderer uses Math.random() and IGNORES the
+        # source-of-randomness bytes, so it does NOT reproduce Cloudflare's deterministic-from-
+        # source UUID. It never reaches here from a real producer; kept only so the switch is
+        # total. A faithful renderer (consuming the source bytes) must precede re-enabling it.
         return ("(()=>{{return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>"
                 "{{const r=Math.random()*16|0;return(c==='x'?r:(r&0x3|0x8)).toString(16)}})"
                 "/* WARNING: not cryptographically secure */}})()")
@@ -826,46 +847,52 @@ def dyn_expr_to_js(node, target="cff"):
     return f"/* unsupported function: {func} */"
 
 
-# ── Header value substitution ────────────────────────────────────────────────
+class LoweredError(Exception):
+    """A converted op is missing its LoweredValue (raw-only) — a converter bug, fail loud."""
 
-def _header_value_to_js(value, target="cff"):
-    """Convert header value, handling $viewer_ip substitution."""
-    if value == "$viewer_ip":
-        return "event.viewer.ip" if target != "lambda" else "request.clientIp"
-    if isinstance(value, str) and value.startswith("$"):
-        return f"{js_string(value)} /* WARNING: unresolved variable */"
-    return js_string(value)
+
+def render_lowered(lowered, what, expected_slot, target="cff"):
+    """Render a LoweredValue (round-26) to a JS value string. This is the ONLY path a converted
+    header/redirect/rewrite value takes — the processor already parsed + contract-checked it, so
+    a literal emits js_string(value) and a dynamic renders its STORED ast via dyn_expr_to_js
+    (NO re-parse of a raw string). FATALs (LoweredError) on a missing/malformed lowered value —
+    a converted op MUST carry one; there is no empty-string fallback (that fallback silently
+    shipped wrong values and is exactly what this refactor removes).
+
+    Re-verifies with validate_lowered_value against the SLOT it's rendered into (round-27 finding
+    1 — a SLOT_* constant, not the coarse context): the deep gate re-derives the AST type, re-runs
+    the contract on the reloaded tree, and rejects a value whose kind/empty_behavior/context is
+    illegal for THIS slot (a delete_header literal, an empty-path literal, a dynamic query carrying
+    clear_query). The generator is the last line before codegen, so a lie that slipped past the
+    chunk gate still FATALs here rather than emitting wrong JS."""
+    if not isinstance(lowered, dict):
+        raise LoweredError(
+            f"{what}: converted op reached the generator without a valid LoweredValue "
+            f"(got {lowered!r}) — a raw expression must NOT drive codegen; the processor must "
+            "lower it. This is a converter bug.")
+    reason = validate_lowered_value(lowered, expected_slot)
+    if reason:
+        raise LoweredError(
+            f"{what}: converted op reached the generator with an INVALID LoweredValue: {reason} "
+            f"(got {lowered!r}) — the processor must produce a valid one. This is a converter bug.")
+    if lowered["kind"] == "literal":
+        return js_string(lowered["value"])
+    return dyn_expr_to_js(lowered["ast"], target)
+
+
+# (round-27: _header_value_to_js — the $viewer_ip string-sentinel substitution — was DELETED.
+# Its one producer, the True-Client-IP managed transform, now lowers to_string(ip.src) as a
+# DYNAMIC LoweredValue, so the viewer IP renders through dyn_expr_to_js's ip.src field mapping
+# (String(event.viewer.ip) / String(request.clientIp)) like any other dynamic value — no
+# out-of-band sentinel, no unresolved-$ fallback branch.)
 
 
 # ── JS file assembly ─────────────────────────────────────────────────────────
-
-def _resolve_static_value(params, key):
-    """Resolve a params value that is a plain static string (never an expression)."""
-    return js_string(params.get(key, ""))
-
-
-def _resolve_expression_value(params, key, target="cff"):
-    """Resolve a params value that is ALWAYS a Cloudflare dynamic expression.
-
-    Unlike the old function-name heuristic, this parses every expression — so a
-    bare field reference like `ip.src` or `http.host` is resolved to its JS
-    accessor instead of being emitted as a string literal. Non-convertible
-    fields are screened out upstream in the processor (value_expression_unmappable),
-    so a parse/translate failure here falls back to an empty string with a
-    warning rather than emitting a raw field name.
-    """
-    val = params.get(key, "")
-    if not val:
-        return js_string("")
-    try:
-        tree = parse_dynamic_expression(val)
-        return dyn_expr_to_js(tree, target)
-    except Exception as e:
-        print(f"  WARN: dynamic expression parse failed, dropping value: {val[:60]}... ({e})", file=sys.stderr)
-        # Emit an empty string but tag it with the same leak marker the
-        # unmappable-field path uses, so cdn-validate-js flags the dropped value
-        # instead of it silently shipping as an empty header/redirect/URI.
-        return "'' /* WARNING: no CloudFront source for unparsed expression */"
+# (round-26: _resolve_static_value / _resolve_expression_value were DELETED. They re-parsed the
+# raw expression string the IR carried — the double-interpretation seam. Header/redirect/rewrite
+# action values now render via render_lowered() from the processor-produced LoweredValue AST; no
+# raw string reaches the generator. If a converted op arrives without a LoweredValue,
+# render_lowered raises LoweredError rather than falling back to an empty string.)
 
 
 def _protocol_for_port(port):
@@ -882,32 +909,28 @@ def _generate_op_js(op, target="cff", indent="  "):
     lines = []
     op_type = op.get("type", "")
     params = op.get("params", {})
-    cond = op.get("condition")
-    raw_expr = op.get("raw_expression")
     desc = op.get("description", "")
 
-    # Resolve condition
-    if raw_expr and not cond:
-        try:
-            cond = parse_expression_full(raw_expr)
-        except Exception as e:
-            # Genuinely unparseable condition — DROP the op (fail closed: never
-            # emit its action unconditionally, which would fire on every
-            # request). Loudly flagged so it surfaces; the op's action is not
-            # applied. (This is rare: the processor defers to raw only when the
-            # full parser can't structure the text.)
-            print(f"  WARN: NON_CONVERTIBLE op '{op_type}' — condition unparseable, "
-                  f"op dropped: {raw_expr[:80]} ({e})", file=sys.stderr)
-            lines.append(f"{indent}// NON_CONVERTIBLE: unparseable condition, op dropped: {raw_expr[:80]}")
-            return lines
+    # LAST-GATE (round-27 review-2 finding 3 → review-3 finding 1): the generator is the final line
+    # before codegen, so re-run the FULL shared op validator here — a malformed op (unknown type,
+    # bad param, a list/string condition that would AttributeError, a non-executable leaf that would
+    # render `false`, a lowered value wrong for its slot, OR any raw_expression) must FATAL rather
+    # than emit wrong/crashing JS. This ENFORCES that a converted op carries a STRUCTURED condition
+    # and never raw_expression — so there is no raw→cond re-parse here anymore (the old fallback,
+    # the last raw-drives-codegen seam, is gone). The chunk gate already ran; this is defense-in-
+    # depth against a hand-built/reloaded IR.
+    _op_bad = validate_viewer_op(op, None)
+    if _op_bad:
+        raise LoweredError(
+            f"op {op_type!r}: reached the generator but violates the shared op contract: {_op_bad} "
+            f"(got {op!r}) — the processor must produce a valid op. This is a converter bug.")
 
+    cond = op.get("condition")
     cond_js = condition_to_js(cond, target)
 
     if op_type == "redirect":
-        if params.get("target_expression"):
-            target_url = _resolve_expression_value(params, "target_expression", target)
-        else:
-            target_url = _resolve_static_value(params, "target_url")
+        # Render ONLY the stored LoweredValue target (round-26); FATAL if raw-only.
+        target_url = render_lowered(params.get("target"), "redirect target", SLOT_REDIRECT_TARGET, target)
         status = params.get("status_code", 301)
         # preserve_query_string: append the incoming raw query to the target,
         # picking the delimiter (? vs &) based on whether the target already has
@@ -932,21 +955,24 @@ def _generate_op_js(op, target="cff", indent="  "):
 
     elif op_type == "rewrite":
         stmts = []
-        # Path rewrite (only if the rule actually sets a path)
-        if params.get("path_expression"):
-            stmts.append(f"request.uri = {_resolve_expression_value(params, 'path_expression', target)};")
-        elif params.get("path"):
-            stmts.append(f"request.uri = {_resolve_static_value(params, 'path')};")
-        # Query rewrite. CloudFront Functions accept a raw string assigned to
-        # request.querystring (AWS-confirmed), same as Lambda@Edge — so a
-        # computed/static query string can be written directly.
-        if params.get("query_expression"):
-            stmts.append(f"request.querystring = {_resolve_expression_value(params, 'query_expression', target)};")
-        elif params.get("new_query") is not None and params.get("new_query") != "":
-            stmts.append(f"request.querystring = {_resolve_static_value(params, 'new_query')};")
+        # Render ONLY stored LoweredValues (round-26). Path: set request.uri. Query: the
+        # clear-vs-set decision is carried ON the LoweredValue's empty_behavior — clear_query →
+        # `request.querystring = {}` (the AWS-confirmed CFF clear idiom, NOT '' which is
+        # Lambda@Edge); otherwise assign the rendered value. No raw-string re-parse, no separate
+        # param — the generator branches on the value it was handed.
+        if "path_lowered" in params:
+            stmts.append(f"request.uri = {render_lowered(params['path_lowered'], 'rewrite path', SLOT_REWRITE_PATH, target)};")
+        query_lowered = params.get("query_lowered")
+        if isinstance(query_lowered, dict) and query_lowered.get("empty_behavior") == "clear_query":
+            stmts.append("request.querystring = {};")
+        elif "query_lowered" in params:
+            stmts.append(f"request.querystring = "
+                         f"{render_lowered(query_lowered, 'rewrite query', SLOT_REWRITE_QUERY, target)};")
         body = " ".join(stmts)
         if not body:
-            return lines  # nothing to rewrite
+            # A converted rewrite op ALWAYS has a path and/or query (the processor NC's a no-op).
+            # Reaching here = a producer bypassed the gate; fail loud rather than silently no-op.
+            raise LoweredError("rewrite op reached the generator with no path/query lowered value")
         if cond_js:
             lines.append(f"{indent}if ({cond_js}) {{ {body} }}")
         else:
@@ -991,51 +1017,40 @@ def _generate_op_js(op, target="cff", indent="  "):
 
     elif op_type in ("set_request_header", "set_response_header", "set_header"):
         name = params.get("name", "").lower()
-        value = params.get("value", "")
-        value_expr = params.get("value_expression")
-        if value_expr:
-            val_js = _resolve_expression_value(params, "value_expression", target)
-        else:
-            val_js = _header_value_to_js(value, target)
         header_obj = "response.headers" if "response" in op_type else "request.headers"
-        body = f"{header_obj}[{js_string(name)}] = {{value: {val_js}}};"
+        key = js_string(name)
+        # Render ONLY the stored LoweredValue (round-26) — no raw-string re-parse. FATAL if a
+        # converted set-header op has no lowered value.
+        lowered = params.get("value_lowered")
+        hdr_slot = SLOT_RESPONSE_HEADER_VALUE if "response" in op_type else SLOT_REQUEST_HEADER_VALUE
+        val_js = render_lowered(lowered, f"set header {name}", hdr_slot, target)
+        # empty_behavior lives ON the LoweredValue (round-26): a dynamic header value carries
+        # delete_header; a static value carries none.
+        if isinstance(lowered, dict) and lowered.get("empty_behavior") == "delete_header":
+            # DYNAMIC value → Cloudflare runtime semantics: evaluate ONCE; empty/undefined result
+            # DELETEs the header, else set it. (A static value:"" does NOT come here — it's a
+            # LiteralValue with no delete_header, so it sets an empty header.) The type gate
+            # proved a string result, so {value: _hv} directly — no String() masking.
+            body = (f"{{ var _hv = {val_js}; "
+                    f"if (_hv === undefined || _hv === '') {{ delete {header_obj}[{key}]; }} "
+                    f"else {{ {header_obj}[{key}] = {{value: _hv}}; }} }}")
+        else:
+            # STATIC value → set verbatim, incl. an explicit "" (empty header, NOT a delete).
+            body = f"{header_obj}[{key}] = {{value: {val_js}}};"
         if cond_js:
             lines.append(f"{indent}if ({cond_js}) {{ {body} }}")
         else:
             lines.append(f"{indent}{body}")
 
-    elif op_type in ("add_request_header", "add_response_header", "add_header"):
-        name = params.get("name", "").lower()
-        value = params.get("value", "")
-        value_expr = params.get("value_expression")
-        if value_expr:
-            val_js = _resolve_expression_value(params, "value_expression", target)
-        else:
-            val_js = _header_value_to_js(value, target)
-        header_obj = "response.headers" if "response" in op_type else "request.headers"
-        body = f"if (!{header_obj}[{js_string(name)}]) {{ {header_obj}[{js_string(name)}] = {{value: {val_js}}}; }}"
-        if cond_js:
-            lines.append(f"{indent}if ({cond_js}) {{ {body} }}")
-        else:
-            lines.append(f"{indent}{body}")
+    # (round-27 review-2: the DORMANT add_*_header render branch was DELETED. `add` is not in
+    # VIEWER_OP_CONTRACTS, so the validate_viewer_op gate at this function's ENTRY now rejects an
+    # add op before any branch runs — the branch was provably dead. All three gates (the
+    # _append_viewer_op sink, the chunk validator, and this generator) reject `add` uniformly.)
 
     elif op_type in ("remove_request_header", "remove_response_header", "remove_header"):
         name = params.get("name", "").lower()
         header_obj = "response.headers" if "response" in op_type else "request.headers"
         body = f"delete {header_obj}[{js_string(name)}];"
-        if cond_js:
-            lines.append(f"{indent}if ({cond_js}) {{ {body} }}")
-        else:
-            lines.append(f"{indent}{body}")
-
-    elif op_type == "serve_error_inline":
-        kvs_key = params.get("kvs_key", "")
-        status = params.get("status_code", 500)
-        content_type = params.get("content_type", "text/html")
-        body = (f"const body = await kvsHandle.get({js_string(kvs_key)}); "
-                f"return {{statusCode: {status}, statusDescription: 'Custom Error', "
-                f"headers: {{'content-type': {{value: {js_string(content_type)}}}}}, "
-                f"body: {{encoding: 'text', data: body}}}};")
         if cond_js:
             lines.append(f"{indent}if ({cond_js}) {{ {body} }}")
         else:
@@ -1073,7 +1088,12 @@ def _generate_op_js(op, target="cff", indent="  "):
             lines.append(f"{indent}{set_stmt}")
 
     else:
-        lines.append(f"{indent}// TODO: unsupported op type: {op_type}")
+        # UNREACHABLE (round-27 review-2): the validate_viewer_op gate at this function's entry
+        # rejects any op type not in VIEWER_OP_CONTRACTS, and every registry type has a branch
+        # above. If control reaches here, a branch was removed without updating the registry/gate —
+        # FATAL loudly rather than emit a silent `// TODO` comment that ships a no-op op.
+        raise LoweredError(f"op {op_type!r}: passed the op gate but has no codegen branch — "
+                           "generator branches and VIEWER_OP_CONTRACTS are out of sync.")
 
     return lines
 
@@ -1098,10 +1118,10 @@ def _ops_need_kvs(ops):
 
     Used per-handler so a response-only KVS need (continent in a viewer-response
     rule) doesn't leak `cf.kvs()` into the viewer-request handler that never uses
-    it. bulk_redirect and serve_error_inline read KVS via their templates;
-    _op_uses_kvs covers continent/is_eu preamble and in_kvs/not_in_kvs."""
+    it. bulk_redirect reads KVS via its template; _op_uses_kvs covers the
+    continent/is_eu preamble and in_kvs/not_in_kvs."""
     return any(
-        op.get("type") in ("bulk_redirect", "serve_error_inline") or _op_uses_kvs(op)
+        op.get("type") == "bulk_redirect" or _op_uses_kvs(op)
         for op in ops
     )
 
@@ -1177,22 +1197,33 @@ def _needs_crypto(ops):
     sha256() must pull the import into the response file, and a request-only one
     must not force it into the response file.
     """
+    # round-26: values are LoweredValues. Walk each lowered dynamic AST for a sha256 func node
+    # (a literal value never carries a function). Covers header value_lowered, redirect target,
+    # rewrite path/query lowered.
+    def _ast_has_sha256(node):
+        if isinstance(node, dict):
+            if (node.get("type") == "func_call" or "func" in node) and node.get("func") == "sha256":
+                return True
+            return any(_ast_has_sha256(v) for k, v in node.items() if k != "type")
+        if isinstance(node, list):
+            return any(_ast_has_sha256(x) for x in node)
+        return False
+
     for op in ops:
         params = op.get("params", {})
-        # Only expression-valued keys can carry sha256(...); target_url is a
-        # static string and never an expression, so it is not checked here.
-        for key in ("value_expression", "target_expression", "path_expression", "query_expression"):
-            val = params.get(key, "")
-            if val and ("sha256(" in val or "encode_base64(sha256(" in val):
+        for key in ("value_lowered", "target", "path_lowered", "query_lowered"):
+            lv = params.get(key)
+            if isinstance(lv, dict) and lv.get("kind") == "dynamic" and _ast_has_sha256(lv.get("ast")):
                 return True
     return False
 
 
 def _op_uses_continent_eu(op, which=("continent", "is_eu")):
-    """True if an op references continent/is_eu — in its structured condition OR
-    in a deferred raw_expression (an OR expression defers to raw text, so a
-    structured-only scan would miss it and the preamble would be skipped,
-    leaving `continent`/`isEU` undefined in the emitted JS)."""
+    """True if an op references continent/is_eu in its structured condition (so the CFF preamble
+    that declares `continent`/`isEU` is emitted). Converted ops now always carry a STRUCTURED
+    condition (round-27 review-3: raw_expression no longer drives codegen), so the structured scan
+    is authoritative; the raw scan below is a harmless defensive backstop for any op that still
+    carries raw text (none reach codegen)."""
     cond = op.get("condition")
     if cond and _cond_has_field(cond, which):
         return True
@@ -1216,11 +1247,8 @@ def _cond_has_op(cond, ops):
 
 def _op_uses_kvs(op):
     """True if an op needs a KVS handle at runtime — a continent/is_eu preamble
-    lookup, an ip.src in_kvs/not_in_kvs membership test, or an inline error page
-    served from KVS (serve_error_inline). Single source of truth for both the
-    response-JS `cf.kvs()` emission and the Terraform KVS association."""
-    if op.get("type") == "serve_error_inline":
-        return True
+    lookup or an ip.src in_kvs/not_in_kvs membership test. Single source of truth
+    for both the response-JS `cf.kvs()` emission and the Terraform KVS association."""
     return _op_uses_continent_eu(op) or _cond_has_op(op.get("condition"), ("in_kvs", "not_in_kvs"))
 
 
@@ -1349,7 +1377,6 @@ def generate_viewer_request_js(ir, target="cff"):
     origins = [o for o in all_ops if o.get("type") == "origin_override"]
     bulk = [o for o in all_ops if o.get("type") == "bulk_redirect"]
     headers = [o for o in all_ops if o.get("type", "").endswith("_header") or "header" in o.get("type", "")]
-    errors = [o for o in all_ops if o.get("type") == "serve_error_inline"]
     bypasses = [o for o in all_ops if o.get("type") == "cache_bypass"]
 
     for section_ops in [redirects, rewrites, origins]:
@@ -1369,8 +1396,6 @@ def generate_viewer_request_js(ir, target="cff"):
         lines.extend(_generate_op_js(op, target))
 
     for op in headers:
-        lines.extend(_generate_op_js(op, target))
-    for op in errors:
         lines.extend(_generate_op_js(op, target))
 
     lines.append("  return request;")

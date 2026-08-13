@@ -427,11 +427,13 @@ check("r8-2: HSTS fully in CFF, none left in native RHP",
       "Strict-Transport-Security" not in _behavior(ir, "*")["response_headers_policy"]["security_headers"]
       and "Strict-Transport-Security" not in _behavior(ir, "/Admin/*")["response_headers_policy"]["security_headers"])
 
-print("== ACCEPTANCE(r8/P1): CORS add is non-convertible; set stays native ==")
-# PHASE-1: Cloudflare `add` appends a duplicate header — CloudFront has no faithful
-# equivalent (RHP set-only; CFF multiValue-from-single undocumented) → non-convertible.
-# The `set` part is a plain unconditional static set → native RHP. So a mixed add/set
-# yields ONE non_convertible (the add) + the set applied natively — NOT a CFF group.
+print("== ACCEPTANCE(r8/P1): CORS add is non-convertible; static set is LOSSY viewer CFF ==")
+# Cloudflare `add` appends a duplicate header — CloudFront has no faithful equivalent (RHP
+# set-only; CFF multiValue-from-single undocumented) → non-convertible. A static `set` CORS
+# header is NOT native-RHP faithful (cors_config synthesizes required fields / matches Origin
+# / preflight-only; custom_headers_config rejects CORS names) → it converts to a
+# viewer-response CFF marked LOSSY (set_response_header), never a native cors_config. So a
+# mixed add/set yields ONE non_convertible (the add) + a CFF set op — no native cors.
 for order, a, b in [("add-then-set", "add", "set"), ("set-then-add", "set", "add")]:
     ir = _preprocess({"Response-Header-Transform.txt": _wrap([
         _rule("o1" + "0" * 30, "true", "rewrite",
@@ -440,10 +442,12 @@ for order, a, b in [("add-then-set", "add", "set"), ("set-then-add", "set", "add
               {"headers": {"Access-Control-Allow-Origin": {"operation": b, "value": "https://x"}}}, "cors b")])})
     _add_nc = [n for n in _all_nc(ir) if "`add`" in n.get("reason", "")]
     _cors = _behavior(ir, "*")["response_headers_policy"]["cors"]
-    check(f"P1 {order}: the add op -> non_convertible; the set -> native cors",
-          len(_add_nc) == 1 and _cors is not None
-          and "Access-Control-Allow-Origin" in _cors,
-          f"add_nc={_add_nc} cors={_cors}")
+    _set_ops = [o for o in _resp_ops(ir, "*")
+                if o["type"] == "set_response_header"
+                and o["params"].get("name") == "Access-Control-Allow-Origin"]
+    check(f"P1 {order}: the add op -> non_convertible; the set -> LOSSY viewer CFF (no native cors)",
+          len(_add_nc) == 1 and _cors is None and len(_set_ops) == 1,
+          f"add_nc={_add_nc} cors={_cors} set_ops={_set_ops}")
 
 print("== ACCEPTANCE(r8): full_uri strict wildcard keeps case-sensitive op ==")
 sys.path.insert(0, SCRIPTS)
@@ -480,11 +484,13 @@ check("r8-3: strict-wildcard /Admin/* redirect -> exact scope_pattern (case-sens
       f"redir scope={[o.get('scope_pattern') for o in _redir]}")
 
 
-# ── round-9 review: CORS whole-group, scope-once, setting inventory ────────────
-print("== ACCEPTANCE(P1): CORS `add` non-convertible; the `set` sibling stays native ==")
-# PHASE-1: `add` (append duplicate) is non-convertible on its own. So a rule set with
-# an add on one CORS header + a set on another yields ONE non_convertible (the add)
-# and the set applied natively — no whole-group CFF (there's nothing to append with).
+# ── CORS → viewer-response CFF (LOSSY): no native cors_config for a static set ────────
+print("== ACCEPTANCE(P1): CORS `add` non-convertible; static `set` -> LOSSY viewer CFF ==")
+# `add` (append duplicate) is non-convertible. A static `set` CORS header is a LOSSY
+# viewer-response CFF op (native cors_config isn't a faithful static-set substitute;
+# custom_headers_config rejects CORS names). So a rule set with an add on one CORS header +
+# a set on another yields ONE non_convertible (the add) + a CFF set op for the set — never a
+# native cors_config.
 for order, (n1, o1), (n2, o2) in [
         ("add-Origin/set-Methods", ("Access-Control-Allow-Origin", "add"),
          ("Access-Control-Allow-Methods", "set")),
@@ -497,17 +503,23 @@ for order, (n1, o1), (n2, o2) in [
     _set_name = n2 if o1 == "add" else n1
     _cors = _behavior(ir, "*")["response_headers_policy"]["cors"]
     _add_nc = [n for n in _all_nc(ir) if "`add`" in n.get("reason", "")]
-    check(f"P1 {order}: add -> non_convertible, set -> native cors",
-          len(_add_nc) == 1 and _cors is not None and _set_name in _cors and _add_name not in _cors,
-          f"add_nc={_add_nc} cors={_cors}")
-# a pure-all-set CORS group stays NATIVE (no add anywhere → RHP is faithful).
+    _set_ops = [o for o in _resp_ops(ir, "*")
+                if o["type"] == "set_response_header" and o["params"].get("name") == _set_name]
+    check(f"P1 {order}: add -> non_convertible, set -> LOSSY viewer CFF (no native cors)",
+          len(_add_nc) == 1 and _cors is None and len(_set_ops) == 1,
+          f"add_nc={_add_nc} cors={_cors} set_ops={_set_ops}")
+# a pure-all-set CORS group → EACH header is a CFF set op; NO native cors_config emitted.
 ir = _preprocess({"Response-Header-Transform.txt": _wrap([
     _rule("q3" + "0" * 30, "true", "rewrite",
           {"headers": {"Access-Control-Allow-Origin": {"operation": "set", "value": "*"},
                        "Access-Control-Allow-Methods": {"operation": "set", "value": "GET"}}}, "cors set-only")])})
-check("P1: pure-set CORS group stays native (no add)",
-      _behavior(ir, "*")["response_headers_policy"]["cors"] is not None
-      and not [o for o in _resp_ops(ir, "*") if o["params"].get("name", "").startswith("Access-Control")])
+_cors_ops = sorted(o["params"].get("name") for o in _resp_ops(ir, "*")
+                   if o["type"] == "set_response_header"
+                   and o["params"].get("name", "").startswith("Access-Control"))
+check("P1: pure-set CORS group -> CFF set ops for every header, no native cors",
+      _behavior(ir, "*")["response_headers_policy"]["cors"] is None
+      and _cors_ops == ["Access-Control-Allow-Methods", "Access-Control-Allow-Origin"],
+      f"cors_ops={_cors_ops}")
 
 print("== ACCEPTANCE(r9): scope computed ONCE — browser_ttl / re-home reuse it ==")
 # browser_ttl scoped by a case-insensitive wildcard must attach to ALL behaviors.
@@ -628,6 +640,120 @@ ir = _preprocess({"Cache-Rules.txt": _wrap([
           "qs object all")])})
 check("L4: query_string include={all:true} (object form) -> qs=all",
       _behavior(ir, "*")["cache_policy"]["cache_key"]["query_strings"] == "all")
+
+print("== ACCEPTANCE(L1): outcome-ledger inventory is stable, per-leaf, serializable ==")
+# L1 builds the ledger STRUCTURES + inventory only (no conversion-decision change).
+# Every action_parameter leaf becomes a value-INDEPENDENT
+# (source_kind, source_id, json_pointer) source key; deterministic + JSON-safe.
+_files = {
+    "Cache-Rules.txt": _wrap([_rule("c" * 32, "true", "x",
+        {"cache": True, "edge_ttl": {"mode": "override_origin", "default": 60},
+         "cache_key": {"custom_key": {"query_string": {"include": ["*"]}}}}, "cache")]),
+    "Response-Header-Transform.txt": _wrap([_rule("h" * 32, "true", "rewrite",
+        {"headers": {"Strict-Transport-Security": {"operation": "set", "value": "max-age=1"}}}, "hsts")]),
+    "Cloud-Connector-Rules.txt": _wrap([{"id": "f" * 32, "enabled": True,
+        "expression": 'http.request.uri.path eq "/img"', "provider": "aws_s3",
+        "description": "cc", "parameters": {"host": "b.s3.amazonaws.com"}}]),
+}
+ir = _preprocess(_files)
+_inv = [tuple(k) for k in ir.get("_inventory", [])]
+check("L1: per-leaf source keys for rule action_parameters (3-tuple kind/id/pointer)",
+      ("rule", "c" * 32, "/edge_ttl/mode") in _inv
+      and ("rule", "c" * 32, "/edge_ttl/default") in _inv
+      and ("rule", "c" * 32, "/cache") in _inv
+      and ("rule", "c" * 32, "/cache_key/custom_key/query_string/include") in _inv
+      and ("rule", "h" * 32, "/headers/Strict-Transport-Security/value") in _inv,
+      f"inv={_inv}")
+# (Cloud Connector coverage is asserted more thoroughly in the L1 r2 block below.)
+check("L1: source keys are value-INDEPENDENT (no =value / [] suffixes)",
+      all("=" not in p and not p.endswith("[]") for _, _, p in _inv), f"inv={_inv}")
+_ir2 = _preprocess(_files)
+check("L1: inventory is deterministic across runs", ir.get("_inventory") == _ir2.get("_inventory"))
+check("L1: inventory is JSON-serializable (list of [kind, id, pointer] triples)",
+      isinstance(ir.get("_inventory"), list)
+      and all(isinstance(k, list) and len(k) == 3 for k in ir.get("_inventory", [])))
+# A duplicate explicit rule id is now rejected AT SOURCE-ENTRY (L2 finding-2: two units
+# sharing (kind,id) would merge in the provenance resolver even when their pointers
+# differ — the reconciler's per-key dup check would miss that). process_domain raises
+# LedgerError, which the CLI turns into a FAILed domain. (Was: "preserved for L2 to
+# reject" — that reconciler-level check is now superseded by the earlier source-entry one.)
+import importlib.util as _iludup  # noqa
+_psdup = _iludup.spec_from_file_location("cdn_pre_dup", os.path.join(SCRIPTS, "cdn-preprocess.py"))
+_predup = _iludup.module_from_spec(_psdup); _psdup.loader.exec_module(_predup)
+_dupdc = {"hostname": "www.example.com", "apex_domain": "example.com", "origin_type": "custom",
+          "origin_content": "origin.example.net", "sanitized_name": "www_example_com"}
+_duprules = {"cache": [
+    {"id": "d" * 32, "enabled": True, "expression": "true", "action": "x",
+     "action_parameters": {"cache": False}, "description": "r1"},
+    {"id": "d" * 32, "enabled": True, "expression": "true", "action": "x",
+     "action_parameters": {"cache": True}, "description": "r2"}]}
+try:
+    _predup.process_domain("www.example.com", _dupdc, _duprules, {}, {}, {})
+    _dup_raised = False
+except _predup.LedgerError:
+    _dup_raised = True
+check("L1/L2: duplicate explicit rule id -> LedgerError at source-entry (no silent merge)",
+      _dup_raised)
+# RFC-6901 escaping of a key containing / and ~
+_escir = _preprocess({"Response-Header-Transform.txt": _wrap([
+    _rule("e" * 32, "true", "rewrite", {"headers": {"X-A/B~C": {"operation": "set", "value": "v"}}}, "esc")])})
+check("L1: RFC-6901 escapes ~ and / in keys (~0/~1)",
+      any(p.endswith("/X-A~1B~0C/value") for _, _, p in
+          [tuple(k) for k in _escir.get("_inventory", [])]),
+      f"inv={[tuple(k) for k in _escir.get('_inventory', [])]}")
+
+print("== ACCEPTANCE(L1 r2): full source coverage + empty-action + value-independent id ==")
+import importlib.util as _ilu2  # noqa
+_ps = _ilu2.spec_from_file_location("cdn_pre", os.path.join(SCRIPTS, "cdn-preprocess.py"))
+_pre = _ilu2.module_from_spec(_ps); _ps.loader.exec_module(_pre)
+# empty action_parameters -> /$action (NOT bare '')
+check("L1: empty action_parameters -> /$action source unit",
+      _pre._inventory_keys_for("rule", "r", {}) == [("rule", "r", "/$action")],
+      f"got={_pre._inventory_keys_for('rule', 'r', {})}")
+# non-dict params -> /$invalid
+check("L1: non-dict action_parameters -> /$invalid",
+      _pre._inventory_keys_for("rule", "r", None) == [("rule", "r", "/$invalid")])
+# Cloud Connector inventory includes BOTH provider and parameters.host
+ir = _preprocess({"Cloud-Connector-Rules.txt": _wrap([{"id": "f" * 32, "enabled": True,
+    "expression": 'http.request.uri.path eq "/img"', "provider": "aws_s3",
+    "description": "cc", "parameters": {"host": "b.s3.amazonaws.com"}}])})
+_cinv = [tuple(k) for k in ir.get("_inventory", [])]
+check("L1: Cloud Connector inventories BOTH provider and parameters",
+      ("cloud_connector", "f" * 32, "/provider") in _cinv
+      and ("cloud_connector", "f" * 32, "/parameters/host") in _cinv, f"inv={_cinv}")
+# an unknown/future enabled managed transform still gets a source key
+ir = _preprocess({"Managed-Transforms.txt": {"result": {
+    "managed_request_headers": [{"id": "some_future_thing", "enabled": True}],
+    "managed_response_headers": []}}})
+check("L1: unknown enabled managed transform -> inventoried (not empty)",
+      ("managed_transform", "some_future_thing", "/$action")
+      in [tuple(k) for k in ir.get("_inventory", [])], f"inv={ir.get('_inventory')}")
+
+# Bulk Redirect source id is VALUE-INDEPENDENT (round-11 r2 #3). Drive
+# _process_bulk_redirects directly (bulk items load from the account dir, which the
+# file-based harness doesn't populate) with a synthetic IR.
+def _br_inventory(items):
+    dc = {"hostname": "www.example.com", "apex_domain": "example.com",
+          "origin_type": "custom", "origin_content": "o.net",
+          "sanitized_name": "www_example_com"}
+    _bir = _pre.make_empty_ir(dc)
+    _pre.find_or_create_behavior(_bir, "*", dc, "o.net")
+    _pre._process_bulk_redirects(_bir, "www.example.com", "example.com",
+                                 {"mylist": items}, dc, "o.net")
+    return [tuple(k) for k in _bir.get("_inventory", [])]
+# no item id → fallback list_name#index; changing source_url must NOT change the id
+_noid_a = _br_inventory([{"redirect": {"source_url": "www.example.com/a", "target_url": "https://x/a"}}])
+_noid_b = _br_inventory([{"redirect": {"source_url": "www.example.com/CHANGED", "target_url": "https://x/a"}}])
+check("L1: bulk redirect fallback id is list_name#index (value-independent of source_url)",
+      any(k[:2] == ("bulk_redirect", "mylist#0") for k in _noid_a)
+      and {k[1] for k in _noid_a if k[0] == "bulk_redirect"} ==
+          {k[1] for k in _noid_b if k[0] == "bulk_redirect"},
+      f"a={_noid_a} b={_noid_b}")
+# an explicit item id is used as the source id
+_withid = _br_inventory([{"id": "item-42",
+                          "redirect": {"source_url": "www.example.com/a", "target_url": "https://x/a"}}])
+check("L1: bulk redirect uses the item's own id when present",
+      any(k[:2] == ("bulk_redirect", "item-42") for k in _withid), f"inv={_withid}")
 
 
 if __name__ == "__main__":

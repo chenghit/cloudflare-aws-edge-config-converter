@@ -14,6 +14,12 @@ from cdn_expr_parser import (
     extract_kvs_triggers, extract_host_filter, extract_path_pattern_single,
     iter_condition_children, host_filter_applies, host_leaf_is_routing,
     CACHE_BYPASS_HEADER,
+    lower_literal_value, lower_dynamic_value, validate_viewer_op,
+    LOWERED_EMPTY_DELETE_HEADER, VIEWER_RESPONSE_GAP_REASON,
+    VIEWER_OP_CONTRACTS, VIEWER_OP_CONTRACT_NOT_GENERIC_WIRED,
+)
+from cdn_rhp_capabilities import (
+    canonical_header as _canonical_rhp_header, security_capability,
 )
 from cdn_common import (emit_result, derive_cert_domain,
                         pattern_contains, patterns_overlap)
@@ -153,6 +159,149 @@ def load_managed_transforms(zone_dir):
     return data.get("result", {})
 
 
+# ── ignored-feature scan (Step-6 Block 3) ───────────────────────────────────
+# Files the CDN pipeline CONSUMES (reads + converts) — NEVER ignored. RULE_FILES + the cloud
+# connector + the DNS marker (Managed-Transforms is already in RULE_FILES). Account-dir inputs
+# (IP-list / bulk-redirect List-Items) are consumed too but live outside the zone dir.
+_CDN_CONSUMED_ZONE_FILES = set(RULE_FILES.values()) | {CLOUD_CONNECTOR_FILE, "DNS.txt"}
+_INACTIVE_SETTING_VALUES = ("off", "false", "0", "", "disabled", "none")
+
+# CURATED policy (docs/conversion-policy.md "Explicitly not converted"): the SEMANTIC category of a
+# present-but-unread zone file. Encoded here, NOT parsed from the markdown, so the report says WHICH
+# real features aren't covered — not just which files exist. Separation of concerns: the active-state
+# DETECTOR decides active/inactive/unknown; THIS mapping decides the output BUCKET. An UNMAPPED file
+# that is ACTIVE falls to "unknown_active" (a review item) — FAIL CLOSED, so a NEW Cloudflare feature
+# is surfaced for review, never silently dropped.
+#   "waf"     → read by the companion WAF pipeline (waf-analyze-*.py); NOT a CDN gap.
+#   "native"  → CloudFront provides an equivalent natively / no action needed; NOT a gap.
+#   "abandon" → no faithful CloudFront equivalent; when ACTIVE this is the real IGNORED_FEATURES signal.
+IGNORED_FEATURE_POLICY = {
+    # companion WAF pipeline inputs (NOT CDN-ignored — the WAF report speaks for them)
+    "WAF-Custom-Rules.txt": "waf", "WAF-Managed-Rules.txt": "waf",
+    "Rate-limits.txt": "waf", "IP-Access-Rules.txt": "waf",
+    # CloudFront-native / no action needed (CloudFront supports the protocol/behavior itself)
+    "HTTP2.txt": "native", "HTTP3.txt": "native", "IPv6.txt": "native",
+    "WebSockets.txt": "native", "TLS-1-3.txt": "native", "Zero-RTT.txt": "native",
+    "URL-Normalization.txt": "native",
+    # no faithful CloudFront equivalent → abandon (reported as IGNORED_FEATURES only when ACTIVE)
+    "Always-Online.txt": "abandon", "Argo-Smart-Routing.txt": "abandon",
+    "Browser-Check.txt": "abandon", "Cache-Reserve.txt": "abandon",
+    "Challenge-TTL.txt": "abandon", "Ciphers.txt": "abandon",
+    "Custom-Pages.txt": "abandon", "DNSSEC.txt": "abandon",
+    "Development-Mode.txt": "abandon", "Early-Hints.txt": "abandon",
+    "Hotlink-Protection.txt": "abandon", "Image-Resizing.txt": "abandon",
+    "Load-Balancers.txt": "abandon", "Min-TLS-Version.txt": "abandon",
+    "Opportunistic-Encryption.txt": "abandon", "Page_Shield.txt": "abandon",
+    "SaaS-Fallback-Origin.txt": "abandon", "Security-level.txt": "abandon",
+    "Server-Side-Excludes.txt": "abandon", "Smart-Tiered-Cache.txt": "abandon",
+    "Snippet-Rules.txt": "abandon", "Snippets.txt": "abandon",
+    "Tiered-Cache.txt": "abandon", "TLS-Client-Auth.txt": "abandon", "WebP.txt": "abandon",
+}
+
+
+def _feature_active_state(path):
+    """Classify a Cloudflare feature-export file's STATE (Block 3) — active / inactive / unknown.
+    Decides ONLY whether the feature is configured, NOT its semantics (the policy mapping does that).
+      - inactive: an empty result ([]/{}/result.rules==[]), enabled:false, a value of off/false/0/
+        empty, OR a `success:false` export (plan-unavailable / not-found / no-route → the feature is
+        not provisioned on this account).
+      - active:   a non-empty list/rules/snippets, enabled:true, or a real setting value.
+      - unknown:  the file won't parse / has an unexpected shape. NEVER a CDN FATAL (a malformed
+        companion file must not fail the conversion) and never silently dropped — surfaced for review."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return "unknown"
+    if not isinstance(data, dict):
+        return "unknown"
+    if not data.get("success", True):
+        return "inactive"   # failed export = the feature is not provisioned/available on this account
+    result = data.get("result")
+    if result is None or result == [] or result == {}:
+        return "inactive"
+    if isinstance(result, list):
+        return "active"
+    if isinstance(result, dict):
+        if "rules" in result:
+            return "active" if result.get("rules") else "inactive"
+        if "enabled" in result:
+            return "active" if result.get("enabled") else "inactive"
+        val = result.get("value")
+        if isinstance(val, str) and val.strip().lower() in _INACTIVE_SETTING_VALUES:
+            return "inactive"
+        if val in (False, 0, None):
+            return "inactive"
+        return "active"
+    return "unknown"
+
+
+# Files that are DIFFERENT exports of the SAME user-facing feature — collapsed to one feature name so
+# the report counts a single migration item (e.g. Snippets.txt + Snippet-Rules.txt = "Snippets", one
+# feature) while both files stay as evidence in the summary breakdown. Avoids double-counting.
+_FEATURE_NAME_OVERRIDE = {"Snippets.txt": "Snippets", "Snippet-Rules.txt": "Snippets"}
+
+
+def _feature_name_from_file(filename):
+    """Readable feature name from a backup filename: 'Always-Online.txt' -> 'Always Online'. Files
+    that are facets of one feature collapse via _FEATURE_NAME_OVERRIDE (Snippet-Rules -> Snippets)."""
+    if filename in _FEATURE_NAME_OVERRIDE:
+        return _FEATURE_NAME_OVERRIDE[filename]
+    stem = filename[:-4] if filename.endswith(".txt") else filename
+    return stem.replace("-", " ").replace("_", " ").strip()
+
+
+def scan_ignored_features(zone_dir):
+    """Scan a zone backup dir for Cloudflare feature files the CDN pipeline does NOT read and bucket
+    each (Block 3 — purely observational, reads nothing into the IR, NEVER raises). Buckets:
+      - active_abandoned:       ACTIVE + policy 'abandon' — the real IGNORED_FEATURES signal (deduped
+                                feature NAMES, so Snippets counts ONCE even across two files).
+      - active_abandoned_files: the evidence FILES behind active_abandoned (Snippets = 2 files) — kept
+                                so the summary can show files vs features without double-counting.
+      - native_or_no_action:    ACTIVE + policy 'native' — CloudFront handles it; not a gap.
+      - handled_or_reported_by_waf_pipeline: ACTIVE + policy 'waf' — the companion WAF pipeline reads /
+                                REPLACES it (AWS managed rule groups, not a 1:1 port); NOT a CDN gap.
+      - inactive:               present but off/empty/not-provisioned — not reported.
+      - unknown_active:         active-but-UNMAPPED (a new feature) OR unparseable — a review item,
+                                kept SEPARATE from abandoned (do not conflate a guess with a decision).
+      - raw_scanned:            count of present-but-unread files considered (incl. inactive)."""
+    abandoned, abandoned_files = set(), []
+    native, waf, inactive, unknown = set(), set(), set(), set()
+    raw = 0
+    for path in sorted(globmod.glob(os.path.join(zone_dir, "*.txt"))):
+        fn = os.path.basename(path)
+        if fn in _CDN_CONSUMED_ZONE_FILES:
+            continue
+        raw += 1
+        name = _feature_name_from_file(fn)
+        state = _feature_active_state(path)
+        if state == "inactive":
+            inactive.add(name)
+            continue
+        if state == "unknown":
+            unknown.add(name)   # unparseable → review, never silently dropped
+            continue
+        policy = IGNORED_FEATURE_POLICY.get(fn)    # state == "active"
+        if policy == "waf":
+            waf.add(name)
+        elif policy == "native":
+            native.add(name)
+        elif policy == "abandon":
+            abandoned.add(name)
+            abandoned_files.append(fn)
+        else:
+            unknown.add(name)    # active but UNMAPPED → review (catch a new Cloudflare feature)
+    return {
+        "active_abandoned": sorted(abandoned),               # deduped feature names → IGNORED_FEATURES
+        "active_abandoned_files": sorted(abandoned_files),   # evidence files (Snippets = 2 files)
+        "native_or_no_action": sorted(native),
+        "handled_or_reported_by_waf_pipeline": sorted(waf),
+        "inactive": sorted(inactive),
+        "unknown_active": sorted(unknown),
+        "raw_scanned": raw,
+    }
+
+
 # An S3 host (REST endpoint `bucket.s3[.region].amazonaws.com` or website
 # endpoint `bucket.s3-website[.-]region.amazonaws.com`). Mirrors the S3 patterns
 # in cdn-parse-dns.classify_origin; used to spot a redundant S3 origin-override.
@@ -263,7 +412,6 @@ def make_empty_ir(domain_config):
                 "needs_redirects": False,
                 "needs_continent": False,
                 "needs_eu": False,
-                "needs_error_pages": False,
                 "needs_ip_lists": False,
             },
             "kvs_data": [],
@@ -299,7 +447,221 @@ def make_empty_ir(domain_config):
         # header transforms keep their true Cloudflare precedence regardless of how
         # behaviors are later sorted for CloudFront routing.
         "_seq": 0,
+        # ── Outcome ledger (round-11 rebuild) ──────────────────────────────────
+        # `_inventory`: every SOURCE KEY that MUST end up with exactly one outcome —
+        # a (source_kind, source_id, json_pointer) TRIPLE per leaf of a config unit's
+        # original parameters, captured at source-entry BEFORE any conversion decision,
+        # covering ALL source kinds (rule / cloud_connector / bulk_redirect /
+        # managed_transform). Duplicates are PRESERVED (not set-collapsed) so L2 can
+        # reject a repeated key. `_ledger`: the list of recorded Outcome dicts
+        # {source_key:[kind,id,pointer], status, reason, artifact_ids, exact_noop}. The
+        # finalize validator (L2) enforces inventory-keys == ledger-keys, one outcome
+        # per key, NC⇒no artifacts, and artifact back-ownership. Both are KEPT in the
+        # written IR (finalize reads them, then strips) — NOT stripped here. L1 builds
+        # the STRUCTURES + inventory only; sinks start writing outcomes in L2/L3.
+        "_inventory": [],
+        # Three-layer outcome model (L2). `_claims`: DecisionClaims (the capability
+        # layer's verdict per source-key set). `_logical_artifacts`: converted outputs
+        # owned by source keys. `_physical_artifacts`: the dedup/many-to-one layer +
+        # baseline objects. The reconciler (`_reconcile_ledger`) joins these into the
+        # persisted `_ledger` and FATALs on any contract breach. All KEPT in the
+        # written IR for the finalize validator, then stripped there.
+        "_claims": [],
+        "_logical_artifacts": [],
+        "_physical_artifacts": [],
+        "_ledger": [],
     }
+
+
+def _jp_escape(token):
+    """RFC-6901 escape for one path token: ~ → ~0, / → ~1 (so a key like `x/y~z`
+    doesn't produce an ambiguous pointer)."""
+    return str(token).replace("~", "~0").replace("/", "~1")
+
+
+def _json_pointer_leaves(obj, prefix=""):
+    """VALUE-INDEPENDENT RFC-6901 leaf pointers for a config subtree, the ledger's
+    per-setting source keys (stable regardless of value — so a key never drifts when
+    only the value changes). A non-empty dict recurses (keys RFC-6901-escaped); a
+    scalar or a LIST is an ATOMIC leaf (a list is one setting — if only part of it
+    converts the WHOLE list must be one outcome, never split). A NESTED empty dict
+    (prefix != "") is itself an atomic leaf. The ROOT being an empty dict (prefix ==
+    "") yields NO leaf ([]) — a setting-less action; the caller substitutes /$action
+    (see _inventory_keys_for)."""
+    out = []
+    if isinstance(obj, dict) and obj:
+        for k, v in obj.items():
+            out += _json_pointer_leaves(v, f"{prefix}/{_jp_escape(k)}")
+    elif prefix == "" and isinstance(obj, dict):
+        return []            # root empty dict → no leaf; caller uses /$action
+    else:
+        out.append(prefix)   # scalar, list (atomic), or NESTED empty dict → a leaf
+    return sorted(set(out))
+
+
+def _inventory_keys_for(source_kind, source_id, params):
+    """Source keys (source_kind, source_id, json_pointer) a config UNIT contributes.
+
+    `source_kind` distinguishes the config type (rule / cloud_connector /
+    bulk_redirect / managed_transform) so the inventory covers EVERY source-owned
+    artifact, not just phase rules — the reverse-ownership check needs all of them.
+    One key per leaf of `params`. When `params` is an empty dict the action itself is
+    the unit (`/$action` — e.g. a redirect with only a target elsewhere), NOT a
+    fictional `/` leaf; a non-dict `params` is an input error the caller reports."""
+    ptrs = _json_pointer_leaves(params) if isinstance(params, dict) else None
+    if ptrs is None:
+        return [(source_kind, source_id, "/$invalid")]
+    if not ptrs:
+        return [(source_kind, source_id, "/$action")]
+    return [(source_kind, source_id, p) for p in ptrs]
+
+
+def _register_unit_id(ir, source_kind, explicit_id, fallback):
+    """Return a UNIQUE internal source-unit id and record it as seen. SHARED by EVERY
+    source kind (phase rule, cloud connector, bulk redirect, managed transform) so the
+    id contract is uniform, not per-kind.
+
+    (source_kind, source_id) must reliably identify ONE config unit — the resolver groups
+    inventory keys by that PAIR, so two units sharing BOTH kind and id would merge and a
+    partial claim on one could bleed onto the other. Uniqueness is scoped PER
+    (source_kind, source_id): different kinds may share a display id (→ different units),
+    but two units of the SAME kind may not.
+      - `explicit_id` a non-empty STRING: require (kind, id) unique — a duplicate SAME-KIND
+        id → LedgerError (that domain FAILs, not a silent merge);
+      - `explicit_id` None or "": synthesize the `fallback` (a stable per-kind string the
+        caller supplies, e.g. 'cache#0', 'list#3', 'mt_req#1');
+      - `explicit_id` a NON-STRING (int, etc.): a source-schema error → LedgerError at
+        source-entry (uniform across ALL kinds — never a convertible path writing an
+        illegal ['bulk_redirect', 123, ...] key while another path raises later)."""
+    seen = ir.setdefault("_unit_ids", set())
+    if explicit_id is not None and not isinstance(explicit_id, str):
+        raise LedgerError(
+            f"{source_kind} id {explicit_id!r} is a {type(explicit_id).__name__}, not a "
+            f"string — a source id must be a string (or absent); fix the source config")
+    unit_id = explicit_id if explicit_id else fallback
+    key = (source_kind, unit_id)
+    if key in seen:
+        raise LedgerError(
+            f"duplicate {source_kind} id {unit_id!r} within domain — a (kind, id) pair "
+            f"must uniquely identify one config unit (two same-kind units sharing an id "
+            f"would merge in the ledger); de-duplicate the source config")
+    seen.add(key)
+    return unit_id
+
+
+def _assign_unit_id(ir, rule, source_kind, rule_type, index):
+    """Unit id for a phase rule / cloud connector (thin wrapper over _register_unit_id).
+    The synthetic fallback uses `rule_type` (redirect/cache/config/...) — NOT source_kind,
+    which is just 'rule' for every phase rule — so an id-less config#0 stays distinct from
+    an id-less redirect#0. The rule's original id stays the DISPLAY value (cf_source_rule);
+    this never rewrites it."""
+    return _register_unit_id(ir, source_kind, rule.get("id"), f"{rule_type}#{index}")
+
+
+def _inventory_keys_for_rule(rule, source_id=None):
+    """Inventory keys for a phase rule (source_kind 'rule', keyed on action_parameters).
+    `source_id` is the internal unit id (from _assign_unit_id); defaults to the rule's
+    own id for callers/tests that manage ids themselves."""
+    sid = source_id if source_id is not None else rule.get("id", "")
+    return _inventory_keys_for("rule", sid, rule.get("action_parameters", {}))
+
+
+# ── Unit-provenance resolver (L2 channel wiring) ───────────────────────────────
+# The ledger's source keys are the inventory's value-independent (kind, id, pointer)
+# triples. A CONFIG UNIT is one (source_kind, source_id) pair; its inventory keys are
+# the leaves recorded for it at source-entry. Sinks know a unit's (kind, id) and, for a
+# split-capable action, WHICH json-pointer leaves a given outcome owns. This resolver is
+# the ONLY place that maps (kind, id[, pointers]) → concrete source keys — always by
+# reading the ALREADY-BUILT inventory (never re-deriving), so a claim's keys are exactly
+# the inventory keys and the reconciler's `key in inventory` check can't be tripped by a
+# scheme mismatch. Processors stay ledger-agnostic; they may expose an `owned_pointers`
+# hint but never construct keys or call ledger APIs.
+
+
+def _unit_inventory_keys(ir, source_kind, source_id):
+    """The inventory source keys belonging to config unit (source_kind, source_id), as a
+    list of (kind, id, pointer) tuples in inventory order. Empty if the unit contributed
+    no inventory (a converter bug for a real unit — the caller decides how loud to be)."""
+    return [tuple(k) for k in ir.get("_inventory", [])
+            if len(k) == 3 and k[0] == source_kind and k[1] == source_id]
+
+
+def _key_path_to_pointer(segments):
+    """Build an RFC-6901 json-pointer from RAW dict-key segments, using the SAME escape
+    as _json_pointer_leaves so a hint lines up with the inventory. `[]` (no segments)
+    means the ACTION ROOT, which the inventory records as the literal `/$action` (see
+    _inventory_keys_for) — NOT the empty string, which would `startswith("/")`-match
+    EVERY leaf. Processors expose raw segments (scheme-agnostic); this is the ONE place
+    that knows the pointer encoding."""
+    if not segments:
+        return "/$action"
+    return "".join(f"/{_jp_escape(s)}" for s in segments)
+
+
+def _result_owned_pointers(result):
+    """Translate a processor result's `owned_key_segments` provenance hint into a list of
+    json-pointers, or None for whole-unit ownership. Shared by every sink that turns a
+    result into an NC claim (_place_result's NC branch AND _mark_result_non_convertible's
+    placement-time reject) so a partial-result's subset provenance is preserved no matter
+    which sink fires — a per-header result stays owning just its /headers/<name> subtree
+    even when the reject happens after placement, not in the processor."""
+    segs = result.get("owned_key_segments")
+    if segs is None:
+        return None
+    return [_key_path_to_pointer(s) for s in segs]
+
+
+def _resolve_owned_keys(ir, source_kind, source_id, owned_pointers=None):
+    """Resolve the source keys an outcome owns within one config unit.
+
+    owned_pointers is None → WHOLE-UNIT ownership: every inventory key of the unit. Use
+                        ONLY for a proven atomic/all-or-nothing action (the whole unit
+                        shares one fate).
+    owned_pointers is a list → SUBSET ownership. Each entry is a json-pointer that either
+                        EXACTLY names an inventory leaf of the unit OR is an ANCESTOR of
+                        one or more leaves (a minimal subtree hint, e.g. `/headers/X-Foo`
+                        owning `/headers/X-Foo/operation` + `/headers/X-Foo/value`). Every
+                        entry MUST match at least one inventory key; a hint that matches
+                        nothing is a converter bug (it drifted from the inventory scheme)
+                        and raises LedgerError — NEVER a silent claim-all fallback.
+
+    Returns a non-empty, de-duplicated list of (kind, id, pointer) tuples in inventory
+    order. Raises LedgerError if the unit has no inventory, or a hint matches nothing."""
+    unit_keys = _unit_inventory_keys(ir, source_kind, source_id)
+    if not unit_keys:
+        raise LedgerError(
+            f"unit ({source_kind!r}, {source_id!r}) has no inventory keys — cannot "
+            f"resolve provenance (the unit was not inventoried at source-entry)")
+    if owned_pointers is None:
+        return unit_keys
+    # An empty subset list is a bug, NOT whole-unit (that's what None means) — a subset
+    # claim must own at least one leaf. Reject rather than return [] (a claim with no
+    # keys the API/reconciler would then reject with a less specific error).
+    if not owned_pointers:
+        raise LedgerError(
+            f"empty owned_pointers for unit ({source_kind!r}, {source_id!r}) — a subset "
+            f"claim must name at least one leaf; use owned_pointers=None for whole-unit")
+    known = [k[2] for k in unit_keys]
+    chosen = set()
+    for hint in owned_pointers:
+        # An empty-string hint would `startswith("/")`-match EVERY leaf — a silent
+        # claim-all. Reject it: the action root is the explicit pointer "/$action"
+        # (see _key_path_to_pointer), never "".
+        if not hint or not isinstance(hint, str) or not hint.startswith("/"):
+            raise LedgerError(
+                f"invalid provenance hint {hint!r} for unit ({source_kind!r}, "
+                f"{source_id!r}) — must be a non-empty json-pointer starting with '/' "
+                f"(the action root is '/$action', not '')")
+        # exact leaf, or an ancestor subtree (hint + "/" prefixes the leaf)
+        matched = [p for p in known if p == hint or p.startswith(hint + "/")]
+        if not matched:
+            raise LedgerError(
+                f"provenance hint {hint!r} matches no inventory key of unit "
+                f"({source_kind!r}, {source_id!r}); known pointers: {sorted(known)} "
+                f"(a processor owned-pointer hint drifted from the inventory scheme)")
+        chosen.update(matched)
+    # preserve inventory order, drop dups (overlapping hints are allowed)
+    return [(source_kind, source_id, p) for p in known if p in chosen]
 
 
 def make_default_behavior(domain_config, origin_content):
@@ -397,7 +759,7 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
     for rule_type, processor in rule_order:
         rules = all_rules.get(rule_type, [])
         phase = PHASE_MAP.get(rule_type, "")
-        for rule in rules:
+        for index, rule in enumerate(rules):
             if not rule.get("enabled", True):
                 continue
 
@@ -408,8 +770,14 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
             if not rule_applies_to_domain(hosts, hostname, apex):
                 continue
 
+            # Assign the UNIQUE internal unit id (display id stays cf_source_rule). This
+            # is the source_id for BOTH the inventory keys and the placement claims, so
+            # (kind, id) reliably identifies one unit even for id-less / dup-id rules.
+            # source_kind 'rule' scopes uniqueness; rule_type names the synthetic id.
+            unit_id = _assign_unit_id(ir, rule, "rule", rule_type, index)
             if rule.get("id"):
                 ir["_entered_rule_ids"].add(rule["id"])
+            ir["_inventory"].extend(_inventory_keys_for_rule(rule, source_id=unit_id))
             ir["_seq"] += 1  # source-processing order for this rule
             result = processor(rule, ip_lists, phase)
 
@@ -423,13 +791,15 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
             if isinstance(result, list):
                 for r in result:
                     _strip_host_in_result(r)
-                    _place_result(ir, r, domain_config, origin_content, cond, expr)
+                    _place_result(ir, r, domain_config, origin_content, cond, expr,
+                                  source_id=unit_id)
             else:
                 _strip_host_in_result(result)
-                _place_result(ir, result, domain_config, origin_content, cond, expr)
+                _place_result(ir, result, domain_config, origin_content, cond, expr,
+                              source_id=unit_id)
 
     # Process Cloud Connector rules
-    for rule in all_rules.get("cloud_connector", []):
+    for cc_index, rule in enumerate(all_rules.get("cloud_connector", [])):
         if not rule.get("enabled", True):
             continue
         expr = rule.get("expression", "true")
@@ -437,13 +807,22 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
         hosts = extract_host_filter(cond, raw_expr or expr)
         if not rule_applies_to_domain(hosts, hostname, apex):
             continue
+        unit_id = _assign_unit_id(ir, rule, "cloud_connector", "cloud_connector", cc_index)
         if rule.get("id"):
             ir["_entered_rule_ids"].add(rule["id"])
+        # Cloud Connector's config unit spans BOTH the top-level `provider` AND
+        # `parameters` (the processor reads both), so inventory a combined structure
+        # — else `provider` is silently excluded from the outcome contract.
+        ir["_inventory"].extend(
+            _inventory_keys_for("cloud_connector", unit_id,
+                                {"provider": rule.get("provider"),
+                                 "parameters": rule.get("parameters", {})}))
         ir["_seq"] += 1
         result = process_cloud_connector(rule, ip_lists, "")
         cond = _strip_host_condition(cond)
         _strip_host_in_result(result)
-        _place_result(ir, result, domain_config, origin_content, cond, expr)
+        _place_result(ir, result, domain_config, origin_content, cond, expr,
+                      source_kind="cloud_connector", source_id=unit_id)
 
     # Process bulk redirects
     _process_bulk_redirects(ir, hostname, apex, bulk_redirects, domain_config, origin_content)
@@ -527,11 +906,55 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
     # filter. (Both internal, stripped below with _native_effects.)
     _enforce_every_rule_accounted(ir)
 
-    # Internal bookkeeping — drop from the emitted IR. (`seq` stays ON each op —
-    # the JS generator sorts by it; it's harmless metadata on the persisted op.)
-    for k in ("_native_effects", "_entered_rule_ids", "_accounted_rule_ids", "_seq"):
-        ir.pop(k, None)
+    # Coordination layer: register logical artifacts from the WIRED producers (bulk
+    # redirect + shared IP-list this turn) and emit one DecisionClaim per group of source
+    # keys sharing an (artifact-set, status, reason). MUST run before _strip_build_internals
+    # (which removes the per-op / per-KVS provenance the coordinator reads). _reconcile_ledger
+    # is still NOT called — most inventory keys have no channel yet, so the hard validator
+    # would FATAL; it goes in once every channel is wired.
+    _coordinate_artifacts_and_claims(ir)
+
+    # Drop build-time-only bookkeeping from the emitted IR (see _strip_build_internals).
+    # (`seq` stays ON each op — the JS generator sorts by it; harmless persisted
+    # metadata.) The ledger lists are DELIBERATELY KEPT: the finalize validator (L2)
+    # reads them from the written IR to enforce the outcome contract, then strips them.
+    _strip_build_internals(ir)
     return ir
+
+
+# Build-time-only IR keys that must NOT reach the written IR. `_logical_index` is an
+# accelerator for emit_artifact holding the SAME dict objects as `_logical_artifacts`;
+# leaving it in would be redundant and, after a JSON round-trip, reload as a SECOND
+# detached copy of every artifact. NB: the ledger lists (_inventory / _ledger / _claims
+# / _logical_artifacts / _physical_artifacts) are DELIBERATELY kept for the finalize
+# validator and are NOT in this set.
+_BUILD_INTERNAL_KEYS = ("_native_effects", "_entered_rule_ids", "_accounted_rule_ids",
+                        "_seq", "_logical_index", "_unit_ids", "_kvs_index",
+                        "_native_applied", "_native_overlap_nc")
+
+
+def _strip_build_internals(ir):
+    """Drop build-time-only bookkeeping from `ir` in place before it's written, and
+    normalize `_inventory` to a list of [kind, id, pointer] triples (NOT de-duplicated:
+    a duplicate source key is a real conflict the finalize validator must reject, so it
+    must stay visible).
+
+    Runs LAST in process_domain — AFTER every ledger channel has scanned the per-op /
+    per-KVS-entry internal provenance. Each viewer op's `_source_*` / `_owner_refs` and
+    each KVS entry's `_owner_refs` are build-time provenance for the (deferred) artifact
+    channels; they must NOT reach the persisted IR (nested internal state, and a JSON
+    round-trip would carry a stale copy), so strip them here — the top-level
+    _BUILD_INTERNAL_KEYS pop only clears top-level keys, never nested ones."""
+    ir["_inventory"] = [list(k) for k in ir.get("_inventory", [])]
+    for k in _BUILD_INTERNAL_KEYS:
+        ir.pop(k, None)
+    for beh in ir.get("cache_behaviors", []):
+        for phase in ("viewer_request_ops", "viewer_response_ops"):
+            for op in beh.get(phase, []):
+                for k in _VIEWER_OP_INTERNAL_KEYS:
+                    op.pop(k, None)
+    for entry in ir.get("metadata", {}).get("kvs_data", []):
+        entry.pop("_owner_refs", None)
 
 
 # Conversion outcome vocabulary (Phase-1 honesty model). Only EXACT counts as a
@@ -541,19 +964,790 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
 OUTCOME_EXACT = "EXACT"
 OUTCOME_LOSSY = "LOSSY_WITH_WARNING"
 OUTCOME_NON_CONVERTIBLE = "NON_CONVERTIBLE"
+_OUTCOME_STATUSES = (OUTCOME_EXACT, OUTCOME_LOSSY, OUTCOME_NON_CONVERTIBLE)
 
 
-def _mark_result_non_convertible(ir, result, reason, expr=None):
-    """Record a native-mechanism result as non-convertible on the default behavior
-    (the single sink the report reads). Used when native_placement() rejects a
-    condition — so the rule lands in conversion_report.md instead of being
-    silently applied to `*` (widening) or dropped."""
-    ir["cache_behaviors"][0]["non_convertible"].append({
-        "cf_source_rule": result.get("cf_source_rule", ""),
-        "description": result.get("description", ""),
-        "outcome": OUTCOME_NON_CONVERTIBLE,
-        "reason": f"{reason}. Scope: {result.get('raw_expression') or expr or '(complex)'}",
+# ── Unified outcome-channel API (L2, three-layer model) ────────────────────────
+# The ~40 decision points do NOT call these directly one-by-one from scattered code
+# paths; instead the finite set of OUTPUT CHANNELS routes through them. A source key
+# is a (kind, id, pointer) triple (list, to stay JSON-safe).
+
+
+def _key(kind, source_id, pointer):
+    return [kind, source_id, pointer]
+
+
+def _bad_source_key(k):
+    """Return a human reason string if `k` is NOT a well-formed source key, else None.
+    The contract (see make_empty_ir) is a (kind, id, pointer) TRIPLE: `kind` and
+    `pointer` are non-empty strings; `id` is a string but MAY be empty — a rule without
+    an id is legal (two empty-id units collide and are caught by the duplicate check,
+    not here). Exception-agnostic so both the API (ValueError) and the reconciler
+    (LedgerError) can enforce the same shape."""
+    if not isinstance(k, (list, tuple)):
+        return f"source key must be a list/tuple, got {type(k).__name__}: {k!r}"
+    if len(k) != 3:
+        return f"source key must be a (kind, id, pointer) triple, got {len(k)} parts: {k!r}"
+    kind, sid, ptr = k
+    if not kind or not isinstance(kind, str):
+        return f"source key kind must be a non-empty string, got {kind!r}"
+    if not isinstance(sid, str):
+        return f"source key id must be a string, got {sid!r}"
+    if not ptr or not isinstance(ptr, str):
+        return f"source key pointer must be a non-empty string, got {ptr!r}"
+    return None
+
+
+def _bad_logical_id_list(lids):
+    """Return a reason string if `lids` is NOT a well-formed logical-artifact-id list,
+    else None. Contract: a list/tuple (NOT a bare string — "abc" would iterate as three
+    ids), non-empty, every element a non-empty string. Exception-agnostic so the emitter
+    (ValueError) and the finalize validator (LedgerError) enforce the same shape with no
+    str() coercion (which would turn None into "None" and collide with a real id)."""
+    if isinstance(lids, str) or not isinstance(lids, (list, tuple)):
+        return (f"logical_artifact_ids must be a list/tuple of ids, got "
+                f"{type(lids).__name__}: {lids!r}")
+    if not lids:
+        return "logical_artifact_ids must have at least one id"
+    for x in lids:
+        if not x or not isinstance(x, str):
+            return f"logical_artifact_ids must all be non-empty strings, got {x!r}"
+    return None
+
+
+def claim_decision(ir, source_keys, status, reason=None, exact_noop=False,
+                   artifact_ids=None):
+    """Record a DecisionClaim: the capability/decision layer's verdict for a SET of
+    inventory source keys. status ∈ EXACT/LOSSY_WITH_WARNING/NON_CONVERTIBLE — the
+    reconciler NEVER invents it. `artifact_ids` are the LOGICAL artifacts this claim
+    produced; when present, EVERY source key of the claim co-owns them (the reconciler
+    requires artifact-owner-set == claim-key-set — split the claim if some keys don't
+    share the artifact). Omit/empty for NC; use exact_noop (EXACT ONLY) for a
+    legitimately artifact-less EXACT. LOSSY/NC must carry a reason."""
+    if status not in _OUTCOME_STATUSES:
+        raise ValueError(f"bad decision status {status!r}")
+    if artifact_ids is not None and not isinstance(artifact_ids, (list, tuple)):
+        raise ValueError("artifact_ids must be a list/tuple")
+    if exact_noop and status != OUTCOME_EXACT:
+        raise ValueError(f"exact_noop is only valid with EXACT, not {status!r}")
+    # Materialize the iterator ONLY (do NOT list(k) each key yet — list("abc") would
+    # fabricate a legal-looking ["a","b","c"] triple). Validate the caller's RAW keys,
+    # then convert to JSON-safe lists once they're confirmed well-formed.
+    raw_keys = list(source_keys)
+    if not raw_keys:
+        raise ValueError("claim_decision requires at least one source key")
+    for k in raw_keys:
+        bad = _bad_source_key(k)
+        if bad:
+            raise ValueError(f"claim_decision: {bad}")
+    keys = [list(k) for k in raw_keys]
+    aids = list(artifact_ids or [])
+    if exact_noop and aids:
+        raise ValueError("exact_noop is an artifact-less EXACT — it must not "
+                         f"reference artifacts (got {aids})")
+    ir.setdefault("_claims", []).append({
+        "source_keys": keys,
+        "status": status,
+        "reason": reason,
+        "exact_noop": bool(exact_noop),
+        "artifact_ids": aids,
     })
+
+
+def emit_artifact(ir, artifact_id, kind, owner_keys):
+    """Register a LOGICAL artifact (a converted output) owned by ≥1 inventory source
+    key. Idempotent per artifact_id — a re-emit MERGES owner_keys (shared/deduped
+    artifacts legitimately have multiple owners), but a re-emit with a DIFFERENT kind
+    is a bug and raises. Uses a dict index (`_logical_index`) so N emits are O(N).
+    `artifact_id` and `kind` must be non-empty stable strings; ≥1 owner is required
+    (an unowned artifact can never trace back to a source leaf)."""
+    if not artifact_id or not isinstance(artifact_id, str):
+        raise ValueError(f"emit_artifact needs a non-empty string id, got {artifact_id!r}")
+    if not kind or not isinstance(kind, str):
+        raise ValueError(f"artifact {artifact_id!r} needs a non-empty string kind, "
+                         f"got {kind!r}")
+    # Validate RAW owner keys before any per-key list() (list("abc") would fabricate a
+    # legal-looking triple). Materialize the iterator, check, then convert.
+    raw_owner_keys = list(owner_keys)
+    if not raw_owner_keys:
+        raise ValueError(f"artifact {artifact_id!r} needs at least one owner key")
+    for k in raw_owner_keys:
+        bad = _bad_source_key(k)
+        if bad:
+            raise ValueError(f"artifact {artifact_id!r} owner: {bad}")
+    owner_keys = [list(k) for k in raw_owner_keys]
+    idx = ir.setdefault("_logical_index", {})
+    if artifact_id in idx:
+        a = idx[artifact_id]
+        if a["kind"] != kind:
+            raise ValueError(f"artifact {artifact_id!r} re-emitted with kind {kind!r} "
+                             f"!= existing {a['kind']!r}")
+        have = {tuple(k) for k in a["owner_keys"]}
+        for k in owner_keys:
+            if tuple(k) not in have:
+                a["owner_keys"].append(list(k))
+                have.add(tuple(k))
+        return
+    a = {"artifact_id": artifact_id, "kind": kind,
+         "owner_keys": [list(k) for k in owner_keys]}
+    ir.setdefault("_logical_artifacts", []).append(a)
+    idx[artifact_id] = a
+
+
+def emit_non_convertible(ir, source_keys, reason, description=""):
+    """A NON_CONVERTIBLE decision for a set of source keys (no artifact). Mirrors into
+    the legacy cache_behaviors[0].non_convertible list too, so the existing report /
+    conversion_report keep working while the ledger is the source of truth."""
+    # Materialize ONCE up front: claim_decision consumes `source_keys` (it does
+    # list(source_keys) internally), so a generator would be exhausted before the report
+    # id-extraction below ran — silently emptying cf_source_rule. Both consumers get the
+    # SAME materialized list.
+    source_keys = list(source_keys)
+    claim_decision(ir, source_keys, OUTCOME_NON_CONVERTIBLE, reason=reason)
+    ids = sorted({k[1] for k in source_keys}) or [""]
+    ir["cache_behaviors"][0]["non_convertible"].append({
+        "cf_source_rule": ids[0] if len(ids) == 1 else ",".join(ids),
+        "description": description,
+        "outcome": OUTCOME_NON_CONVERTIBLE,
+        "reason": reason,
+    })
+
+
+def claim_non_convertible(ir, source_kind, source_id, reason, description="",
+                          owned_pointers=None, legacy_behavior=None,
+                          legacy_cf_source_rule=None):
+    """The single ledger-aware NON_CONVERTIBLE channel every NC sink routes through.
+
+    Resolves the owned inventory source keys for config unit (source_kind, source_id)
+    via the provenance resolver (whole-unit when owned_pointers is None, else the named
+    json-pointer subset), records ONE NC DecisionClaim for exactly those keys, and writes
+    the legacy cache_behaviors[*].non_convertible report entry so existing report/validate
+    output is preserved. A source key gets AT MOST ONE claim — the caller must not claim
+    the same leaves from two sinks (disjointness is a per-unit contract the tests check).
+
+    `legacy_behavior` is the behavior dict the legacy entry lands on (defaults to the
+    default behavior — the historical single sink for the report). `legacy_cf_source_rule`
+    overrides the report id string ONLY (e.g. the literal "bulk_redirects"); the LEDGER
+    claim always uses the real inventory keys, never this display string."""
+    keys = _resolve_owned_keys(ir, source_kind, source_id, owned_pointers)
+    claim_decision(ir, keys, OUTCOME_NON_CONVERTIBLE, reason=reason)
+    beh = legacy_behavior if legacy_behavior is not None else ir["cache_behaviors"][0]
+    beh.setdefault("non_convertible", []).append({
+        "cf_source_rule": legacy_cf_source_rule if legacy_cf_source_rule is not None
+        else source_id,
+        "description": description,
+        "outcome": OUTCOME_NON_CONVERTIBLE,
+        "reason": reason,
+    })
+
+
+# ── Coordination layer (L2): artifact registration + decision aggregation ──────
+# Artifact-producing channels (this turn: bulk-redirect CFF op + KVS entries, shared
+# IP-list KVS) register LOGICAL artifacts owned by resolved source keys. The coordinator
+# then groups source keys by (artifact-set, status, reason) and emits EXACTLY ONE
+# DecisionClaim per group. Status/reason live on the CONTRIBUTION (the owner ref), never
+# inferred from "has an artifact". This is generic — no bulk/IP-specific branches; those
+# are just the first two producers wired to feed it. _reconcile_ledger stays OFF (most
+# inventory keys are still unclaimed).
+
+
+def _resolve_ref_to_keys(ir, ref):
+    """Resolve ONE owner ref to its concrete inventory source keys (tuples), honoring the
+    ref's owned_key_segments (None = whole-unit, else the named json-pointer subset). The
+    ref is pre-validated. Raises LedgerError (via _resolve_owned_keys) if the unit has no
+    inventory or a segment hint matches nothing."""
+    pointers = (None if ref["owned_key_segments"] is None
+                else [_key_path_to_pointer(s) for s in ref["owned_key_segments"]])
+    return _resolve_owned_keys(ir, ref["source_kind"], ref["source_id"], pointers)
+
+
+def _op_owner_refs(op_or_entry):
+    """The list of owner refs for a viewer op OR a KVS entry, normalizing the single-source
+    op shape (_source_kind/_source_id/_owned_key_segments/_outcome_status/_outcome_reason)
+    to the same {source_kind, source_id, owned_key_segments, outcome_status, outcome_reason}
+    ref shape the aggregation (_owner_refs) already uses. Returns [] if the item carries no
+    provenance (a channel not yet wired — skipped, not claimed)."""
+    if op_or_entry.get("_owner_refs") is not None:
+        return op_or_entry["_owner_refs"]
+    if op_or_entry.get("_source_id") is not None:
+        return [{"source_kind": op_or_entry["_source_kind"],
+                 "source_id": op_or_entry["_source_id"],
+                 "owned_key_segments": op_or_entry["_owned_key_segments"],
+                 "outcome_status": op_or_entry["_outcome_status"],
+                 "outcome_reason": op_or_entry["_outcome_reason"]}]
+    return []
+
+
+def _register_artifact_contributions(ir, artifact_id, kind, refs, contributions):
+    """Register ONE logical artifact `artifact_id` (kind) and record each ref's
+    contribution. `refs` are pre-validated owner refs. For each ref: resolve its source
+    keys, emit_artifact(owner=those keys) so the artifact's owner set is the UNION across
+    all refs/callers (shared artifacts accumulate owners), and append (key → artifact_id,
+    status, reason) to `contributions[key]` for the coordinator to aggregate. NC status
+    never reaches here (validator forbids it on an artifact ref)."""
+    for ref in refs:
+        keys = _resolve_ref_to_keys(ir, ref)
+        emit_artifact(ir, artifact_id, kind, keys)
+        for k in keys:
+            contributions.setdefault(k, []).append(
+                (artifact_id, ref["outcome_status"], ref.get("outcome_reason")))
+
+
+def _coordinate_artifacts_and_claims(ir):
+    """THE coordination layer. Walks the WIRED artifact-producing sinks, registers logical
+    artifacts, then emits ONE DecisionClaim per group of source keys that share the exact
+    same (artifact-set, status, reason). Generic — the set of wired producers is data, not
+    branches.
+
+    Per source key it collects contributions (artifact_id, status, reason). Rules:
+      - a key already carrying an NC claim must NOT also own a converted artifact → FATAL
+        (an inventory leaf has exactly one fate);
+      - all contributions to a key must agree on status AND reason → else FATAL (a source
+        key can't be both EXACT and LOSSY);
+      - keys with an IDENTICAL (sorted artifact-set, status, reason) fold into ONE claim.
+    LOSSY only ever comes from a contribution that explicitly carried it (browser_ttl etc.),
+    never inferred. Leaves with no contribution stay unclaimed (their channel isn't wired)."""
+    # (1) NC keys already claimed — a converted artifact must not also own them.
+    nc_keys = set()
+    for c in ir.get("_claims", []):
+        if c["status"] == OUTCOME_NON_CONVERTIBLE:
+            nc_keys.update(tuple(k) for k in c["source_keys"])
+
+    # Domain namespace — logical artifact ids MUST be globally unique after finalize
+    # flattens every domain's _logical_artifacts into one list. Two domains sharing an IP
+    # list would both mint `kvs:ip:blk:1.1.1.1`, and both would mint `cff:*:bulk_redirect`;
+    # namespacing by the domain's sanitized name keeps them distinct.
+    ns = ir["metadata"]["sanitized_name"]
+
+    # (2) walk WIRED viewer-op producers, register their CFF artifacts, and accumulate —
+    # PER IP-LIST NAME — the owner refs of ONLY the wired ops that reference each list. A
+    # shared IP-list KVS entry carries owner refs from EVERY producer that referenced it
+    # (wired AND unwired — _collect_kvs_ip_entries merges them all), so registering the
+    # entry with its OWN refs would leak an unwired producer's owner (e.g. an unwired
+    # custom-error sharing $blk with a wired header would get an IP-KVS-only claim, missing
+    # its error: KVS). Instead register the ip: KVS artifact with wired_ip_refs_by_list —
+    # the wired ops' refs only.
+    contributions = {}   # source key (tuple) -> [(artifact_id, status, reason), ...]
+    wired_ip_refs_by_list = {}   # list name -> [owner refs of WIRED ops referencing it]
+    for beh in ir.get("cache_behaviors", []):
+        for phase in ("viewer_request_ops", "viewer_response_ops"):
+            for idx, op in enumerate(beh.get(phase, [])):
+                aid = _viewer_op_artifact_id(ns, beh, phase, idx, op)
+                if aid is None:
+                    continue          # op type whose artifact channel isn't wired yet
+                op_refs = _op_owner_refs(op)
+                _register_artifact_contributions(
+                    ir, aid, _viewer_op_artifact_kind(op), op_refs, contributions)
+                for list_name in _condition_ip_list_names(op.get("condition")):
+                    _merge_owner_refs_into(
+                        wired_ip_refs_by_list.setdefault(list_name, []), op_refs)
+    for entry in ir.get("metadata", {}).get("kvs_data", []):
+        key = entry["key"]
+        if key.startswith("ip:"):
+            # Register ONLY with the WIRED ops' refs for this list — NOT the entry's own
+            # mixed refs. A list no wired op referenced is skipped entirely (its producer
+            # is unwired; the entry stays runtime data).
+            list_name = key.split(":", 2)[1]
+            refs = wired_ip_refs_by_list.get(list_name)
+            if not refs:
+                continue
+        else:
+            refs = entry.get("_owner_refs")
+            if not refs:
+                continue              # KVS entry whose channel isn't wired yet
+        aid = _kvs_artifact_id(ns, key)
+        if aid is None:
+            continue                  # KVS kind whose channel isn't wired yet (error:)
+        _register_artifact_contributions(ir, aid, "kvs", refs, contributions)
+
+    # (2c) NATIVE EFFECTS — from the POST-REPLAY effective contribution. The STATUS of an
+    # effect's source leaves depends on what actually survived (reviewer finding 1):
+    #   - won ≥1 slot AND never cross-overlapped → EXACT, owns the winning slots' artifacts;
+    #   - won ≥1 slot AND also cross-overlapped some behavior → LOSSY (deployed, but a
+    #     cross-overlap region it can't cover — a known gap), owns the winning artifacts;
+    #   - won NO slot but cross-overlapped → NON_CONVERTIBLE (no surviving artifact at all);
+    #   - won NO slot, no cross-overlap (a PURE last-wins overwrite loser) → EXACT exact_noop
+    #     (it converted but was fully overwritten — owns nothing).
+    # Effects are identified by object identity (the SAME dict flows through applied/overlap).
+    _native_won = {}     # id(effect) -> set of winning artifact ids (one per behavior+slot it
+                         # won — a global effect wins the SAME slot on MULTIPLE behaviors, so
+                         # key on the full artifact id, not the slot, or the behaviors clobber).
+    for row in ir.get("_native_applied", []):
+        if row["is_winner"]:
+            _native_won.setdefault(id(row["effect"]), set()).add(
+                _native_artifact_id(ns, row["behavior"], row["slot"]))
+    _native_overlapped = {id(o["effect"]) for o in ir.get("_native_overlap_nc", [])}
+    _native_effect_by_id = {}
+    for row in ir.get("_native_applied", []):
+        _native_effect_by_id[id(row["effect"])] = row["effect"]
+    for o in ir.get("_native_overlap_nc", []):
+        _native_effect_by_id[id(o["effect"])] = o["effect"]
+
+    for eid, e in _native_effect_by_id.items():
+        won = _native_won.get(eid, set())
+        overlapped = eid in _native_overlapped
+        if won:
+            status = OUTCOME_LOSSY if overlapped else OUTCOME_EXACT
+            reason = (f"native {e['kind']} converts where it contains a behavior but "
+                      f"cross-overlaps another (partial coverage)") if overlapped else None
+            ref = {"source_kind": e["_source_kind"], "source_id": e["_source_id"],
+                   "owned_key_segments": e["_owned_key_segments"],
+                   "outcome_status": status, "outcome_reason": reason}
+            for aid in sorted(won):
+                _register_artifact_contributions(ir, aid, "native_effect", [ref], contributions)
+        elif overlapped:
+            # cross-overlap ONLY, nothing survived → NON_CONVERTIBLE (via the NC channel so
+            # its keys are claimed NC, not left artifact-less-EXACT). The legacy
+            # non_convertible report entry was already written at replay time.
+            claim_non_convertible(
+                ir, e["_source_kind"], e["_source_id"],
+                reason=(f"native {e['kind']} cross-overlaps every behavior it could apply "
+                        f"to and survives on none — no CloudFront equivalent"),
+                owned_pointers=(None if e["_owned_key_segments"] is None
+                                else [_key_path_to_pointer(s) for s in e["_owned_key_segments"]]))
+        else:
+            # PURE overwrite loser → EXACT exact_noop (sentinel None artifact_id).
+            ref = {"source_kind": e["_source_kind"], "source_id": e["_source_id"],
+                   "owned_key_segments": e["_owned_key_segments"],
+                   "outcome_status": OUTCOME_EXACT, "outcome_reason": None}
+            for k in _resolve_ref_to_keys(ir, ref):
+                contributions.setdefault(k, []).append((None, OUTCOME_EXACT, None))
+
+    # (3) per key: forbid NC-overlap, require status/reason agreement, fold to one row.
+    # Recompute nc_keys from the CURRENT _claims — step (2c) may have added NC claims
+    # (cross-overlap-only native effects), so a converted-artifact contribution on one of
+    # those same keys must still be caught as a one-leaf-two-fates conflict regardless of
+    # the order the two arose.
+    nc_keys = set()
+    for c in ir.get("_claims", []):
+        if c["status"] == OUTCOME_NON_CONVERTIBLE:
+            nc_keys.update(tuple(k) for k in c["source_keys"])
+    per_key = {}   # key -> (frozenset(artifact_ids), status, reason)
+    for k, contribs in contributions.items():
+        if k in nc_keys:
+            raise LedgerError(
+                f"source key {k} owns a converted artifact but is ALSO NON_CONVERTIBLE "
+                f"— an inventory leaf has exactly one fate (converter bug)")
+        statuses = {s for _, s, _ in contribs}
+        reasons = {(r or None) for _, _, r in contribs}
+        if len(statuses) > 1 or len(reasons) > 1:
+            raise LedgerError(
+                f"source key {k} has conflicting contribution outcomes "
+                f"(statuses={statuses}, reasons={reasons}) — one key, one decision")
+        # None artifact_id is the exact_noop sentinel (an overwritten-loser contribution) —
+        # drop it: if the SAME key also owns a real artifact (it won some other slot), that
+        # artifact stands; if ALL its contributions are None, the empty set → exact_noop.
+        per_key[k] = (frozenset(a for a, _, _ in contribs if a is not None),
+                      next(iter(statuses)), next(iter(reasons)))
+
+    # (4) group keys with identical (artifact-set, status, reason) into one claim.
+    groups = {}   # (frozenset(artifact_ids), status, reason) -> [keys]
+    for k, sig in per_key.items():
+        groups.setdefault(sig, []).append(k)
+    for (artifact_ids, status, reason), keys in groups.items():
+        # An EXACT contribution with NO artifact is a VALIDATED exact_noop — the source
+        # leaf converted but its output did not survive as a distinct artifact (a last-wins
+        # overwritten native effect: the winning rule owns the setting, the overwritten one
+        # legitimately produces nothing). LOSSY/NC always carry an artifact or go through
+        # their own channel, so exact_noop applies to EXACT-only.
+        exact_noop = (status == OUTCOME_EXACT and not artifact_ids)
+        claim_decision(ir, sorted(keys), status, reason=reason,
+                       artifact_ids=sorted(artifact_ids), exact_noop=exact_noop)
+
+
+def _native_artifact_id(ns, behavior_path, slot):
+    """Stable, DOMAIN-NAMESPACED logical-artifact id for a native effect's WINNING
+    contribution to one (behavior, slot). The applied setting on the behavior carries no
+    source back-ref, so the id is derived from behavior + slot (the last-wins winner is the
+    sole owner). `slot` may be a tuple (e.g. ('rhp','x-frame-options')) — join stably."""
+    slot_str = ":".join(str(s) for s in slot) if isinstance(slot, tuple) else str(slot)
+    return f"domain:{ns}:native:{behavior_path}:{slot_str}"
+
+
+def _condition_ip_list_names(condition):
+    """The set of IP-list names an op's `condition` depends on (its in_kvs/not_in_kvs
+    leaves' list names) — i.e. the shared IP-list KVS artifacts this op needs. Empty set
+    if none. Mirrors _collect_kvs_ip_entries' walk; the list name is the leaf `value`."""
+    names = set()
+    if not isinstance(condition, dict):
+        return names
+    if "logic" in condition:
+        for c in iter_condition_children(condition):
+            names |= _condition_ip_list_names(c)
+        return names
+    if condition.get("op") in ("in_kvs", "not_in_kvs"):
+        v = condition.get("value")
+        if v:
+            names.add(v)
+    return names
+
+
+def _kvs_artifact_id(ns, key):
+    """Stable, DOMAIN-NAMESPACED logical-artifact id for a KVS entry, or None if this KVS
+    KIND's channel isn't wired this turn. The KVS key namespaces by kind (`redirect:` /
+    `ip:` / `error:`); THIS TURN only redirect: (bulk) and ip: (shared IP list) are wired —
+    error: (inline custom error) returns None until the custom-error viewer-op channel is
+    wired, else it would mint an EXACT claim referencing only the KVS, no viewer op."""
+    if key.startswith("redirect:") or key.startswith("ip:"):
+        return f"domain:{ns}:kvs:{key}"
+    return None
+
+
+# Viewer-op types whose CFF artifact channel is WIRED. Each is a converted output (one
+# CFF statement) → its own logical artifact, keyed by stable domain/behavior/phase/op-index
+# coordinates (NOT object identity). The bulk_redirect op is special-cased below (ONE
+# shared id per behavior — all items reference the same CFF artifact). Everything else
+# (a viewer-op type not listed, and not IP-list-conditioned) is a later increment → None.
+# DERIVED from the ONE viewer-op-type authority (VIEWER_OP_CONTRACTS) so it can't drift into a
+# separate hand-maintained list. "Wired" = a viewer op type preprocess may route through the GENERIC
+# artifact channel today. ONE contract type is excluded (VIEWER_OP_CONTRACT_NOT_GENERIC_WIRED):
+# bulk_redirect is wired but via its OWN shared-artifact branch (special-cased in
+# _viewer_op_artifact_id BEFORE this set is consulted — do NOT delete that branch).
+# (serve_error_inline was RETIRED in Step 5 — inline custom-error is permanently NC, so it no longer
+# exists in VIEWER_OP_CONTRACTS.) Result = {redirect, rewrite, origin_override, cache_bypass,
+# set/remove_{request,response}_header}. NO add_*_header (header `add` isn't a contract type at all).
+_WIRED_VIEWER_OP_TYPES = frozenset(VIEWER_OP_CONTRACTS) - VIEWER_OP_CONTRACT_NOT_GENERIC_WIRED
+
+
+def _viewer_op_artifact_id(ns, beh, phase, idx, op):
+    """Stable, DOMAIN-NAMESPACED logical-artifact id for a viewer op, or None if this op's
+    artifact channel isn't wired this turn. Wired ONLY by explicit op TYPE:
+      - the bulk-redirect CFF op → ONE shared id per behavior (all items' claims reference
+        the same CFF artifact);
+      - a generic viewer op of a wired type (redirect / rewrite / origin_override /
+        cache_bypass / {op}_request_header / {op}_response_header) → its OWN CFF artifact.
+    Keyed by domain/behavior/phase/op-index (stable coordinates — the op list order is
+    deterministic). An op of an UNWIRED type returns None EVEN IF its condition uses an IP
+    list — "uses an IP list" must NOT admit a non-wired producer (an op type not in
+    _WIRED_VIEWER_OP_TYPES), or its claim would be partial (CFF + IP-list KVS). The
+    IP-list KVS dependency is registered separately, DRIVEN by the wired ops that actually
+    reference each list (see the coordinator), not by op-condition admission here."""
+    if op.get("type") == "bulk_redirect":
+        return f"domain:{ns}:cff:{beh['path_pattern']}:bulk_redirect"
+    if op.get("type") in _WIRED_VIEWER_OP_TYPES:
+        return f"domain:{ns}:cff:{beh['path_pattern']}:{phase}:{idx}"
+    return None
+
+
+def _viewer_op_artifact_kind(op):
+    return "cff_op"
+
+
+def emit_physical_artifact(ir, artifact_id, kind, logical_artifact_ids):
+    """Register a non-baseline PHYSICAL artifact (the dedup/many-to-one layer: several
+    logical artifacts collapsing to one deployed policy). `artifact_id` and `kind` must
+    be non-empty strings. Validated at finalize: unique physical id, all referenced
+    logical ids exist, kind consistent."""
+    if not artifact_id or not isinstance(artifact_id, str):
+        raise ValueError(f"emit_physical_artifact needs a non-empty string id, "
+                         f"got {artifact_id!r}")
+    if not kind or not isinstance(kind, str):
+        raise ValueError(f"physical artifact {artifact_id!r} needs a non-empty string "
+                         f"kind, got {kind!r}")
+    bad = _bad_logical_id_list(logical_artifact_ids)
+    if bad:
+        raise ValueError(f"physical artifact {artifact_id!r} {bad}")
+    ir.setdefault("_physical_artifacts", []).append({
+        # Store the caller's real ids verbatim (NO str() coercion — that would turn
+        # None into the string "None" and collide with a same-named logical artifact).
+        "artifact_id": artifact_id, "kind": kind,
+        "logical_artifact_ids": list(logical_artifact_ids),
+        "baseline": False, "baseline_reason": None,
+    })
+
+
+def emit_baseline(ir, artifact_id, kind, reason):
+    """Register a PHYSICAL artifact that is source-INDEPENDENT infrastructure (default
+    behavior, cert vars, DNS) — excluded from reverse-ownership. `artifact_id` must be a
+    non-empty string; `kind` must be in the baseline allowlist; a reason is required.
+    NEVER auto-classify an unowned artifact as baseline."""
+    if not artifact_id or not isinstance(artifact_id, str):
+        raise ValueError(f"emit_baseline needs a non-empty string id, got {artifact_id!r}")
+    if kind not in _BASELINE_KINDS:
+        raise ValueError(f"baseline kind {kind!r} not in allowlist {_BASELINE_KINDS}")
+    if not reason:
+        raise ValueError("baseline requires a reason")
+    ir.setdefault("_physical_artifacts", []).append({
+        "artifact_id": artifact_id, "logical_artifact_ids": [],
+        "baseline": True, "baseline_reason": reason, "kind": kind,
+    })
+
+
+# Physical-artifact kinds that are legitimately source-independent infrastructure.
+_BASELINE_KINDS = ("default_behavior", "cert_var", "dns", "distribution_shell")
+
+
+class LedgerError(Exception):
+    """A ledger-integrity breach — a CONVERTER BUG (not a per-config issue). The
+    caller turns this into a FATAL exit; it must never be swallowed."""
+
+
+def _reconcile_ledger(ir):
+    """Join DecisionClaims + inventory + logical/physical artifacts into the final
+    `_ledger`, enforcing the L2 contract. Raises LedgerError (→ FATAL) on ANY breach —
+    these are converter bugs, not config problems. Returns the ledger (list of
+    per-source-key outcome rows) on success.
+
+    Enforced invariants:
+      1. inventory keys are unique (no duplicate source key);
+      2. every inventory key has EXACTLY ONE DecisionClaim covering it;
+      3. NC claims reference no artifact; LOSSY/NC claims carry a reason;
+      4. EXACT/LOSSY claims have ≥1 logical artifact OR exact_noop;
+      5. every logical artifact has ≥1 owner, and every owner key is in the inventory;
+      6. outcome ↔ ownership are bidirectionally consistent (a claim's artifacts are
+         owned by that claim's keys; an artifact's owners all claim it);
+      7. every claim status is a real status (no UNCLASSIFIED survives)."""
+    # Every inventory key must be a well-formed (kind, id, pointer) triple BEFORE it's
+    # tuple()'d — otherwise a 2-element key would silently become a legal-looking 2-tuple
+    # and produce an illegal ledger row (the API guards this, but a hand-built /
+    # round-tripped _inventory bypasses the API).
+    for k in ir.get("_inventory", []):
+        bad = _bad_source_key(k)
+        if bad:
+            raise LedgerError(f"inventory {bad}")
+    inv = [tuple(k) for k in ir.get("_inventory", [])]
+    # (1) unique inventory keys — Counter is O(n) (was inv.count() per item = O(n²),
+    # which degrades under many bulk-redirect items).
+    from collections import Counter
+    dups = sorted(k for k, n in Counter(inv).items() if n > 1)
+    if dups:
+        raise LedgerError(f"duplicate inventory source keys: {dups}")
+    inv_set = set(inv)
+
+    claims = ir.get("_claims", [])
+    # Build the logical-artifact index WITHOUT a dict comprehension: a comprehension
+    # silently keeps only the last entry when two artifacts share an id, so a
+    # malformed/round-tripped IR carrying a duplicate id (e.g. same id, different kind)
+    # would pass unnoticed. The emit_artifact API prevents duplicates by merging, so a
+    # duplicate in the persisted list is itself an integrity breach — reject it here,
+    # and re-verify id/kind shape (the API guard is gone after a JSON round-trip).
+    logical = {}
+    for a in ir.get("_logical_artifacts", []):
+        aid = a.get("artifact_id")
+        if not aid or not isinstance(aid, str):
+            raise LedgerError(f"logical artifact has empty/invalid id: {a!r}")
+        if not a.get("kind") or not isinstance(a.get("kind"), str):
+            raise LedgerError(f"logical artifact {aid!r} has empty/invalid kind: "
+                              f"{a.get('kind')!r}")
+        if aid in logical:
+            raise LedgerError(f"duplicate logical artifact id {aid!r} in "
+                              f"_logical_artifacts (would silently overwrite)")
+        logical[aid] = a
+
+    # (2) one claim per inventory key
+    covered = {}  # key -> claim index
+    for i, c in enumerate(claims):
+        if c["status"] not in _OUTCOME_STATUSES:
+            raise LedgerError(f"claim {i} has non-final status {c['status']!r}")
+        # A claim with no source key is meaningless — it can neither cover an inventory
+        # key nor own an artifact. Reject (the API guards this, but a hand-built /
+        # round-tripped claim can carry [] and would otherwise sit as a silent no-op).
+        if not c["source_keys"]:
+            raise LedgerError(f"claim {i} has no source key")
+        for k in c["source_keys"]:
+            bad = _bad_source_key(k)
+            if bad:
+                raise LedgerError(f"claim {i} {bad}")
+        # exact_noop is an artifact-less EXACT (re-verified here — the API guard is gone
+        # for a hand-built / JSON-reloaded claim).
+        if c["exact_noop"] and c["status"] != OUTCOME_EXACT:
+            raise LedgerError(f"claim {i} exact_noop is only valid with EXACT, "
+                              f"not {c['status']!r}")
+        if c["exact_noop"] and c["artifact_ids"]:
+            raise LedgerError(f"claim {i} is exact_noop but references artifacts "
+                              f"{c['artifact_ids']} (exact_noop means artifact-less)")
+        # (3) reason / artifact rules
+        if c["status"] in (OUTCOME_LOSSY, OUTCOME_NON_CONVERTIBLE) and not c.get("reason"):
+            raise LedgerError(f"{c['status']} claim {i} missing reason")
+        if c["status"] == OUTCOME_NON_CONVERTIBLE and c["artifact_ids"]:
+            raise LedgerError(f"NON_CONVERTIBLE claim {i} references artifacts "
+                              f"{c['artifact_ids']}")
+        # (4) EXACT/LOSSY need an artifact or exact_noop
+        if c["status"] in (OUTCOME_EXACT, OUTCOME_LOSSY) \
+                and not c["artifact_ids"] and not c["exact_noop"]:
+            raise LedgerError(f"{c['status']} claim {i} has no artifact and is not exact_noop")
+        for aid in c["artifact_ids"]:
+            if aid not in logical:
+                raise LedgerError(f"claim {i} references unknown logical artifact {aid!r}")
+        for k in c["source_keys"]:
+            kt = tuple(k)
+            if kt not in inv_set:
+                raise LedgerError(f"claim {i} covers key not in inventory: {kt}")
+            if kt in covered:
+                raise LedgerError(f"key {kt} covered by >1 claim ({covered[kt]}, {i})")
+            covered[kt] = i
+
+    # (2 cont.) every inventory key must be covered
+    missing = sorted(inv_set - set(covered))
+    if missing:
+        raise LedgerError(f"inventory keys with no DecisionClaim (would be a silent "
+                          f"drop): {missing}")
+
+    # (5) logical artifact ownership + (6) STRICT bidirectional consistency.
+    claim_arts = {}  # artifact_id -> set of claim indices referencing it
+    for i, c in enumerate(claims):
+        for aid in c["artifact_ids"]:
+            claim_arts.setdefault(aid, set()).add(i)
+    # A claim that references artifacts asserts ALL its keys co-own them. So for each
+    # artifact, its owner-set must EQUAL the union of the keys of every claim that
+    # references it — not merely be a subset (a claim over [/a,/b] whose artifact is
+    # owned only by /a would falsely give /b's ledger row that artifact; split the
+    # claim or add /b as an owner).
+    for aid, a in logical.items():
+        if not a["owner_keys"]:
+            raise LedgerError(f"logical artifact {aid!r} has no owner")
+        for k in a["owner_keys"]:
+            bad = _bad_source_key(k)
+            if bad:
+                raise LedgerError(f"artifact {aid!r} owner: {bad}")
+            if tuple(k) not in inv_set:
+                raise LedgerError(f"artifact {aid!r} owner {tuple(k)} not in inventory")
+        if aid not in claim_arts:
+            raise LedgerError(f"logical artifact {aid!r} is owned but no claim "
+                              f"references it (orphan artifact)")
+        owner_set = {tuple(k) for k in a["owner_keys"]}
+        claim_key_set = set()
+        for ci in claim_arts[aid]:
+            claim_key_set |= {tuple(k) for k in claims[ci]["source_keys"]}
+        if owner_set != claim_key_set:
+            raise LedgerError(
+                f"artifact {aid!r} ownership mismatch: owners={sorted(owner_set)} "
+                f"but claiming-keys={sorted(claim_key_set)} (every key of a claim that "
+                f"lists an artifact must co-own it — split the claim or fix owners)")
+
+    # Build the per-source-key ledger rows (one row per inventory key). PHYSICAL-layer
+    # validation is deferred to finalize (physical dedup/mapping only exists then) —
+    # see validate_physical_artifacts; process_domain does the LOGICAL reconcile only.
+    ledger = []
+    for kt in sorted(inv_set):
+        c = claims[covered[kt]]
+        ledger.append({
+            "source_key": list(kt),
+            "status": c["status"],
+            "reason": c.get("reason"),
+            "artifact_ids": list(c["artifact_ids"]),
+            "exact_noop": c["exact_noop"],
+        })
+    return ledger
+
+
+def validate_physical_artifacts(logical_artifacts, physical_artifacts):
+    """FINALIZE-stage physical-layer validation (physical dedup/mapping only exists
+    after policies are deduped). Takes the LOSSLESS raw data — `logical_artifacts` is
+    the flattened list of every domain's `_logical_artifacts` dicts, `physical_artifacts`
+    the list of physical-artifact dicts — and builds its own id→kind index internally
+    so no caller can drop the kind (a {id: kind} map or bare set of ids let finding-1's
+    kind check be bypassed at the interface; a caller-built dict comprehension would
+    silently collapse a cross-domain duplicate id). There is NO compatibility mode and
+    NO unknown-kind branch: every non-baseline mapping runs the kind check.
+
+    Raises LedgerError on: a logical artifact with an empty/invalid id or kind, or a
+    DUPLICATE logical id across the flattened input; duplicate physical id; a
+    non-baseline physical with an empty/invalid kind; a non-baseline physical
+    referencing a logical id that doesn't exist (ghost); a physical whose kind ≠ a
+    logical artifact it collapses (a dedup collapse is kind-HOMOGENEOUS — a cff_op
+    logical must never map into an rhp physical); a baseline carrying logical ids or a
+    bad kind/reason; a non-baseline with no logical ids; a logical artifact mapped to NO
+    physical artifact. Returns None."""
+    # Build the id→kind index HERE (not the caller) — validating id/kind shape and
+    # rejecting duplicate ids, so a cross-domain collision can't be silently overwritten.
+    logical_kinds = {}
+    for a in logical_artifacts:
+        if not isinstance(a, dict):
+            raise LedgerError(f"logical artifact must be a dict, got "
+                              f"{type(a).__name__}: {a!r} (pass the raw "
+                              f"_logical_artifacts list, not a set/map of ids)")
+        lid = a.get("artifact_id")
+        if not lid or not isinstance(lid, str):
+            raise LedgerError(f"logical artifact has empty/invalid id: {a!r}")
+        lkind = a.get("kind")
+        if not lkind or not isinstance(lkind, str):
+            raise LedgerError(f"logical artifact {lid!r} has empty/invalid kind: {lkind!r}")
+        if lid in logical_kinds:
+            raise LedgerError(f"duplicate logical artifact id {lid!r} across domains "
+                              f"(would silently overwrite)")
+        logical_kinds[lid] = lkind
+
+    seen = set()
+    mapped_logical = set()
+    for p in physical_artifacts:
+        if not isinstance(p, dict):
+            raise LedgerError(f"physical artifact must be a dict, got "
+                              f"{type(p).__name__}: {p!r}")
+        pid = p.get("artifact_id")
+        if not pid or not isinstance(pid, str):
+            raise LedgerError(f"physical artifact has empty/invalid id: {p!r}")
+        if pid in seen:
+            raise LedgerError(f"duplicate physical artifact id {pid!r}")
+        seen.add(pid)
+        # `baseline` is a SCHEMA field — require a real bool. Truthiness would accept
+        # the string "false", a number, or a missing key, letting a hand-built /
+        # round-tripped IR misclassify an artifact and skip the ownership contract.
+        baseline = p.get("baseline")
+        if not isinstance(baseline, bool):
+            raise LedgerError(f"physical {pid!r} baseline must be a bool, got "
+                              f"{type(baseline).__name__}: {baseline!r}")
+        if baseline:
+            # A baseline carries NO logical ids — the persisted schema is EXACTLY the
+            # empty list, not None / "" / () (all of which are falsy but off-schema).
+            lids = p.get("logical_artifact_ids")
+            if lids != [] or not isinstance(lids, list):
+                raise LedgerError(f"baseline physical {pid!r} logical_artifact_ids must "
+                                  f"be exactly [], got {lids!r}")
+            if p.get("kind") not in _BASELINE_KINDS:
+                raise LedgerError(f"baseline physical {pid!r} kind {p.get('kind')!r} "
+                                  f"not in allowlist")
+            if not p.get("baseline_reason"):
+                raise LedgerError(f"baseline physical {pid!r} missing reason")
+            continue
+        pkind = p.get("kind")
+        if not pkind or not isinstance(pkind, str):
+            raise LedgerError(f"non-baseline physical {pid!r} has empty/invalid kind "
+                              f"{pkind!r}")
+        # The persisted gate reads JSON (never yields tuples), so require a strict list —
+        # not the list/tuple the emitter API accepts.
+        lids = p.get("logical_artifact_ids")
+        if not isinstance(lids, list):
+            raise LedgerError(f"non-baseline physical {pid!r} logical_artifact_ids must "
+                              f"be a list, got {type(lids).__name__}: {lids!r}")
+        bad = _bad_logical_id_list(lids)
+        if bad:
+            raise LedgerError(f"non-baseline physical {pid!r} {bad}")
+        for lid in lids:
+            if lid not in logical_kinds:
+                raise LedgerError(f"physical {pid!r} references ghost logical id {lid!r}")
+            if logical_kinds[lid] != pkind:
+                raise LedgerError(
+                    f"physical {pid!r} (kind {pkind!r}) collapses logical {lid!r} of "
+                    f"kind {logical_kinds[lid]!r} — a physical artifact must be "
+                    f"kind-homogeneous (cannot map e.g. a cff_op logical into an rhp "
+                    f"physical)")
+            mapped_logical.add(lid)
+    unmapped = sorted(set(logical_kinds) - mapped_logical)
+    if unmapped:
+        raise LedgerError(f"logical artifacts mapped to NO physical artifact: {unmapped}")
+
+
+def _mark_result_non_convertible(ir, result, reason, expr=None, source_kind="rule",
+                                 source_id=None):
+    """Record a native-mechanism result as non-convertible via the ledger channel.
+    Used when native_placement() rejects a condition — so the rule lands in
+    conversion_report.md instead of being silently applied to `*` (widening) or dropped.
+
+    Preserves the RESULT's subset provenance: a conditional security header reaches here
+    as a response_headers_policy result carrying owned_key_segments=[["headers", name]],
+    so this NC must own ONLY that header — not the whole rule (which would collide with a
+    sibling header's converted-op claim once the viewer-op channel is wired). A result
+    with no hint (a genuinely whole-scope reject, e.g. a compression rule) claims the
+    whole unit. `source_id` is the internal ledger unit id (defaults to the display id)."""
+    if source_id is None:
+        source_id = result.get("cf_source_rule", "")
+    full_reason = f"{reason}. Scope: {result.get('raw_expression') or expr or '(complex)'}"
+    claim_non_convertible(
+        ir, source_kind, source_id,
+        reason=full_reason, description=result.get("description", ""),
+        owned_pointers=_result_owned_pointers(result),
+        legacy_cf_source_rule=result.get("cf_source_rule", ""))
 
 
 def _mark_result_lossy(ir, result, reason):
@@ -608,14 +1802,277 @@ def _warn_case_insensitive_native(ir, condition, pattern, source):
         warns.append(msg)
 
 
-def _record_native_effect(ir, scope_pattern, kind, params, source):
+def _validate_owned_key_segments(oks):
+    """Validate the `owned_key_segments` shape used by BOTH single-source provenance and
+    each owner ref: None (whole-unit) OR a NON-EMPTY list of paths, where each path is a
+    list of string segments (an empty path [] is legal — it means the action root
+    /$action, see _key_path_to_pointer). Raises LedgerError on breach."""
+    if oks is None:
+        return
+    if not isinstance(oks, list) or not oks:
+        raise LedgerError(f"owned_key_segments must be None or a non-empty list, got {oks!r}")
+    for path in oks:
+        if not isinstance(path, list):
+            raise LedgerError(f"owned_key_segments path must be a list of segments, "
+                              f"got {path!r}")
+        for seg in path:
+            if not isinstance(seg, str):
+                raise LedgerError(f"owned_key_segments segment must be a string, got "
+                                  f"{seg!r} in {path!r}")
+
+
+def _validate_owner_ref(ref):
+    """Validate ONE provenance owner ref (SHARED by the viewer-op and KVS gates, and by
+    single-source ops via a synthesized ref): a dict with a NON-EMPTY STRING source_kind
+    and source_id, a well-formed owned_key_segments (None or non-empty list of
+    string-segment paths), and an EXPLICIT outcome_status.
+
+    STATUS BELONGS TO THE SOURCE CONTRIBUTION, NOT THE ARTIFACT — a shared artifact (e.g.
+    an IP-list KVS entry) can serve an EXACT header and a LOSSY op at once, so each ref
+    carries its own status. Status is ALWAYS explicit (no implicit EXACT default):
+    outcome_status ∈ {EXACT, LOSSY_WITH_WARNING}; NON_CONVERTIBLE never appears on an
+    artifact-producing ref (NC keys own no artifact). EXACT requires NO reason; LOSSY
+    requires a non-empty reason. Raises LedgerError on breach — a malformed ref must fail
+    at construction, not when the coordinator finally consumes it."""
+    if not isinstance(ref, dict):
+        raise LedgerError(f"owner ref must be a dict, got {type(ref).__name__}: {ref!r}")
+    for f in ("source_kind", "source_id"):
+        v = ref.get(f)
+        if not v or not isinstance(v, str):
+            raise LedgerError(f"owner ref {f} must be a non-empty string, got {v!r}")
+    _validate_owned_key_segments(ref.get("owned_key_segments"))
+    status = ref.get("outcome_status")
+    if status not in (OUTCOME_EXACT, OUTCOME_LOSSY):
+        raise LedgerError(f"owner ref outcome_status must be EXACT or LOSSY_WITH_WARNING "
+                          f"(explicit — no implicit default; NC never owns an artifact), "
+                          f"got {status!r}")
+    reason = ref.get("outcome_reason")
+    if status == OUTCOME_EXACT and reason:
+        raise LedgerError(f"EXACT owner ref must have no reason, got {reason!r}")
+    if status == OUTCOME_LOSSY and not reason:
+        raise LedgerError("LOSSY_WITH_WARNING owner ref requires a non-empty reason")
+
+
+def _owner_ref_identity(ref):
+    """The full CONTRIBUTION identity of an owner ref: (unit, subset, status, reason).
+    Two refs are the SAME contribution only when ALL FOUR match — so a whole-unit ref
+    does NOT subsume a differently-statused subset (that would erase a conflicting
+    status). owned_key_segments is normalized to a hashable, order-independent form
+    (None stays None; a list → a frozenset of segment-tuples)."""
+    oks = ref.get("owned_key_segments")
+    oks_key = None if oks is None else frozenset(tuple(p) for p in oks)
+    return (ref["source_kind"], ref["source_id"], oks_key,
+            ref.get("outcome_status"), ref.get("outcome_reason") or None)
+
+
+def _merge_owner_refs_into(existing, incoming):
+    """Merge `incoming` owner refs into the `existing` list, IN PLACE, de-duplicating on
+    the FULL CONTRIBUTION identity (unit + subset + status + reason) — NOT just the unit.
+
+    Status belongs to the source contribution, so a whole-unit EXACT ref and a subset
+    LOSSY ref for the SAME unit are DIFFERENT contributions and BOTH survive (the old
+    per-unit collapse could erase a conflicting status). Identical contributions (same
+    unit, same subset, same status, same reason) collapse to one. The coordinator later
+    resolves refs to source keys and FATALs if one key ends up with conflicting statuses.
+    All refs are pre-validated by the caller."""
+    have = {_owner_ref_identity(r) for r in existing}
+    for r in incoming:
+        ident = _owner_ref_identity(r)
+        if ident in have:
+            continue
+        existing.append({
+            "source_kind": r["source_kind"], "source_id": r["source_id"],
+            "owned_key_segments": (None if r["owned_key_segments"] is None
+                                   else [list(p) for p in r["owned_key_segments"]]),
+            "outcome_status": r["outcome_status"],
+            "outcome_reason": r.get("outcome_reason"),
+        })
+        have.add(ident)
+
+
+def _append_kvs_entry(ir, key, value, owner_refs):
+    """THE single constructor+sink for a KVS entry (ir.metadata.kvs_data). Attaches the
+    INTERNAL provenance `_owner_refs` so the (deferred) KVS artifact channel can resolve
+    each entry's source unit(s) — a KVS entry with no provenance can't be traced back,
+    exactly the bulk / custom-error / IP-list gap the earlier rounds hit on viewer ops.
+
+    DEDUP-MERGE: KVS keys are unique (the store is a map). When the SAME key is appended
+    again (a shared IP-list entry referenced by several rules, or an identical redirect),
+    the owner refs are MERGED PER UNIT via _merge_owner_refs_into — a later ref that names
+    the same unit with a DIFFERENT subset unions its paths (X-A + X-B on one shared entry),
+    and whole-unit subsumes a subset. The value must match on a re-append (same key,
+    different value is a real conflict → FATAL). `owner_refs` must be a non-empty list; key
+    a non-empty string; value a string. Returns the entry dict."""
+    if not isinstance(owner_refs, list) or not owner_refs:
+        raise LedgerError(f"_append_kvs_entry: owner_refs must be a non-empty list, got "
+                          f"{owner_refs!r}")
+    for r in owner_refs:
+        _validate_owner_ref(r)
+    if not key or not isinstance(key, str):
+        raise LedgerError(f"_append_kvs_entry: key must be a non-empty string, got {key!r}")
+    if not isinstance(value, str):
+        raise LedgerError(f"_append_kvs_entry: value must be a string, got {value!r}")
+    kvs = ir["metadata"].setdefault("kvs_data", [])
+    # O(1) key lookup via an index (a large IP list re-referenced by many rules would be
+    # O(n²) with a per-append linear scan). The index holds the SAME dict objects as the
+    # list; it's a build-time accelerator stripped with the other internals.
+    idx = ir.setdefault("_kvs_index", {})
+    existing = idx.get(key)
+    if existing is not None:
+        if existing["value"] != value:
+            raise LedgerError(f"KVS key {key!r} re-appended with a different value "
+                              f"({existing['value']!r} != {value!r}) — a key must map to "
+                              f"one value")
+        _merge_owner_refs_into(existing["_owner_refs"], owner_refs)
+        return existing
+    # Normalize the seed refs through the same merge (into an empty list) so the stored
+    # shape is canonical (own copies, per-unit deduped) even on first insert.
+    seed = []
+    _merge_owner_refs_into(seed, owner_refs)
+    entry = {"key": key, "value": value, "_owner_refs": seed}
+    kvs.append(entry)
+    idx[key] = entry
+    return entry
+
+
+def _append_viewer_op(beh, phase, *, type, cf_source_rule, description, condition,
+                      raw_expression, params, scope_pattern, seq,
+                      source_kind="rule", source_id=None, owned_key_segments=None,
+                      outcome_status=None, outcome_reason=None,
+                      owner_refs=None, insert_index=None):
+    """THE single constructor+sink for a viewer_request_ops / viewer_response_ops entry.
+    EVERY op-append site (generic placement, browser_ttl, mixed-header rehome, managed
+    transforms, bulk redirect) routes through here so the INTERNAL PROVENANCE
+    (`_source_kind`, `_source_id`, `_owned_key_segments`) can never be forgotten — a
+    viewer op with no provenance can't be resolved to its inventory unit by the
+    (deferred) viewer-op artifact channel, silently dropping the outcome for an id-less
+    rule (empty cf_source_rule).
+
+    phase ∈ {"request","response"} selects the list. Provenance keys are `_`-prefixed and
+    are stripped from the persisted op by _strip_build_internals AFTER the channels scan
+    them. For a MULTI-UNIT AGGREGATION op (bulk redirect: one CFF op serving many redirect
+    items), pass `owner_refs` — a list of {source_kind, source_id, owned_key_segments}
+    dicts, one per owned unit — instead of a single source_id; the op then has no single
+    _source_id (that would be a lie) and the channel unions the owner refs. `insert_index`
+    inserts at a position (bulk redirect must land after redirect/rewrite/origin ops)
+    instead of appending.
+
+    ENFORCES the provenance contract at construction (a bad ref only fails when a future
+    channel consumes it otherwise): phase must be request/response; SINGLE-source mode
+    requires a non-empty source_kind AND source_id (NO cf_source_rule fallback — a display
+    id, empty for id-less rules, is not a ledger unit); AGGREGATION mode requires a
+    non-empty owner_refs list, each ref a dict with non-empty source_kind/source_id and an
+    owned_key_segments that is None (whole-unit) or a list. Raises LedgerError on breach."""
+    if phase not in ("request", "response"):
+        raise LedgerError(f"_append_viewer_op: phase must be 'request' or 'response', "
+                          f"got {phase!r}")
+    # HARD GATE (round-19 finding 2): NO producer may emit an `add_*_header` viewer op — a
+    # request `add` isn't a real Cloudflare operation and a response `add` (append-duplicate)
+    # is non-convertible. The generator's add branch is dormant/legacy-only; a live IR reaching
+    # it would get a spurious EXACT claim + CFF artifact. Fail loud instead of silently wiring.
+    if type in ("add_request_header", "add_response_header", "add_header"):
+        raise LedgerError(
+            f"_append_viewer_op: op type {type!r} is not a valid conversion output — "
+            "Cloudflare header `add` has no faithful CloudFront equivalent (request has no "
+            "add; response add is append-duplicate → non-convertible). A producer must NC it, "
+            "never emit an add viewer op.")
+    # HARD GATE (round-27 finding 2 → review-2 finding 3): every op MUST satisfy the FULL SHARED
+    # op validator at the single construction sink — the SAME validate_viewer_op the chunk
+    # validator and generator enforce, so no producer (generic placement OR an internal one: RHP
+    # rehome, browser_ttl, True-Client-IP) can build an op with an unknown type, wrong phase, bad
+    # param, invalid header name, a leftover raw value field, a slot-illegal lowered value, OR a
+    # malformed/absent condition (a list/str condition AttributeErrors in the generator; neither/
+    # both condition+raw is ambiguous). The generator renders ONLY validated data, so anything
+    # malformed here would FATAL downstream — catch it at the sink. A type absent from the registry
+    # (a producer bug) is rejected outright.
+    _op_bad = validate_viewer_op({"type": type, "params": params or {},
+                                  "condition": condition, "raw_expression": raw_expression}, phase)
+    if _op_bad:
+        raise LedgerError(
+            f"_append_viewer_op: op violates the shared viewer-op contract: {_op_bad}. "
+            "Every producer must emit a registry-valid op (lowered values via lower_literal_value "
+            "/ lower_dynamic_value) — a malformed op must never reach the persisted IR / generator.")
+    if owner_refs is not None:
+        if not owner_refs:
+            raise LedgerError("_append_viewer_op: aggregation op has empty owner_refs "
+                              "(an aggregate must own at least one unit)")
+        for r in owner_refs:
+            _validate_owner_ref(r)   # non-empty STRING kind/id, valid segments
+    else:
+        # Single-source: validate via the SAME ref validator (a synthesized ref) so int
+        # source_kind/source_id, a string owned_key_segments, a bad status, or an empty
+        # subset are all rejected here too — not just falsy checks. `outcome_status` has NO
+        # default (was EXACT) — every caller MUST pass it explicitly; a missing status is
+        # outcome_status=None, which the validator REJECTS (status must be explicit — the
+        # design decision). EXACT callers pass OUTCOME_EXACT; a known-gap sink (browser_ttl)
+        # passes LOSSY + reason.
+        _validate_owner_ref({"source_kind": source_kind, "source_id": source_id,
+                             "owned_key_segments": owned_key_segments,
+                             "outcome_status": outcome_status,
+                             "outcome_reason": outcome_reason})
+    # DEEP-COPY the condition so each op owns an INDEPENDENT tree. A processor builds N
+    # per-header ops all sharing ONE parsed `cond` object (parse_expression is called
+    # once per rule); a destructive read on one op's condition (e.g. _collect_kvs_ip_
+    # entries popping "kvs_ips") would otherwise mutate the SAME object the sibling ops
+    # alias, so only the first op would see the IP data and later headers would fail to
+    # register their KVS owner. Copying here severs the aliasing at the single sink.
+    op = {
+        "type": type, "cf_source_rule": cf_source_rule,
+        "description": description,
+        "condition": copy.deepcopy(condition), "raw_expression": raw_expression,
+        "params": params, "scope_pattern": scope_pattern, "seq": seq,
+    }
+    if owner_refs is not None:
+        op["_owner_refs"] = [dict(r) for r in owner_refs]
+    else:
+        op["_source_kind"] = source_kind
+        op["_source_id"] = source_id
+        op["_owned_key_segments"] = owned_key_segments
+        op["_outcome_status"] = outcome_status
+        op["_outcome_reason"] = outcome_reason
+    lst = beh["viewer_response_ops"] if phase == "response" else beh["viewer_request_ops"]
+    if insert_index is None:
+        lst.append(op)
+    else:
+        lst.insert(insert_index, op)
+    return op
+
+
+# The per-op INTERNAL provenance keys _append_viewer_op writes — stripped from every
+# persisted viewer op by _strip_build_internals once the ledger channels have consumed them.
+_VIEWER_OP_INTERNAL_KEYS = ("_source_kind", "_source_id", "_owned_key_segments",
+                            "_outcome_status", "_outcome_reason", "_owner_refs")
+
+
+def _record_native_effect(ir, scope_pattern, kind, params, source,
+                          source_kind="rule", source_id=None, owned_key_segments=None):
     """Append a native effect to the ordered replay log. `scope_pattern` is the
     CloudFront path pattern the effect applies to (`*` = whole distribution).
     `kind` selects the applier branch in _apply_native_effect; `source` carries
     cf_source_rule/description for non-convertible reporting. `condition` is the
     processor's SCREENED, host-stripped condition — kept so that if this effect is
     later re-homed to the CFF (mixed-op header reconciliation) it carries its
-    authoritative runtime predicate, not the behavior association as a stand-in."""
+    authoritative runtime predicate, not the behavior association as a stand-in.
+
+    INTERNAL PROVENANCE (`_source_kind`, `_source_id`, `_owned_key_segments`) is stored
+    ALONGSIDE the display cf_source_rule so the native-effect / viewer-op artifact
+    channels (and the mixed-header rehome) can resolve the correct inventory unit even
+    for an id-less rule (whose cf_source_rule is empty but whose unit id is a synthesized
+    {rule_type}#{index}). Provenance MUST come from the internal id, never be rebuilt
+    from cf_source_rule (a display field). `source_id` defaults to the display id for
+    callers/tests that don't thread a separate unit id.
+
+    `owned_key_segments` is the SUBSET of the source unit this effect owns (its
+    json-pointer leaves). A cache rule has SEVERAL independent settings (edge_ttl /
+    cache_key / cache / ...), only some of which convert — so each cache effect owns ONLY
+    its own leaves (edge_ttl → [["edge_ttl"]]), never the whole rule (which would falsely
+    claim an un-converted sibling like serve_stale). An explicit arg overrides the source's
+    hint; None falls back to the source's owned_key_segments (whole-unit for a single-
+    concern rule like compression/origin, whose whole action IS the effect)."""
+    if source_id is None:
+        source_id = source.get("cf_source_rule", "")
+    if owned_key_segments is None:
+        owned_key_segments = source.get("owned_key_segments")
     ir["_native_effects"].append({
         "scope": scope_pattern, "kind": kind, "params": params,
         "cf_source_rule": source.get("cf_source_rule", ""),
@@ -623,63 +2080,116 @@ def _record_native_effect(ir, scope_pattern, kind, params, source):
         "condition": source.get("condition"),
         "raw_expression": source.get("raw_expression"),
         "seq": ir.get("_seq", 0),   # source order (replay is order-sensitive: last wins)
+        "_source_kind": source_kind,
+        "_source_id": source_id,
+        "_owned_key_segments": owned_key_segments,
     })
 
 
-def _apply_native_effect(beh, kind, params):
-    """Apply one native effect onto one behavior. Pure w.r.t. the behavior dict —
-    the replay pass decides WHICH behaviors this runs on. Last-writer-wins is a
-    property of replay ORDER, so each branch just overwrites."""
+# _canonical_rhp_header is imported from cdn_rhp_capabilities (the shared registry) — the
+# canonical (generator-expected) casing for an RHP header, so the RHP dict key, the
+# last-wins slot, and the generated output all use ONE name (no `x-frame-options` dict vs
+# `X-Frame-Options` generator desync). An unsupported header never reaches the RHP branch.
+
+
+def _apply_native_effect(beh, kind, params, seq=0):
+    """Apply one native effect onto one behavior and RETURN THE SET OF LAST-WINS SLOTS it
+    actually WROTE. Pure w.r.t. the behavior dict — the replay pass decides WHICH behaviors
+    this runs on. Last-writer-wins is a property of replay ORDER, so each branch overwrites.
+
+    The returned slots are the AUTHORITATIVE last-wins keys — two effects that write the
+    SAME slot on the same behavior overwrite (only the later survives → the earlier is a
+    pure-overwrite loser); effects writing DIFFERENT slots coexist (both survive). Returning
+    the ACTUALLY-written slots (not a kind→slot guess) keeps the winner tracker in lockstep
+    with real write semantics: cache_key writes PER FIELD (a query-selector rule and a
+    headers rule don't collide), and a managed rhp_security setdefault that DIDN'T write
+    (the header already exists) returns NO slot → no winner row for it."""
     cp = beh["cache_policy"]
     if kind == "ttl_override":
         # override_origin forces a fixed TTL — min=default=max is the only way
         # (a >max value would otherwise fail CloudFront's create API).
         ttl = params["ttl"]
         cp["ttl"]["min"] = cp["ttl"]["default"] = cp["ttl"]["max"] = ttl
+        return {"ttl"}
     elif kind == "ttl_respect_origin":
         # RESET to factory TTL (CachingOptimized-like defaults) — undoes a prior
         # override at this scope. Must match make_default_behavior's ttl.
         cp["ttl"]["min"], cp["ttl"]["default"], cp["ttl"]["max"] = 0, 7200, 86400
+        return {"ttl"}
     elif kind == "caching_enabled":
         cp["caching_disabled"] = False       # RESET: undoes a prior cache=false
+        return {"caching"}
     elif kind == "cache_key":
-        for k in ("query_strings", "query_strings_list", "query_strings_exclude", "headers"):
+        # cache_key updates PER FIELD — the query-string selector and the header list are
+        # INDEPENDENT slots (a later query rule must not overwrite an earlier header rule).
+        slots = set()
+        for k in ("query_strings", "query_strings_list", "query_strings_exclude"):
             if k in params:
                 cp["cache_key"][k] = params[k]
+                slots.add("cache_key.query")
+        if "headers" in params:
+            cp["cache_key"]["headers"] = params["headers"]
+            slots.add("cache_key.headers")
+        return slots
     elif kind == "caching_disabled":
         cp["caching_disabled"] = True
+        return {"caching"}
     elif kind == "compression":
         cp["enable_gzip"] = params.get("enable_gzip", True)
         cp["enable_brotli"] = params.get("enable_brotli", True)
+        return {"compression"}
     elif kind == "rhp_security":
         sh = beh["response_headers_policy"]["security_headers"]
-        entry = {"value": params["value"], "operation": params.get("operation", "set")}
+        # CANONICAL name for BOTH the dict key and the slot — must match what the HCL
+        # generator reads, so the ledger winner and the emitted header can't disagree.
+        cname = _canonical_rhp_header(params["name"])
+        # Store the NORMALIZED value the processor's capability.parse() accepted — the
+        # generator renders THIS via the same capability's render() (no independent
+        # re-parse). Raw value kept for reference/report only. The managed-transform
+        # producer doesn't pre-parse, so derive it here from the SAME registry (its two
+        # hardcoded values, nosniff / SAMEORIGIN, always parse) — never leave it None on
+        # a security header or the generator would emit nothing.
+        normalized = params.get("normalized")
+        if normalized is None:
+            cap = security_capability(params["name"])
+            normalized = cap["parse"](params["value"]) if cap else None
+        entry = {"value": params["value"], "operation": params.get("operation", "set"),
+                 "normalized": normalized}
         if params.get("_managed"):
-            sh.setdefault(params["name"], entry)   # managed default: explicit rule wins
+            # managed default: only WRITES if the header isn't already set (explicit rule
+            # wins). If it didn't write, it owns nothing → return NO slot.
+            if cname in sh:
+                return set()
+            sh[cname] = entry
         else:
-            sh[params["name"]] = entry
+            sh[cname] = entry
+        return {("rhp", cname.lower())}
     elif kind == "rhp_cors":
-        rhp = beh["response_headers_policy"]
-        if rhp["cors"] is None:
-            rhp["cors"] = {}
-        rhp["cors"][params["name"]] = params["value"]
-        # cors_config.origin_override is ONE flag for the whole CORS config, not per
-        # header — so it can't track per-header/per-rule set-vs-add precedence. Any
-        # `add` anywhere makes it False (conservative: don't override the origin's
-        # CORS headers). A later `set` does NOT flip it back True, because that would
-        # also change behavior for the OTHER headers sharing this flag. When set/add
-        # are genuinely mixed the faithful answer isn't representable in one flag;
-        # False is the safe choice (deferring to origin). Documented limitation.
-        if params.get("operation") == "add":
-            rhp["cors"]["_origin_override"] = False
+        # DORMANT (round-13 finding 3). No producer emits rhp_cors today — a static CORS
+        # header routes to a viewer-response CFF (LOSSY), never here. The native cors_config
+        # path is NOT a faithful substitute for a static header set (it synthesizes the
+        # required Allow-Methods/Allow-Headers the source never set, Origin-matches instead of
+        # emitting the literal value, and is preflight-only). Re-enabling it must go through a
+        # NEW group-level semantic check that assigns the correct per-GROUP outcome (likely
+        # LOSSY, not EXACT); it must NOT silently inherit the old per-header EXACT status. So
+        # fail loud rather than let a re-added producer flow through the retired mapping.
+        raise LedgerError(
+            "rhp_cors native effect reached _apply_native_effect, but the native cors_config "
+            "path is dormant: a static CORS header must route to a viewer-response CFF "
+            "(LOSSY). Re-enabling native CORS requires a group-level semantic check + explicit "
+            "outcome assignment (see cdn_rhp_capabilities.native_cors_config_supports) — do "
+            "NOT reuse the old per-header EXACT path.")
     elif kind == "rhp_custom":
         beh["response_headers_policy"]["custom_headers"].append({
             "name": params["name"], "value": params["value"],
             "operation": params.get("operation", "set"),
         })
+        return {("rhp_custom", seq)}   # APPEND semantics → unique slot, never overwritten
     elif kind == "origin":
         beh["origin"]["domain"] = params.get("origin_host", beh["origin"]["domain"])
         beh["origin"]["s3_origin"] = "s3." in (params.get("origin_host") or "")
+        return {"origin"}
+    return set()
 
 
 def _replay_native_effects(ir, domain_config, origin_content):
@@ -706,15 +2216,48 @@ def _replay_native_effects(ir, domain_config, origin_content):
         if e["scope"] != "*":
             find_or_create_behavior(ir, e["scope"], domain_config, origin_content)
 
+    # Record the POST-REPLAY EFFECTIVE contribution for the native-effect artifact channel:
+    # replay is the sole authority on last-wins / containment / cross-overlap, so it stamps
+    # what actually survived rather than the coordinator re-deriving that logic. Build-time,
+    # stripped before write.
+    #   _native_applied: one row per (effect APPLIED to a behavior) — {behavior, slot, effect,
+    #     is_winner}. is_winner = this effect is the LAST applied to that (behavior, slot), so
+    #     its value survives on the behavior (→ owns the artifact); a loser was overwritten
+    #     (→ a validated exact_noop, owns nothing).
+    #   _native_overlap_nc: (effect, behavior) pairs that cross-overlapped → NC (never applied,
+    #     so they must NOT become a native artifact — reviewer semantic #4).
+    applied = ir.setdefault("_native_applied", [])
+    overlap_nc = ir.setdefault("_native_overlap_nc", [])
+
     for beh in ir["cache_behaviors"]:
         bp = beh["path_pattern"]
+        winner_by_slot = {}   # slot -> index into `applied` of the current winner for THIS beh
         for e in effects:
             scope = e["scope"]
             if pattern_contains(scope, bp):
-                _apply_native_effect(beh, e["kind"], e["params"])
+                # _apply returns the slots it ACTUALLY wrote (cache_key = per field; a
+                # managed setdefault that didn't write = no slot).
+                wrote = _apply_native_effect(beh, e["kind"], e["params"], e["seq"])
+                if not wrote:
+                    # EVALUATED but wrote NOTHING (a managed setdefault the explicit rule
+                    # already satisfied). Record a NO-WRITE row so the effect's source unit
+                    # is still accounted — the coordinator emits exact_noop for it IF the
+                    # unit has no other winner and no cross-overlap (else it vanishes:
+                    # inventory key with no claim).
+                    applied.append({"behavior": bp, "slot": None, "effect": e,
+                                    "is_winner": False, "no_write": True})
+                    continue
+                for slot in wrote:
+                    prev = winner_by_slot.get(slot)
+                    if prev is not None:
+                        applied[prev]["is_winner"] = False   # later effect wins this slot
+                    applied.append({"behavior": bp, "slot": slot, "effect": e,
+                                    "is_winner": True})
+                    winner_by_slot[slot] = len(applied) - 1
             elif pattern_contains(bp, scope):
                 continue                     # S is a narrower sibling behavior's job
             elif patterns_overlap(scope, bp):
+                overlap_nc.append({"effect": e, "behavior": bp})
                 beh["non_convertible"].append({
                     "cf_source_rule": e["cf_source_rule"],
                     "description": e["description"],
@@ -779,24 +2322,49 @@ def _reconcile_mixed_op_headers(ir, domain_config, origin_content):
     for e in effects:
         _is_hdr = e["kind"] in ("rhp_security", "rhp_cors") and not e["params"].get("_managed")
         if _is_hdr and _must_move(e):
-            op_type = "add_response_header" if e["params"].get("operation") == "add" \
-                else "set_response_header"
+            # A rehomed native RHP effect is always a `set` — response `add` is NC'd at the
+            # processor before it can become a native effect (round-19 finding 2), so it never
+            # reaches here. Guard rather than construct an `add_response_header` the hard gate
+            # would reject anyway.
+            if e["params"].get("operation") == "add":
+                raise LedgerError(
+                    "rehome: a native RHP effect with operation=add reached the CFF rehome — "
+                    "response header `add` must be non-convertible at the processor, never a "
+                    "native effect")
+            op_type = "set_response_header"
             beh = find_or_create_behavior(ir, e["scope"], domain_config, origin_content)
-            beh["viewer_response_ops"].append({
-                "type": op_type,
-                "cf_source_rule": e.get("cf_source_rule", ""),
-                "description": e.get("description", ""),
-                # PRESERVE the effect's authoritative screened condition — a native
-                # RHP effect scoped to a path was recorded with that condition, and
-                # dropping it to `always` would fire the header on every path.
-                "condition": e.get("condition") if e.get("condition") is not None else {"always": True},
-                "raw_expression": e.get("raw_expression"),
-                "params": {"name": e["params"]["name"], "value": e["params"]["value"]},
+            # CARRY the internal provenance across the rehome — this viewer op is the same
+            # source unit's output as the native effect it replaces; the (id-less) unit id
+            # must survive so the viewer-op artifact channel can resolve it. Rebuilding
+            # from cf_source_rule (empty for id-less) would lose it.
+            _append_viewer_op(
+                beh, "response",
+                type=op_type,
+                cf_source_rule=e.get("cf_source_rule", ""),
+                description=e.get("description", ""),
+                # PRESERVE the effect's authoritative screened condition — a native RHP
+                # effect scoped to a path was recorded with that condition, and dropping
+                # it to `always` would fire the header on every path.
+                condition=e.get("condition") if e.get("condition") is not None else {"always": True},
+                raw_expression=e.get("raw_expression"),
+                # LOWER the static header value ONCE (round-27) — a rehomed RHP effect's value is
+                # always a literal string; the generator renders the stored LiteralValue AST.
+                params={"name": e["params"]["name"],
+                        "value_lowered": lower_literal_value(e["params"]["value"], "response_header")},
                 # CFF-attach scope from the SAME single authority (case-insensitive
                 # wildcard → all behaviors), not the native path scope e["scope"].
-                "scope_pattern": _compute_scope_pattern(e.get("condition")),
-                "seq": e.get("seq", 0),
-            })
+                scope_pattern=_compute_scope_pattern(e.get("condition")),
+                seq=e.get("seq", 0),
+                source_kind=e.get("_source_kind", "rule"),
+                source_id=e.get("_source_id", e.get("cf_source_rule", "")),
+                owned_key_segments=e.get("_owned_key_segments"),
+                # A rehomed static security/CORS header now runs in the SAME viewer-response CFF as
+                # a dynamic set of that header — so it shares the error-response gap and is
+                # LOSSY_WITH_WARNING, NOT EXACT (round-27 review 2 finding 1). Uses the shared
+                # VIEWER_RESPONSE_GAP_REASON so it can't drift from the processor's response tail.
+                outcome_status=OUTCOME_LOSSY,
+                outcome_reason=(f"response header '{e['params']['name']}' "
+                                f"{VIEWER_RESPONSE_GAP_REASON}"))
         else:
             kept.append(e)
     ir["_native_effects"] = kept
@@ -830,20 +2398,35 @@ def _enforce_every_rule_accounted(ir):
         })
 
 
-def _place_result(ir, result, domain_config, origin_content, cond, expr):
-    """Place a processed rule result into the appropriate IR location."""
+def _place_result(ir, result, domain_config, origin_content, cond, expr,
+                  source_kind="rule", source_id=None):
+    """Place a processed rule result into the appropriate IR location.
+
+    `source_kind` is the config-unit kind of the rule that produced `result` ('rule' for
+    phase rules, 'cloud_connector' for cloud connector). `source_id` is the INTERNAL unit
+    id (from _assign_unit_id) — the ledger provenance key; it defaults to the result's
+    display cf_source_rule for callers/tests that don't assign a separate unit id. The
+    two differ only when a rule's display id is absent/duplicated, where source_id is a
+    unique synthesized id. Both name the same unit's inventory keys."""
     if result is None:
         return
 
     rtype = result.get("type", "")
+    if source_id is None:
+        source_id = result.get("cf_source_rule", "")
 
     if rtype == "non_convertible":
-        default_beh = ir["cache_behaviors"][0]
-        default_beh["non_convertible"].append({
-            "cf_source_rule": result.get("cf_source_rule", ""),
-            "description": result.get("description", ""),
-            "reason": result.get("reason", ""),
-        })
+        # Route through the ledger-aware NC channel. A processor that partially converts
+        # exposes `owned_key_segments` (raw dict-key paths) so the NC outcome claims ONLY
+        # its own leaves; without a hint the whole unit is non-convertible. The resolver
+        # turns segments into json-pointers and validates them against the inventory. The
+        # LEDGER unit is source_id; the legacy report still shows the display id.
+        claim_non_convertible(
+            ir, source_kind, source_id,
+            reason=result.get("reason", ""),
+            description=result.get("description", ""),
+            owned_pointers=_result_owned_pointers(result),
+            legacy_cf_source_rule=result.get("cf_source_rule", ""))
         return
 
     if rtype == "distribution_setting":
@@ -852,12 +2435,26 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         value = result.get("value")
         if setting in default_beh["distribution_settings"]:
             default_beh["distribution_settings"][setting] = value
+        # LEDGER: this converted setting owns its SOURCE leaf (e.g. /ssl, /min_tls_version). Record an
+        # EXACT claim (artifact-less native setting → exact_noop) so the leaf is NOT a silent drop the
+        # finalize gate flags. owned_key_segments comes from the processor (a single setting's leaf);
+        # None would mean whole-unit — a config rule can carry other settings with their own claims.
+        claim_decision(ir, _resolve_owned_keys(ir, source_kind, source_id, _result_owned_pointers(result)),
+                       OUTCOME_EXACT, exact_noop=True)
+        # A directed-override note (e.g. min TLS floored to the 1.2 baseline) rides the result → the
+        # report's conversion_warnings. NOT a claim (the setting IS converted) — informational only.
+        if result.get("warning"):
+            ir["metadata"].setdefault("conversion_warnings", []).append(result["warning"])
         if result.get("cf_source_rule"):
             ir.setdefault("_accounted_rule_ids", set()).add(result["cf_source_rule"])
         return
 
     if rtype == "custom_error_response":
         ir["metadata"]["custom_error_responses"].append(result["params"])
+        # LEDGER: the native custom_error_response converts the rule's status_code leaf → EXACT claim
+        # (artifact-less → exact_noop), so it is NOT a silent drop the finalize gate flags.
+        claim_decision(ir, _resolve_owned_keys(ir, source_kind, source_id, _result_owned_pointers(result)),
+                       OUTCOME_EXACT, exact_noop=True)
         if result.get("cf_source_rule"):
             ir.setdefault("_accounted_rule_ids", set()).add(result["cf_source_rule"])
         return
@@ -869,10 +2466,11 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         # isn't a single pattern (raw / multi-path OR) can't be honored → report.
         scope, reason = native_placement(result.get("condition") or cond, _resolved_vpp(ir))
         if reason:
-            _mark_result_non_convertible(ir, result, reason, expr)
+            _mark_result_non_convertible(ir, result, reason, expr, source_kind, source_id)
             return
         _warn_case_insensitive_native(ir, result.get("condition") or cond, scope, result)
-        _record_native_effect(ir, scope, "compression", result.get("params", {}), result)
+        _record_native_effect(ir, scope, "compression", result.get("params", {}), result,
+                              source_kind, source_id)
         return
 
     if rtype == "response_headers_policy":
@@ -886,6 +2484,10 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         # SILENTLY DROPS the header on all error responses / WAF blocks — that is a
         # known runtime gap, NOT an exact conversion. So report it (non-convertible)
         # instead of masking the gap as CFF success (reverses the round-9 fallback).
+        # The processor emits this result type ONLY for a static SECURITY header (CORS
+        # now routes to a viewer-response CFF marked LOSSY — cors_config isn't a faithful
+        # static-set substitute and custom_headers_config rejects CORS names; the native
+        # rhp_cors machinery stays for a FUTURE semantic CORS conversion, not this path).
         scope, reason = native_placement(result.get("condition"), _resolved_vpp(ir))
         if reason:
             _mark_result_non_convertible(
@@ -895,41 +2497,18 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
                 "Function would silently NOT apply it to error responses (origin "
                 "4xx/5xx, custom error pages, WAF blocks) that a Cloudflare rule "
                 "covers — no faithful CloudFront equivalent",
-                expr)
+                expr, source_kind, source_id)
             return
         _warn_case_insensitive_native(ir, result.get("condition"), scope, result)
         params = result["params"]
-        if params.get("is_cors"):
-            kind = "rhp_cors"
-        elif params.get("is_security"):
-            kind = "rhp_security"
-        else:
-            kind = "rhp_custom"
-        _record_native_effect(ir, scope, kind, params, result)
+        _record_native_effect(ir, scope, "rhp_security", params, result, source_kind, source_id)
         return
-
-    if rtype == "serve_error_inline":
-        # Inline error page served via CFF + KVS
-        params = result.get("params", {})
-        kvs_key = params.get("kvs_key", "")
-        # str()-coerce: a KVS value MUST be a string (AWS models it as required
-        # string; a non-str reaches botocore as ParamValidationError at seed
-        # time, after the infra exists). Cloudflare types error-page content as a
-        # String, but a malformed/hand-edited config could carry a JSON array or
-        # object — coerce here at the store point so both kvs-data.json and the
-        # size estimate are always valid.
-        content = params.get("content", "")
-        if not isinstance(content, str):
-            content = json.dumps(content, ensure_ascii=False)
-        ir["metadata"]["kvs_requirements"]["needs_error_pages"] = True
-        ir["metadata"]["kvs_data"].append({"key": kvs_key, "value": content})
-        # Fall through to viewer_request_ops placement below
 
     if rtype == "cache_setting":
         # status_code_ttl (per-status-code edge cache duration) has no CloudFront
         # equivalent — record it once, before the rule fans out to behaviors.
         if "status_code_ttl" in result.get("params", {}):
-            _mark_status_code_ttl_non_convertible(ir, result)
+            _mark_status_code_ttl_non_convertible(ir, result, source_kind, source_id)
             result["params"].pop("status_code_ttl", None)
 
     if rtype == "cache_setting" and result.get("params", {}).get("bypass"):
@@ -949,7 +2528,7 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         # (e.g. any(uri.args["x"][*]=="v"), which we don't convert). Silent
         # over-bypass. Report it non-convertible instead.
         if result.get("raw_expression") and not bcond:
-            _mark_cache_non_convertible(ir, result, expr)
+            _mark_cache_non_convertible(ir, result, expr, source_kind, source_id)
             return
         if bcond is None or bcond.get("always"):
             # Unconditional (after host-strip) → CachingDisabled on the scoped
@@ -957,11 +2536,20 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
             # covers every behavior its path contains (a site-wide `*` bypass turns
             # caching off on every ordered behavior too — none inherit the default).
             path = _extract_path_from_result(result, cond, expr)
-            _record_native_effect(ir, path, "caching_disabled", {}, result)
+            _record_native_effect(ir, path, "caching_disabled", {}, result,
+                                  source_kind, source_id, owned_key_segments=[["cache"]])
             return
         # Conditional → re-tag as a cache_bypass viewer-request op and fall
-        # through to the generic viewer_request_ops placement below.
+        # through to the generic viewer_request_ops placement below. This is re-tagged
+        # HERE (not by a processor), so stamp the explicit EXACT status the generic tail
+        # now requires — a conditional cache-buster CFF is a faithful conversion. CLEAR the
+        # cache_setting params (bypass/ttl/…): the generator's cache_bypass branch reads NONE
+        # of them (it injects the fixed cache-buster header), and the viewer-op contract rejects
+        # any unknown param — a leftover `bypass` leaf would falsely ride the op (round-27
+        # finding 2). The condition already carries what the CFF needs.
         result["type"] = "cache_bypass"
+        result["params"] = {}
+        result["outcome_status"] = OUTCOME_EXACT
         rtype = "cache_bypass"
 
     if rtype == "cache_setting":
@@ -977,10 +2565,11 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
                 # One native effect per path branch (each a single pattern); replay
                 # stacks them in source order like any other cache effect.
                 for path in or_paths:
-                    _record_cache_effects(ir, path, result, domain_config, origin_content)
+                    _record_cache_effects(ir, path, result, domain_config, origin_content,
+                                          source_kind, source_id)
                 return
             # Non-splittable OR → can't be expressed as CloudFront path behaviors.
-            _mark_cache_non_convertible(ir, result, expr)
+            _mark_cache_non_convertible(ir, result, expr, source_kind, source_id)
             return
         # Fan out to one *.ext effect per extension ONLY when the condition is
         # PURELY an extension set. A sibling scope (host eq x and ext in [...])
@@ -991,7 +2580,8 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         exts = _extract_extensions_from_condition(result_cond)
         if len(exts) > 1 and _condition_is_pure_extension(result_cond):
             for ext in exts:
-                _record_cache_effects(ir, f"*.{ext}", result, domain_config, origin_content)
+                _record_cache_effects(ir, f"*.{ext}", result, domain_config, origin_content,
+                                      source_kind, source_id)
             return
         # A cache setting is native (per behavior), so its condition MUST be
         # representable as a single path pattern. After host-stripping, a still-
@@ -999,11 +2589,12 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         # applying it to `_extract_path_from_result`'s best-effort `*` would widen
         # it site-wide. Report non-convertible instead of silently dropping.
         if not _cache_cond_is_single_path(result_cond, _resolved_vpp(ir)):
-            _mark_cache_non_convertible(ir, result, expr)
+            _mark_cache_non_convertible(ir, result, expr, source_kind, source_id)
             return
         path = _extract_path_from_result(result, cond, expr)
         _warn_case_insensitive_native(ir, result_cond, path, result)
-        _record_cache_effects(ir, path, result, domain_config, origin_content)
+        _record_cache_effects(ir, path, result, domain_config, origin_content,
+                              source_kind, source_id)
         return
 
     if rtype == "cloud_connector":
@@ -1013,10 +2604,11 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
         # whole distribution or drop).
         scope, reason = native_placement(result.get("condition") or cond, _resolved_vpp(ir))
         if reason:
-            _mark_result_non_convertible(ir, result, reason, expr)
+            _mark_result_non_convertible(ir, result, reason, expr, source_kind, source_id)
             return
         _warn_case_insensitive_native(ir, result.get("condition") or cond, scope, result)
-        _record_native_effect(ir, scope, "origin", result.get("params", {}), result)
+        _record_native_effect(ir, scope, "origin", result.get("params", {}), result,
+                              source_kind, source_id)
         return
 
     # Drop a redundant S3 origin-override. Cloudflare pointing at an S3 bucket
@@ -1030,7 +2622,13 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
     if rtype == "origin_override" and domain_config.get("origin_type") == "s3":
         ov_origin = result.get("params", {}).get("origin_host") or ""
         if not ov_origin or _is_s3_host(ov_origin):
-            return  # redundant on CloudFront+OAC — drop
+            # Redundant on CloudFront+OAC — the origin rule's intent (route to the S3 bucket with the
+            # right Host) is achieved NATIVELY (OAC signs SigV4, CloudFront sets Host to the bucket
+            # domain). So this is an EXACT NO-OP conversion, NOT an untracked drop: claim the whole
+            # unit EXACT (exact_noop) so its source leaves aren't a silent drop the finalize gate flags.
+            claim_decision(ir, _resolve_owned_keys(ir, source_kind, source_id, None),
+                           OUTCOME_EXACT, exact_noop=True)
+            return  # redundant on CloudFront+OAC — dropped (claimed EXACT no-op above)
 
     # Drop a no-op origin_override — an Origin Rule with no origin host, port,
     # host_header, or sni has nothing to convert. Keeping it would emit an empty
@@ -1046,49 +2644,67 @@ def _place_result(ir, result, domain_config, origin_content, cond, expr):
     path = _extract_path_from_result(result, cond, expr)
     beh = find_or_create_behavior(ir, path, domain_config, origin_content)
 
-    op_entry = {
-        "type": rtype,
-        "cf_source_rule": result.get("cf_source_rule", ""),
-        "description": result.get("description", ""),
-        "condition": result.get("condition"),
-        "raw_expression": result.get("raw_expression"),
-        "params": result.get("params", {}),
-        "scope_pattern": _compute_scope_pattern(result.get("condition")),
-        "seq": ir.get("_seq", 0),   # source-processing order (see make_empty_ir)
-    }
+    # STATUS MUST BE EXPLICIT — NO fallback default (a `.get(..., EXACT)` here would be
+    # the same implicit EXACT one layer up, and would silently mis-label a future LOSSY
+    # processor as EXACT). Every artifact-producing result reaching this generic tail
+    # MUST carry outcome_status from its processor; a missing one is a converter bug.
+    if "outcome_status" not in result:
+        raise LedgerError(
+            f"converted result type {rtype!r} (rule {result.get('cf_source_rule')!r}) "
+            f"reached generic viewer-op placement without an explicit outcome_status — "
+            f"the processor must set it (EXACT, or LOSSY_WITH_WARNING + outcome_reason)")
+    op_entry = _append_viewer_op(
+        beh, "response" if is_response else "request",
+        type=rtype,
+        cf_source_rule=result.get("cf_source_rule", ""),
+        description=result.get("description", ""),
+        condition=result.get("condition"),
+        raw_expression=result.get("raw_expression"),
+        params=result.get("params", {}),
+        scope_pattern=_compute_scope_pattern(result.get("condition")),
+        seq=ir.get("_seq", 0),   # source-processing order (see make_empty_ir)
+        source_kind=source_kind, source_id=source_id,
+        owned_key_segments=result.get("owned_key_segments"),
+        outcome_status=result["outcome_status"],
+        outcome_reason=result.get("outcome_reason"))
 
-    # Generate KVS entries for in_kvs conditions (IP list lookup)
-    _collect_kvs_ip_entries(ir, op_entry.get("condition"))
+    # Generate KVS entries for in_kvs conditions (IP list lookup). The IP-list KVS is a
+    # SHARED artifact — several ops may test the same list — so pass THIS op's owner ref
+    # (its REAL subset, not whole-unit: a partially-converted rule where only some headers
+    # convert must not claim the un-converted leaves via its IP-list KVS entry). The op
+    # carries its authoritative subset AND status; the IP-list contribution INHERITS the
+    # referring op's status/reason (the shared entry itself has no global status — it can
+    # serve an EXACT header and a LOSSY op at once). _append_kvs_entry merges by full
+    # contribution so no referrer is lost and conflicting statuses both survive.
+    _collect_kvs_ip_entries(ir, op_entry.get("condition"),
+                            {"source_kind": op_entry["_source_kind"],
+                             "source_id": op_entry["_source_id"],
+                             "owned_key_segments": op_entry["_owned_key_segments"],
+                             "outcome_status": op_entry["_outcome_status"],
+                             "outcome_reason": op_entry["_outcome_reason"]})
 
-    if is_response:
-        beh["viewer_response_ops"].append(op_entry)
-    else:
-        beh["viewer_request_ops"].append(op_entry)
 
-
-def _collect_kvs_ip_entries(ir, condition):
-    """Generate KVS entries for in_kvs conditions (IP list → KVS exists())."""
+def _collect_kvs_ip_entries(ir, condition, owner_ref):
+    """Generate KVS entries for in_kvs conditions (IP list → KVS exists()). `owner_ref`
+    is the source unit of the op whose condition this is; a shared IP-list entry
+    accumulates every referring op's owner via _append_kvs_entry's dedup-merge."""
     if condition is None:
         return
     if "logic" in condition:
         for child in iter_condition_children(condition):
-            _collect_kvs_ip_entries(ir, child)
+            _collect_kvs_ip_entries(ir, child, owner_ref)
         return
     if condition.get("op") in ("in_kvs", "not_in_kvs"):
         list_name = condition["value"]
         ips = condition.pop("kvs_ips", [])
         if not ips:
             return
-        # Deduplicate: skip if this list was already collected
-        prefix = f"ip:{list_name}:"
-        if any(e["key"].startswith(prefix) for e in ir["metadata"]["kvs_data"]):
-            return
+        # A previously-collected list: MERGE this op's owner into the existing entries
+        # (don't early-return, which would drop the later referrer's ownership), but do
+        # NOT re-append the ip rows. _append_kvs_entry merges owners on a same key+value.
         ir["metadata"]["kvs_requirements"]["needs_ip_lists"] = True
         for ip in ips:
-            ir["metadata"]["kvs_data"].append({
-                "key": f"{prefix}{ip}",
-                "value": "1",
-            })
+            _append_kvs_entry(ir, f"ip:{list_name}:{ip}", "1", [owner_ref])
 
 
 def _try_split_or_cache_paths(condition):
@@ -1178,9 +2794,51 @@ def _compute_scope_pattern(condition):
     return path
 
 
-def _record_cache_effects(ir, scope, result, domain_config, origin_content):
+# The browser_ttl LOSSY reason — one constant so the op's _outcome_reason and the report
+# warning (_mark_result_lossy) can't drift.
+_BROWSER_TTL_LOSSY_REASON = (
+    "browser_ttl (Cache-Control max-age to the viewer) is applied via a viewer-response "
+    "function, which CloudFront does NOT run on origin 4xx/5xx, custom-error, or WAF-block "
+    "responses — those responses will NOT carry the forced max-age that the Cloudflare "
+    "rule would set")
+
+
+def _split_leaf(leaf):
+    """Split a `_configured` dotted leaf into (segments_tuple, value_or_None). The processor
+    encodes a scalar leaf as `a.b.c=value`, a non-empty list as `a.b.c[]`, an empty container
+    as bare `a.b.c` (cdn_rule_processors._leaf_paths). Comparing these by STRING prefix is
+    wrong — `edge_ttl.default` startswith-matches `edge_ttl.default_extra`, and a consumed
+    query path `include.all` matches `include.all_extra` — so leaf identity MUST be by SEGMENT.
+    Value is split on the FIRST `=` (a value may itself contain `.`, so partition before
+    splitting the path); segments never contain `=` (they're schema dict keys)."""
+    core = leaf[:-2] if leaf.endswith("[]") else leaf
+    path, eq, val = core.partition("=")
+    segs = tuple(path.split(".")) if path else ()
+    return segs, (val if eq else None)
+
+
+def _ttl_owned_segments(result, family):
+    """Owned leaf segments for an edge/browser TTL effect (`family` = 'edge_ttl' or
+    'browser_ttl'): always [family, 'mode'], PLUS [family, 'default'] ONLY when the source
+    actually carried a `default` leaf. The processor falls back to 0 for a missing default
+    (cdn_rule_processors ~650), so an override_origin WITHOUT a default has NO
+    /{family}/default inventory key — hinting it would FATAL. `_configured` records the
+    present source leaves as dotted paths; match the `default` leaf by EXACT segments (a
+    string-prefix test would spuriously fire on a hypothetical `{family}.default_*` sibling)."""
+    segs = [[family, "mode"]]
+    if any(_split_leaf(leaf)[0] == (family, "default")
+           for leaf in result.get("_configured", [])):
+        segs.append([family, "default"])
+    return segs
+
+
+def _record_cache_effects(ir, scope, result, domain_config, origin_content,
+                          source_kind="rule", source_id=None):
     """Record a cache rule's NATIVE effects (edge TTL, cache-key) as ordered
     effects at `scope`, and emit its browser_ttl (a viewer-response op) directly.
+    `source_kind`/`source_id` are the INTERNAL provenance forwarded to every native
+    effect (so an id-less cache rule's effects still resolve to its {rule_type}#index
+    unit — never rebuilt from the display cf_source_rule).
 
     Bypass is NOT handled here — _place_result intercepts every bypass cache rule
     (unconditional → caching_disabled effect; conditional → cache_bypass op), so
@@ -1188,32 +2846,52 @@ def _record_cache_effects(ir, scope, result, domain_config, origin_content):
     """
     params = result.get("params", {})
 
+    # A cache rule has SEVERAL independent settings; each native effect owns ONLY the EXACT
+    # json-pointer LEAVES it converts — NOT the ancestor subtree, which would swallow an
+    # un-converted sibling leaf (edge_ttl.status_code_ttl, cache_key.custom_key.cookie) that
+    # the cache leaf-accounting reports NC. Precise leaves keep the EXACT claim honest.
+    # edge_ttl owns mode + default WHEN PRESENT (an override_origin with no default falls
+    # back to 0 and has NO /edge_ttl/default leaf — _ttl_owned_segments omits it, else the
+    # hint would FATAL). Never status_code_ttl.
     if "edge_ttl_override" in params:
         _record_native_effect(ir, scope, "ttl_override",
-                              {"ttl": params["edge_ttl_override"]}, result)
+                              {"ttl": params["edge_ttl_override"]}, result,
+                              source_kind, source_id,
+                              owned_key_segments=_ttl_owned_segments(result, "edge_ttl"))
     elif params.get("edge_ttl_respect_origin"):
         # respect_origin is a RESET back to factory TTL. It must be a real effect so
         # a LATER respect_origin rule overrides an EARLIER override_origin at the
         # same scope (Cloudflare last-match). Without this the earlier fixed TTL
-        # would silently persist (reviewer F2).
-        _record_native_effect(ir, scope, "ttl_respect_origin", {}, result)
+        # would silently persist (reviewer F2). Owns ONLY /edge_ttl/mode (no default leaf).
+        _record_native_effect(ir, scope, "ttl_respect_origin", {}, result,
+                              source_kind, source_id, owned_key_segments=[["edge_ttl", "mode"]])
 
     # cache=true is a RESET of a prior cache=false at the same scope. bypass=True is
     # intercepted earlier (caching_disabled effect / cache_bypass op); an explicit
     # bypass=False here re-enables caching so a later cache=true beats an earlier
     # cache=false (reviewer F2 — was silently stuck disabled).
     if params.get("bypass") is False:
-        _record_native_effect(ir, scope, "caching_enabled", {}, result)
+        _record_native_effect(ir, scope, "caching_enabled", {}, result,
+                              source_kind, source_id, owned_key_segments=[["cache"]])
 
-    ck = {}
-    for src, dst in (("cache_key_qs", "query_strings"),
-                     ("cache_key_qs_list", "query_strings_list"),
-                     ("cache_key_qs_exclude", "query_strings_exclude"),
-                     ("cache_key_headers", "headers")):
-        if src in params:
-            ck[dst] = params[src]
-    if ck:
-        _record_native_effect(ir, scope, "cache_key", ck, result)
+    # cache_key is TWO independent slots (per _apply_native_effect): the query-string
+    # selector and the header list. Each owns ONLY the EXACT leaf it consumed — NOT the
+    # whole query_string subtree (which would swallow an unknown sibling AND wrongly claim
+    # the un-consumed include/exclude twin). The processor recorded the EXACT consumed path
+    # (list-form → ["include"], object-form → ["include","all"]/["include","list"], …) in
+    # cache_key_qs_consumed; own precisely that leaf.
+    ck_query = {dst: params[src] for src, dst in (
+        ("cache_key_qs", "query_strings"), ("cache_key_qs_list", "query_strings_list"),
+        ("cache_key_qs_exclude", "query_strings_exclude")) if src in params}
+    if ck_query:
+        _record_native_effect(ir, scope, "cache_key", ck_query, result, source_kind,
+                              source_id,
+                              owned_key_segments=[["cache_key", "custom_key", "query_string"]
+                                                  + params.get("cache_key_qs_consumed", [])])
+    if "cache_key_headers" in params:
+        _record_native_effect(ir, scope, "cache_key", {"headers": params["cache_key_headers"]},
+                              result, source_kind, source_id,
+                              owned_key_segments=[["cache_key", "custom_key", "header", "include"]])
 
     # browser_ttl (override_origin): Cloudflare forces the max-age in the
     # Cache-Control header sent to the VIEWER, independent of the edge TTL. A
@@ -1231,24 +2909,36 @@ def _record_cache_effects(ir, scope, result, domain_config, origin_content):
             for op in beh["viewer_response_ops"]
         )
         if not already:
-            beh["viewer_response_ops"].append({
-                "type": "set_response_header",
-                "cf_source_rule": result.get("cf_source_rule", ""),
-                "description": f"{result.get('description', '')}: browser_ttl override",
-                "condition": result.get("condition"),
-                "raw_expression": result.get("raw_expression"),
-                "params": {"name": "cache-control", "value": f"max-age={max_age}"},
+            _append_viewer_op(
+                beh, "response",
+                type="set_response_header",
+                cf_source_rule=result.get("cf_source_rule", ""),
+                description=f"{result.get('description', '')}: browser_ttl override",
+                condition=result.get("condition"),
+                raw_expression=result.get("raw_expression"),
+                # LOWER the static Cache-Control value ONCE (round-27) — a fixed max-age literal.
+                params={"name": "cache-control",
+                        "value_lowered": lower_literal_value(f"max-age={max_age}", "response_header")},
                 # Same single scope authority — a case-insensitive wildcard scope
                 # must attach the browser_ttl CFF to all behaviors, not just `scope`.
-                "scope_pattern": _compute_scope_pattern(result.get("condition")),
-                "seq": ir.get("_seq", 0),
-            })
-            _mark_result_lossy(
-                ir, result,
-                "browser_ttl (Cache-Control max-age to the viewer) is applied via a "
-                "viewer-response function, which CloudFront does NOT run on origin "
-                "4xx/5xx, custom-error, or WAF-block responses — those responses will "
-                "NOT carry the forced max-age that the Cloudflare rule would set")
+                scope_pattern=_compute_scope_pattern(result.get("condition")),
+                seq=ir.get("_seq", 0),
+                # browser_ttl is a cache-rule leaf → owns just /browser_ttl (the rest of
+                # the cache rule converts to native effects). source_id is the internal
+                # unit id threaded from _place_result → _record_cache_effects. EXPLICIT
+                # LOSSY status (the known viewer-response-CFF error-coverage gap below) —
+                # this is decision metadata on the op, NOT inferred from "has artifact";
+                # the coordinator will read it when the browser_ttl viewer-op channel is
+                # wired (not this turn). Kept in sync with the _mark_result_lossy reason.
+                source_kind=source_kind, source_id=source_id,
+                # PRECISE leaves — mode (+ default WHEN PRESENT; an override with no default
+                # falls back to 0 and has no /browser_ttl/default leaf). NOT the whole
+                # browser_ttl subtree (would swallow an unknown sibling AND collide with the
+                # cache leaf-accounting's NC). Mirrors edge_ttl via _ttl_owned_segments.
+                owned_key_segments=_ttl_owned_segments(result, "browser_ttl"),
+                outcome_status=OUTCOME_LOSSY,
+                outcome_reason=_BROWSER_TTL_LOSSY_REASON)
+            _mark_result_lossy(ir, result, _BROWSER_TTL_LOSSY_REASON)
     elif params.get("browser_ttl_respect_origin"):
         # A browser_ttl RESET back to the origin's Cache-Control. We can't faithfully
         # restore it: a viewer-response CFF would have to know the origin's original
@@ -1272,16 +2962,40 @@ def _record_cache_effects(ir, scope, result, domain_config, origin_content):
     # path starts with a prefix we ACTUALLY apply; anything else → non-convertible
     # with the exact leaf path, so a partially-dropped setting can't hide behind the
     # rule's other converted settings.
-    _handled_leaf_prefixes = (
-        "cache=", "edge_ttl.mode=override_origin", "edge_ttl.mode=respect_origin",
-        "edge_ttl.default", "edge_ttl.status_code_ttl",   # status_code_ttl already reported nc
-        "browser_ttl.mode=override_origin", "browser_ttl.mode=respect_origin",
-        "browser_ttl.default",
-        "cache_key.custom_key.query_string.",
-        "cache_key.custom_key.header.include",
-    )
+    # Each handled entry is (segments, required_value, subtree): match a `_configured` leaf
+    # BY SEGMENT, never string prefix (`edge_ttl.default` must NOT swallow a hypothetical
+    # `edge_ttl.default_extra`, and a consumed `include.all` must NOT swallow `include.all_extra`
+    # — round-11 finding 2). required_value pins a mode discriminator (only override/respect_origin
+    # are converted; `edge_ttl.mode=bypass_by_default` stays NC). subtree=True matches the leaf
+    # AND its descendants (status_code_ttl is a list/subtree reported NC elsewhere; header.include
+    # is a list leaf).
+    _handled = [
+        (("cache",), None, False),
+        (("edge_ttl", "mode"), "override_origin", False),
+        (("edge_ttl", "mode"), "respect_origin", False),
+        (("edge_ttl", "default"), None, False),
+        (("edge_ttl", "status_code_ttl"), None, True),   # already reported nc
+        (("browser_ttl", "mode"), "override_origin", False),
+        (("browser_ttl", "mode"), "respect_origin", False),
+        (("browser_ttl", "default"), None, False),
+        (("cache_key", "custom_key", "header", "include"), None, True),
+    ]
+    # query_string: mark ONLY the EXACT segment path the selector consumed as handled (as a
+    # subtree, so the object-form scalar leaf under it counts) — NOT the whole query_string
+    # subtree, so an unknown object-form sibling (query_string.include.future) still surfaces
+    # as legacy-NC instead of silently vanishing.
+    _qs_consumed = result.get("params", {}).get("cache_key_qs_consumed")
+    if _qs_consumed:
+        _handled.append(
+            (("cache_key", "custom_key", "query_string") + tuple(_qs_consumed), None, True))
     def _accounted(leaf):
-        return any(leaf == p or leaf.startswith(p) for p in _handled_leaf_prefixes)
+        segs, val = _split_leaf(leaf)
+        for hsegs, hval, subtree in _handled:
+            if hval is not None and val != hval:
+                continue
+            if segs == hsegs or (subtree and segs[:len(hsegs)] == hsegs):
+                return True
+        return False
     unhandled = sorted({leaf for leaf in result.get("_configured", []) if not _accounted(leaf)})
     if unhandled:
         ir["cache_behaviors"][0]["non_convertible"].append({
@@ -1296,8 +3010,9 @@ def _record_cache_effects(ir, scope, result, domain_config, origin_content):
 def _process_bulk_redirects(ir, hostname, apex, bulk_redirects, domain_config, origin_content):
     """Process bulk redirect items that match this domain."""
     kvs_entries = []
+    owner_refs = []   # one per matching item — the shared CFF op is a MULTI-UNIT aggregate
     for list_name, items in bulk_redirects.items():
-        for item in items:
+        for _idx, item in enumerate(items):
             rd = item.get("redirect", {})
             source = rd.get("source_url", "")
             include_subdomains = rd.get("include_subdomains", False)
@@ -1314,6 +3029,53 @@ def _process_bulk_redirects(ir, hostname, apex, bulk_redirects, domain_config, o
                 applies = True
 
             if applies:
+                # VALUE-INDEPENDENT source id via the uniform registrar: the item's own
+                # id, else a stable list_name#index fallback — NOT the source_url (editing
+                # the URL would change the id AND the /source_url leaf value). A non-string
+                # id FATALs, a duplicate item id FATALs (same contract as every kind —
+                # reviewer finding 2), rather than merging two items into one unit.
+                item_id = _register_unit_id(ir, "bulk_redirect", item.get("id"),
+                                            f"{list_name}#{_idx}")
+                # Inventory: each matching redirect item is a source unit keyed on its
+                # redirect params so L2 covers the bulk-redirect KVS artifacts too.
+                ir.setdefault("_inventory", []).extend(
+                    _inventory_keys_for("bulk_redirect", item_id, rd))
+
+                # The CFF op reads ONLY these five fields; the shared op OWNS only those
+                # (present ones), NOT the whole item — else an unknown leaf (e.g. a future
+                # future_option.mode) would be falsely reported converted. Unknown leaves
+                # are NC-claimed separately below. owned_key_segments hints are validated
+                # against the inventory by the resolver, so only PRESENT supported fields.
+                supported = ("source_url", "target_url", "status_code",
+                             "preserve_query_string", "include_subdomains")
+                owned_segs = [[f] for f in supported if f in rd]
+                # Any leaf NOT under a supported field is non-convertible. Compare against
+                # the item's actual inventory pointers (json-pointer scheme) so the split
+                # is exact and value-independent.
+                item_ptrs = [k[2] for k in _inventory_keys_for("bulk_redirect", item_id, rd)]
+                supported_ptrs = {_key_path_to_pointer([f]) for f in supported}
+                unknown_ptrs = [p for p in item_ptrs
+                                if not any(p == s or p.startswith(s + "/")
+                                           for s in supported_ptrs)]
+                if unknown_ptrs:
+                    claim_non_convertible(
+                        ir, "bulk_redirect", item_id,
+                        reason=("bulk redirect leaf(s) have no CloudFront equivalent "
+                                "(only source_url/target_url/status_code/"
+                                "preserve_query_string/include_subdomains convert)"),
+                        description=f"bulk redirect item {item_id}",
+                        owned_pointers=unknown_ptrs,
+                        legacy_cf_source_rule="bulk_redirects")
+
+                # If NOTHING converts (no supported field present), skip the KVS entry /
+                # op ownership — the item's leaves are already NC-claimed above.
+                if not owned_segs:
+                    continue
+
+                owner_refs.append({
+                    "source_kind": "bulk_redirect", "source_id": item_id,
+                    "owned_key_segments": owned_segs,   # ONLY the supported, present fields
+                    "outcome_status": OUTCOME_EXACT, "outcome_reason": None})
                 kvs_entries.append({
                     "source_url": source,
                     "target_url": rd.get("target_url", ""),
@@ -1321,6 +3083,8 @@ def _process_bulk_redirects(ir, hostname, apex, bulk_redirects, domain_config, o
                     "preserve_query_string": rd.get("preserve_query_string", False),
                     "include_subdomains": include_subdomains,
                     "list_name": list_name,
+                    "item_id": item_id,        # for the KVS entry's owner ref
+                    "owned_segs": owned_segs,  # same supported fields as the CFF op ref
                 })
 
     if kvs_entries:
@@ -1341,15 +3105,16 @@ def _process_bulk_redirects(ir, hostname, apex, bulk_redirects, domain_config, o
             status = entry["status_code"]
             pqs = "1" if entry["preserve_query_string"] else "0"
             value = f"{status}|{pqs}|{tgt}"
-            ir["metadata"]["kvs_data"].append({
-                "key": f"redirect:{src}",
-                "value": value,
-            })
+            # This item's KVS entry (and its subdomain variant) are owned by the item's
+            # unit — the SAME unit that owns the shared CFF op's owner ref above. Both are
+            # artifacts of that one source key set; the future coordinator emits one claim
+            # referencing both. owned_key_segments = the item's 5 supported fields.
+            item_ref = {"source_kind": "bulk_redirect", "source_id": entry["item_id"],
+                        "owned_key_segments": entry["owned_segs"],
+                        "outcome_status": OUTCOME_EXACT, "outcome_reason": None}
+            _append_kvs_entry(ir, f"redirect:{src}", value, [item_ref])
             if entry["include_subdomains"]:
-                ir["metadata"]["kvs_data"].append({
-                    "key": f"redirect:.{src}",
-                    "value": value,
-                })
+                _append_kvs_entry(ir, f"redirect:.{src}", value, [item_ref])
         # Add bulk_redirect op after redirect/rewrite/origin ops (Cloudflare execution order)
         default_beh = ir["cache_behaviors"][0]
         # Find insertion point: after last redirect/rewrite/origin_override op
@@ -1357,16 +3122,23 @@ def _process_bulk_redirects(ir, hostname, apex, bulk_redirects, domain_config, o
         for i, op in enumerate(default_beh["viewer_request_ops"]):
             if op["type"] in ("redirect", "rewrite", "origin_override"):
                 insert_idx = i + 1
-        default_beh["viewer_request_ops"].insert(insert_idx, {
-            "type": "bulk_redirect",
-            "cf_source_rule": "bulk_redirects",
-            "description": f"Bulk redirects ({len(kvs_entries)} entries)",
-            "condition": {"always": True},
-            "raw_expression": None,
-            "params": {"entry_count": len(kvs_entries)},
-            "scope_pattern": "*",  # unconditional zone-wide → overlaps every behavior
-            "seq": ir.get("_seq", 0) + 1,  # after all rules (Cloudflare runs bulk late)
-        })
+        # This ONE CFF op serves EVERY matching redirect item, so it's a MULTI-UNIT
+        # aggregate: owner_refs carries one ref per item (not a single _source_id — that
+        # would falsely attribute all items to one). The viewer-op artifact channel unions
+        # them so each item's leaves trace to the shared op (the bulk-redirect aggregation
+        # case). cf_source_rule stays the display "bulk_redirects".
+        _append_viewer_op(
+            default_beh, "request",
+            type="bulk_redirect",
+            cf_source_rule="bulk_redirects",
+            description=f"Bulk redirects ({len(kvs_entries)} entries)",
+            condition={"always": True},
+            raw_expression=None,
+            params={"entry_count": len(kvs_entries)},
+            scope_pattern="*",  # unconditional zone-wide → overlaps every behavior
+            seq=ir.get("_seq", 0) + 1,  # after all rules (Cloudflare runs bulk late)
+            owner_refs=owner_refs,
+            insert_index=insert_idx)
 
 
 def _process_managed_transforms(ir, managed_transforms, default_beh):
@@ -1374,18 +3146,55 @@ def _process_managed_transforms(ir, managed_transforms, default_beh):
     req_headers = managed_transforms.get("managed_request_headers", [])
     resp_headers = managed_transforms.get("managed_response_headers", [])
 
+    # Inventory EVERY enabled managed transform (kind 'managed_transform', unit =
+    # /$action) FIRST — not just the two we know how to convert — so an unknown/future
+    # enabled transform has a source key L2 can mark NC instead of silently vanishing.
+    # Each id goes through _register_unit_id (uniform contract): a non-string id FATALs,
+    # a missing/dup id gets a stable per-list `mt_req#{i}` / `mt_resp#{i}` fallback (so
+    # two id-less or dup-id transforms don't merge — reviewer finding 2). Map each
+    # enabled transform (by python identity) to its resolved unit id for the ops below.
+    unit_of = {}
+    for i, h in enumerate(req_headers):
+        if h.get("enabled"):
+            uid = _register_unit_id(ir, "managed_transform", h.get("id"), f"mt_req#{i}")
+            unit_of[id(h)] = uid
+            ir.setdefault("_inventory", []).append(("managed_transform", uid, "/$action"))
+    for i, h in enumerate(resp_headers):
+        if h.get("enabled"):
+            uid = _register_unit_id(ir, "managed_transform", h.get("id"), f"mt_resp#{i}")
+            unit_of[id(h)] = uid
+            ir.setdefault("_inventory", []).append(("managed_transform", uid, "/$action"))
+
     for h in req_headers:
         if h.get("enabled") and h.get("id") == "add_true_client_ip_headers":
-            default_beh["viewer_request_ops"].append({
-                "type": "set_request_header",
-                "cf_source_rule": "managed_transform_true_client_ip",
-                "description": "Managed Transform: True-Client-IP",
-                "condition": {"always": True},
-                "raw_expression": None,
-                "params": {"name": "True-Client-IP", "value": "$viewer_ip"},
-                "scope_pattern": "*",  # unconditional zone-wide → overlaps every behavior
-                "seq": ir.get("_seq", 0) + 1,
-            })
+            # LOWER the viewer-IP value as a DYNAMIC intrinsic (round-27), NOT a `$viewer_ip`
+            # string sentinel. `to_string(ip.src)` is the documented Cloudflare-legal way to
+            # stringify the client IP; it goes through the SAME contract gate as any dynamic
+            # value and the generator renders it to String(event.viewer.ip) (CFF) /
+            # String(request.clientIp) (Lambda). A dynamic header value carries
+            # empty_behavior=delete_header (the slot invariant; the IP is never empty so the
+            # delete-on-empty guard never fires — same as any dynamic header). A reason string
+            # here means the parser regressed on a hardcoded-good expression — fail loud.
+            tci_lowered = lower_dynamic_value("to_string(ip.src)", "request_header",
+                                              LOWERED_EMPTY_DELETE_HEADER, source=False)
+            if not isinstance(tci_lowered, dict):
+                raise LedgerError(
+                    "True-Client-IP: lowering 'to_string(ip.src)' failed — the parser no longer "
+                    f"accepts the viewer-IP intrinsic ({tci_lowered!r}). Fix the contract; the "
+                    "producer must emit a valid LoweredValue.")
+            _append_viewer_op(
+                default_beh, "request",
+                type="set_request_header",
+                cf_source_rule="managed_transform_true_client_ip",
+                description="Managed Transform: True-Client-IP",
+                condition={"always": True},
+                raw_expression=None,
+                params={"name": "True-Client-IP", "value_lowered": tci_lowered},
+                scope_pattern="*",  # unconditional zone-wide → overlaps every behavior
+                seq=ir.get("_seq", 0) + 1,
+                # provenance = the managed_transform unit (its /$action), not the display id
+                source_kind="managed_transform", source_id=unit_of[id(h)],
+                outcome_status=OUTCOME_EXACT)   # True-Client-IP is an EXACT conversion
 
     for h in resp_headers:
         if h.get("enabled") and h.get("id") == "add_security_headers":
@@ -1396,15 +3205,20 @@ def _process_managed_transforms(ir, managed_transforms, default_beh):
             # for the same header still wins on replay order).
             src = {"cf_source_rule": "managed_transform_security_headers",
                    "description": "Managed Transform: security headers"}
+            # Both effects share the one /$action unit — the "managed transform /$action
+            # owns all effects it generates" aggregation. source_id = the registered unit.
+            mt_id = unit_of[id(h)]
             _record_native_effect(ir, "*", "rhp_security",
                                   {"name": "X-Content-Type-Options", "value": "nosniff",
-                                   "operation": "add", "_managed": True}, src)
+                                   "operation": "add", "_managed": True}, src,
+                                  source_kind="managed_transform", source_id=mt_id)
             _record_native_effect(ir, "*", "rhp_security",
                                   {"name": "X-Frame-Options", "value": "SAMEORIGIN",
-                                   "operation": "add", "_managed": True}, src)
+                                   "operation": "add", "_managed": True}, src,
+                                  source_kind="managed_transform", source_id=mt_id)
 
 
-def _mark_cache_non_convertible(ir, result, expr=None):
+def _mark_cache_non_convertible(ir, result, expr=None, source_kind="rule", source_id=None):
     """Record a cache rule whose scope can't be expressed as a CloudFront path
     behavior (after host-stripping) as non-convertible, on the default behavior.
 
@@ -1414,7 +3228,13 @@ def _mark_cache_non_convertible(ir, result, expr=None):
     origin_response template only emits error pages), so we surface the rule in
     the conversion report instead of silently dropping it or mis-applying it
     site-wide.
-    """
+
+    DEFERRED CHANNEL (next increment): still a DIRECT legacy-NC write — it does NOT yet
+    route through claim_non_convertible. It ACCEPTS the internal provenance
+    (`source_kind`/`source_id`) now so the cache-NC wiring can adopt it without
+    re-plumbing every call site. A whole-scope reject is whole-unit (no owned_pointers).
+    Not persisted yet — the params are threaded but unused until this channel wires."""
+    del source_kind, source_id  # accepted for the next increment; not yet routed
     ir["cache_behaviors"][0]["non_convertible"].append({
         "cf_source_rule": result.get("cf_source_rule", ""),
         "description": result.get("description", ""),
@@ -1426,7 +3246,7 @@ def _mark_cache_non_convertible(ir, result, expr=None):
     })
 
 
-def _mark_status_code_ttl_non_convertible(ir, result):
+def _mark_status_code_ttl_non_convertible(ir, result, source_kind="rule", source_id=None):
     """Record status_code_ttl (per-status-code edge cache duration) as
     non-convertible. Recorded ONCE per rule on the default behavior.
 
@@ -1437,7 +3257,11 @@ def _mark_status_code_ttl_non_convertible(ir, result):
       and never 2xx.
     CFF can't help either — it controls response headers, not CloudFront's edge
     caching decision. So this is genuinely non-convertible.
-    """
+
+    DEFERRED CHANNEL (next increment): still a DIRECT legacy-NC write; accepts internal
+    provenance now (this is a SUB-LEAF NC — the next increment claims the
+    /edge_ttl/status_code_ttl pointer, not the whole unit). Params threaded but unused."""
+    del source_kind, source_id  # accepted for the next increment; not yet routed
     ir["cache_behaviors"][0]["non_convertible"].append({
         "cf_source_rule": result.get("cf_source_rule", ""),
         "description": f"{result.get('description', '')}: status_code_ttl",
@@ -1779,6 +3603,12 @@ def main():
     bulk_redirects = load_bulk_redirect_items(config_path)
     managed_transforms = load_managed_transforms(zone_dir)
 
+    # Ignored-feature scan (Block 3): ONE observational pass over the zone backup for active
+    # Cloudflare features the CDN pipeline doesn't read. Attached to each domain IR (zone-level, so
+    # identical across this zone's domains) → finalize aggregates + de-dups by feature across domains
+    # and, in a multi-zone run, across zones. Never raises; does NOT feed the ledger or completeness.
+    ignored_features = scan_ignored_features(zone_dir)
+
     # Process each domain
     acc_dir = os.path.join(output_dir, "ir", "accumulator")
     os.makedirs(acc_dir, exist_ok=True)
@@ -1792,6 +3622,7 @@ def main():
                 hostname, domain_config, all_rules, ip_lists,
                 bulk_redirects, managed_transforms,
             )
+            ir["metadata"]["ignored_features"] = ignored_features
             out_path = os.path.join(acc_dir, f"{hostname}.json")
             with open(out_path, "w") as f:
                 json.dump(ir, f, indent=2, ensure_ascii=False)

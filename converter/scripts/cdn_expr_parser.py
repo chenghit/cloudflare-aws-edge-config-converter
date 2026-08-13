@@ -10,7 +10,10 @@ import hashlib
 import re
 
 # (Quota tags + cdn_summary.json loader moved to cdn_common.py — file-IO and the
-# result contract don't belong in the expression parser.)
+# result contract don't belong in the expression parser. The RHP capability registry —
+# name + value parser + renderer — lives in its own dependency-free module
+# cdn_rhp_capabilities.py so the processor, preprocess, and the HCL generator share ONE
+# source of truth for both the supported set AND the value semantics.)
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -952,6 +955,15 @@ class _CDNParser:
         if t.type == _TT_NUMBER:
             self.advance()
             return t.value
+        # Unquoted boolean literal (wirefilter) as a comparison operand, e.g.
+        # `ip.src.is_in_european_union eq true` / `ip.src.is_in_european_union ne false`. The
+        # tokenizer emits bare true/false as a _TT_FIELD (they are not ops/keywords); only in a
+        # VALUE position are they the boolean literal. A quoted "true" is a _TT_STRING (handled
+        # above) and stays a string. This yields value=True/False, the SAME shape a bare boolean
+        # field (`ip.src.is_in_european_union`) produces, so it renders/validates identically.
+        if t.type == _TT_FIELD and t.value in ("true", "false"):
+            self.advance()
+            return t.value == "true"
         if t.type == _TT_DOLLAR:
             self.advance()
             name = self.expect(_TT_FIELD).value
@@ -1020,6 +1032,1239 @@ def parse_dynamic_expression(expr):
     return result
 
 
+# ── Dynamic-expression TYPE registry (round-20: the SINGLE source of expression result types) ──
+# A header value must be a STRING. CloudFront Functions have NO implicit coercion for a header
+# value, so a non-string result (number/array/bytes) is NOT a faithful conversion — it must be
+# explicitly converted in the source (to_string / join / encode_base64) before it can be EXACT.
+# `unknown` fails closed (NC), never optimistically string. This replaces the old number-only
+# guess where everything else defaulted to string and String() masked the mismatch.
+_TYPE_STRING, _TYPE_NUMBER, _TYPE_ARRAY, _TYPE_BYTES, _TYPE_BOOL, _TYPE_IP, _TYPE_UNKNOWN = (
+    "string", "number", "array", "bytes", "boolean", "ip", "unknown")
+
+# ── FUNCTION CONTRACT registry (round-21: signatures, not just return types) ──
+# A return-type table alone let signature-illegal expressions pass (lower(len(...)),
+# join(http.host,...), to_string(sha256(...))). Each contract carries what Cloudflare's
+# Functions reference actually specifies, so type-checking VALIDATES the whole call, recursively:
+#   result:   result type.
+#   args:     tuple of accepted-type SETS, positional. A `None` arg slot = any type (rare).
+#   variadic: the LAST args entry repeats (concat/remove_query_args/lookup_json_* trailing keys).
+#   min_arity/max_arity: inclusive arg-count bounds (max None = unbounded, needs variadic).
+#   contexts: the emit CONTEXTS this function is allowed in (round-22 — replaces the coarse
+#             request/response phase). Cloudflare restricts many functions to specific rule
+#             types; we track the ones we can emit into: request_header, response_header,
+#             url_rewrite, redirect, custom_error. None = allowed everywhere we emit. The header
+#             producers pass request_header/response_header, so a rewrite-only function
+#             (regex_replace/wildcard_replace/remove_query_args/uuidv4/sha256) is rejected there.
+#   literal:  optional callable(args_nodes)->reason|None for NODE-SHAPE / literal-value
+#             constraints beyond arg TYPES (split's non-empty literal separator + 1..128 limit,
+#             decode_base64's field-only source, encode_base64's flags, …).
+# concat is POLYMORPHIC (result depends on args) — handled specially, not via a fixed result.
+class _FC:
+    __slots__ = ("result", "args", "variadic", "min_arity", "max_arity", "contexts", "literal")
+
+    def __init__(self, result, args, min_arity, max_arity, variadic=False,
+                 contexts=None, literal=None):
+        self.result, self.args = result, args
+        self.min_arity, self.max_arity, self.variadic = min_arity, max_arity, variadic
+        self.contexts, self.literal = contexts, literal
+
+
+_ANY_STRINGLIKE = frozenset({_TYPE_STRING, _TYPE_BYTES})
+
+# The emit contexts we convert into. Header producers pass a *_header context; redirect/rewrite
+# use their own. A function's `contexts` (when set) lists where Cloudflare permits it.
+_CTX_REQUEST_HEADER = "request_header"
+_CTX_RESPONSE_HEADER = "response_header"
+_CTX_URL_REWRITE = "url_rewrite"
+_CTX_REDIRECT = "redirect"
+_CTX_CUSTOM_ERROR = "custom_error"
+# Cloudflare "rewrite expression" scope = url_rewrite + the target-URL of redirects. These
+# functions are documented rewrite-only and must NOT appear in a header transform.
+_REWRITE_CTXS = frozenset({_CTX_URL_REWRITE, _CTX_REDIRECT})
+
+
+def _is_literal_str(node):
+    return isinstance(node, dict) and node.get("type") == "literal" \
+        and isinstance(node.get("value"), str)
+
+
+def _is_field(node):
+    return isinstance(node, dict) and node.get("type") == "field"
+
+
+def _split_shape_ok(arg_nodes):
+    # split(input, separator, limit): separator a NON-EMPTY LITERAL string (Cloudflare: "The
+    # separator must be a non-empty literal string"); limit MANDATORY literal integer 1..128.
+    if len(arg_nodes) >= 2:
+        sep = arg_nodes[1]
+        if not _is_literal_str(sep):
+            return "split() `separator` must be a literal string (not a dynamic field)"
+        if sep.get("value") == "":
+            return "split() `separator` must be a non-empty literal string"
+    if len(arg_nodes) < 3:
+        return "split() requires a mandatory `limit` argument (a literal integer 1..128)"
+    lim = arg_nodes[2]
+    if not (isinstance(lim, dict) and lim.get("type") == "literal"
+            and isinstance(lim.get("value"), int) and not isinstance(lim.get("value"), bool)):
+        return "split() `limit` must be a literal integer"
+    if not (1 <= lim["value"] <= 128):
+        return f"split() `limit` must be between 1 and 128, got {lim['value']}"
+    return None
+
+
+def _decode_base64_shape_ok(arg_nodes):
+    # decode_base64(source): source must be a FIELD (Cloudflare: "source must be a field, it
+    # cannot be a literal String") — else the generator's atob() runs on a build-time constant.
+    if arg_nodes and not _is_field(arg_nodes[0]):
+        return "decode_base64() source must be a field, not a literal"
+    return None
+
+
+def _url_decode_shape_ok(arg_nodes):
+    # url_decode(source, options?): source must be a field; options (if present) a literal
+    # containing only r/u.
+    if arg_nodes and not _is_field(arg_nodes[0]):
+        return "url_decode() source must be a field, not a literal"
+    if len(arg_nodes) > 1:
+        opt = arg_nodes[1]
+        if not _is_literal_str(opt) or any(c not in "ru" for c in opt.get("value", "")):
+            return "url_decode() options must be a literal containing only 'r'/'u'"
+    return None
+
+
+def _encode_base64_shape_ok(arg_nodes):
+    # encode_base64(input, flags?): flags (if present) a literal string of only u/p.
+    if len(arg_nodes) > 1:
+        fl = arg_nodes[1]
+        if not _is_literal_str(fl) or any(c not in "up" for c in fl.get("value", "")):
+            return "encode_base64() flags must be a literal containing only 'u'/'p'"
+    return None
+
+
+def _remove_query_args_shape_ok(arg_nodes):
+    # remove_query_args(field, name...): field must be the URI query field (raw or normal), not
+    # a literal or arbitrary field; the removed names must be literal strings.
+    if arg_nodes:
+        f0 = arg_nodes[0]
+        allowed = {"http.request.uri.query", "raw.http.request.uri.query"}
+        if not (_is_field(f0) and f0.get("value") in allowed):
+            return ("remove_query_args() first argument must be the http.request.uri.query "
+                    "field (or its raw form)")
+    for nm in arg_nodes[1:]:
+        if not _is_literal_str(nm):
+            return "remove_query_args() query-parameter names must be literal strings"
+    return None
+
+
+def _regex_replace_shape_ok(arg_nodes):
+    # regex_replace(source, regex, replacement): regex + replacement literal strings.
+    for i in (1, 2):
+        if len(arg_nodes) > i and not _is_literal_str(arg_nodes[i]):
+            return f"regex_replace() argument {i + 1} must be a literal string"
+    return None
+
+
+def _wildcard_replace_shape_ok(arg_nodes):
+    # wildcard_replace(source, pattern, replacement, flags?): pattern + replacement literal
+    # strings; the optional flags a literal containing only 's' (case-sensitive). The generator
+    # reads pattern/replacement/flags as literals (args[n]["value"]), so a dynamic one would be
+    # mis-emitted (round-22 finding 5 — must be constrained before the rewrite context is wired).
+    for i in (1, 2):
+        if len(arg_nodes) > i and not _is_literal_str(arg_nodes[i]):
+            return f"wildcard_replace() argument {i + 1} must be a literal string"
+    if len(arg_nodes) > 3:
+        fl = arg_nodes[3]
+        if not _is_literal_str(fl) or any(c not in "s" for c in fl.get("value", "")):
+            return "wildcard_replace() flags must be a literal containing only 's'"
+    return None
+
+
+def _substring_shape_ok(arg_nodes):
+    # substring(field, start, end?): Cloudflare allows NEGATIVE indices (count from the end), but
+    # the JS renderer emits String.substring(), which clamps a negative to 0 — a DIFFERENT result.
+    # Until the renderer uses a negative-aware slice, ONLY a PROVABLY-NON-NEGATIVE index converts
+    # (round-26 finding 3). So each index MUST be a literal integer >= 0; a DYNAMIC index (e.g.
+    # lookup_json_integer(...), which can be negative at runtime and would then clamp) is NOT
+    # provably non-negative → NC. (Was: only literal-negative rejected, letting a dynamic
+    # possibly-negative index through.)
+    for i in (1, 2):
+        if len(arg_nodes) > i:
+            n = arg_nodes[i]
+            if not (isinstance(n, dict) and n.get("type") == "literal"
+                    and isinstance(n.get("value"), int) and not isinstance(n.get("value"), bool)):
+                return (f"substring() index (argument {i + 1}) must be a literal non-negative "
+                        "integer — a dynamic index can be negative at runtime, which JS "
+                        ".substring() clamps to 0 (a different result); not converted")
+            if n["value"] < 0:
+                return ("substring() with a negative index has no faithful CloudFront Functions "
+                        "renderer (JS .substring() clamps negatives to 0) — not converted")
+    return None
+
+
+def _lookup_json_shape_ok(arg_nodes):
+    # lookup_json_string/integer(field, key, key...): the renderer reads each KEY as a STATIC
+    # node (js_string(a["value"]) / int index), so every key MUST be a literal string or integer
+    # — a dynamic key (http.host, lower(...)) would render as a fixed wrong key or KeyError
+    # (round-24 finding 3). The field (arg 0) may be dynamic.
+    for k in arg_nodes[1:]:
+        if not (isinstance(k, dict) and k.get("type") == "literal"
+                and isinstance(k.get("value"), (str, int)) and not isinstance(k.get("value"), bool)):
+            return ("lookup_json_*() keys must be literal strings or integers (the generator "
+                    "reads them statically) — a dynamic key can't be converted")
+    return None
+
+
+# Grounded in developers.cloudflare.com/ruleset-engine/rules-language/functions/ (fetched 2026-08).
+# `contexts` names where Cloudflare PERMITS each function (None = all our emit contexts). The
+# rewrite-only set (regex_replace/wildcard_replace/remove_query_args/uuidv4/sha256) therefore
+# never validates inside a *_header context.
+_HDR_CTXS = frozenset({_CTX_REQUEST_HEADER, _CTX_RESPONSE_HEADER})
+_TRANSFORM_ALL = frozenset({_CTX_REQUEST_HEADER, _CTX_RESPONSE_HEADER, _CTX_URL_REWRITE,
+                            _CTX_REDIRECT, _CTX_CUSTOM_ERROR})
+_DYN_FUNC_CONTRACT = {
+    # string result
+    "lower":        _FC(_TYPE_STRING, (frozenset({_TYPE_STRING}),), 1, 1),
+    "upper":        _FC(_TYPE_STRING, (frozenset({_TYPE_STRING}),), 1, 1),
+    "to_string":    _FC(_TYPE_STRING, (frozenset({_TYPE_NUMBER, _TYPE_BOOL, _TYPE_IP}),), 1, 1,
+                        contexts=frozenset({_CTX_URL_REWRITE, _CTX_REDIRECT, _CTX_REQUEST_HEADER,
+                                            _CTX_RESPONSE_HEADER})),
+    "substring":    _FC(_TYPE_STRING, (_ANY_STRINGLIKE, frozenset({_TYPE_NUMBER}),
+                                       frozenset({_TYPE_NUMBER})), 2, 3,
+                        literal=_substring_shape_ok),
+    # rewrite-only (regex/wildcard replace, uuidv4, remove_query_args, sha256)
+    "regex_replace": _FC(_TYPE_STRING, (frozenset({_TYPE_STRING}), frozenset({_TYPE_STRING}),
+                                        frozenset({_TYPE_STRING})), 3, 3,
+                         contexts=_REWRITE_CTXS, literal=_regex_replace_shape_ok),
+    "wildcard_replace": _FC(_TYPE_STRING, (_ANY_STRINGLIKE, _ANY_STRINGLIKE, _ANY_STRINGLIKE,
+                                           _ANY_STRINGLIKE), 3, 4, contexts=_REWRITE_CTXS,
+                            literal=_wildcard_replace_shape_ok),
+    "url_decode":   _FC(_TYPE_STRING, (frozenset({_TYPE_STRING}), frozenset({_TYPE_STRING})), 1, 2,
+                        literal=_url_decode_shape_ok),
+    "join":         _FC(_TYPE_STRING, (frozenset({_TYPE_ARRAY}), frozenset({_TYPE_STRING})), 2, 2,
+                        contexts=frozenset({_CTX_REQUEST_HEADER, _CTX_RESPONSE_HEADER,
+                                            _CTX_CUSTOM_ERROR})),
+    "lookup_json_string": _FC(_TYPE_STRING, (frozenset({_TYPE_STRING}),
+                                             frozenset({_TYPE_STRING, _TYPE_NUMBER})), 2, None,
+                              variadic=True, literal=_lookup_json_shape_ok),
+    "remove_query_args": _FC(_TYPE_STRING, (frozenset({_TYPE_STRING}), frozenset({_TYPE_STRING})),
+                             2, None, variadic=True, contexts=frozenset({_CTX_URL_REWRITE}),
+                             literal=_remove_query_args_shape_ok),
+    "encode_base64": _FC(_TYPE_STRING, (_ANY_STRINGLIKE, frozenset({_TYPE_STRING})), 1, 2,
+                         contexts=_HDR_CTXS, literal=_encode_base64_shape_ok),
+    # uuidv4(source Bytes) → TARGET-UNSUPPORTED in EVERY context (round-22 finding 2): the
+    # generator's uuidv4 renderer uses Math.random() and IGNORES the source-of-randomness bytes,
+    # so it does NOT reproduce Cloudflare's deterministic-from-source UUID. Until a faithful
+    # renderer exists, uuidv4 is NC everywhere — do NOT rely on the source field merely happening
+    # to be unmappable. contexts=frozenset() (empty) → the context check rejects it in all contexts.
+    "uuidv4":       _FC(_TYPE_STRING, (frozenset({_TYPE_BYTES}),), 1, 1, contexts=frozenset()),
+    "decode_base64": _FC(_TYPE_STRING, (frozenset({_TYPE_STRING}),), 1, 1,   # String→String (not bytes)
+                         literal=_decode_base64_shape_ok),
+    # number result
+    "len":          _FC(_TYPE_NUMBER, (frozenset({_TYPE_STRING, _TYPE_BYTES, _TYPE_ARRAY}),), 1, 1),
+    "lookup_json_integer": _FC(_TYPE_NUMBER, (frozenset({_TYPE_STRING}),
+                                              frozenset({_TYPE_STRING, _TYPE_NUMBER})), 2, None,
+                               variadic=True, literal=_lookup_json_shape_ok),
+    # array result — split is RESPONSE-header + custom-error only.
+    "split":        _FC(_TYPE_ARRAY, (frozenset({_TYPE_STRING}), frozenset({_TYPE_STRING}),
+                                      frozenset({_TYPE_NUMBER})), 3, 3,
+                        contexts=frozenset({_CTX_RESPONSE_HEADER, _CTX_CUSTOM_ERROR}),
+                        literal=_split_shape_ok),
+    # bytes result. sha256 has NO context restriction: Cloudflare's own docs contradict
+    # themselves (the standalone note says rewrite-only, but the encode_base64 signed-header
+    # example nests sha256 inside a header transform). The BYTES result type already makes a
+    # bare sha256 header NC, while encode_base64(sha256(...)) → string → EXACT (the documented
+    # use). So the type gate, not a context flag, is the correct guard here.
+    "sha256":       _FC(_TYPE_BYTES, (_ANY_STRINGLIKE,), 1, 1),
+    # remove_bytes → TARGET-UNSUPPORTED this round (round-24 finding 4): its renderer calls
+    # string .replace() on the arg, but remove_bytes operates on BYTES (its own sha256/bytes
+    # input is a Buffer → runtime `replace is not a function`), and it allows a dynamic 2nd arg
+    # the renderer reads as a static literal. contexts=frozenset() → NC everywhere until a
+    # Buffer-safe byte-filter renderer exists.
+    "remove_bytes": _FC(_TYPE_BYTES, (_ANY_STRINGLIKE, _ANY_STRINGLIKE), 2, 2, contexts=frozenset()),
+}
+
+# Field → result type. EXPLICIT registry (round-20/21): a field is NOT unconditionally a string.
+# Keyed by SHORT name (post CF_FIELD_MAP). Numeric/boolean/IP ones named; else string (routable
+# text) or unknown (fail closed).
+_FIELD_RESULT_TYPE = {
+    "response_code": _TYPE_NUMBER, "asnum": _TYPE_NUMBER, "latitude": _TYPE_NUMBER,
+    "longitude": _TYPE_NUMBER, "metro_code": _TYPE_NUMBER,
+    "is_eu": _TYPE_BOOL,            # ip.src.is_in_european_union is a Boolean (round-21 finding 4)
+    "ip.src": _TYPE_IP,            # to_string(ip.src) is the legal way to use it as a string
+}
+_FIELD_STRING = frozenset({
+    "uri.path", "uri", "uri.query", "uri.path.extension", "host", "user_agent", "referer",
+    "method", "http_version", "full_uri", "cookie", "country", "continent", "city",
+    "region", "region_code", "postal_code", "timezone", "subdivision_1", "subdivision_2",
+    "cookie_named", "header_named", "arg_named",
+})
+
+
+def dynamic_expression_result_type(node):
+    """The STATIC result type of a parsed dynamic-expr tree ∈ {string, number, array, bytes,
+    boolean, ip, unknown}. The SINGLE authority the value-type gate + generator consult. Fails
+    CLOSED (unrecognized node/func/field → unknown). NOTE: this reports the result type ASSUMING
+    the call is well-formed; check_dynamic_expression_signature validates the args — a caller
+    that needs faithfulness must run BOTH (value_expression_type_unconvertible does)."""
+    if not isinstance(node, dict):
+        return _TYPE_UNKNOWN
+    ntype = node.get("type")
+    if ntype == "literal":
+        v = node.get("value")
+        if isinstance(v, bool):
+            return _TYPE_BOOL
+        if isinstance(v, (int, float)):
+            return _TYPE_NUMBER
+        # A literal is String ONLY if it is genuinely a string. A dict/list/None literal has NO
+        # faithful source-expression meaning (the Cloudflare grammar has no such literal) — fail
+        # CLOSED to unknown so it can't ride the string contract and get str()-ified by the
+        # generator (round-27 finding 3). validate_ast_node_schema rejects it outright too.
+        return _TYPE_STRING if isinstance(v, str) else _TYPE_UNKNOWN
+    if ntype == "field":
+        short = CF_FIELD_MAP.get(node.get("value"), node.get("value"))
+        if short in _FIELD_RESULT_TYPE:
+            return _FIELD_RESULT_TYPE[short]
+        return _TYPE_STRING if short in _FIELD_STRING else _TYPE_UNKNOWN
+    if ntype == "func_call" or "func" in node:
+        func = node.get("func")
+        if func == "concat":
+            # POLYMORPHIC but HOMOGENEOUS: String iff EVERY arg is String; Array iff EVERY arg
+            # is Array; ANY MIXTURE (string+array, or a bytes/number/unknown arg) → unknown →
+            # NC (round-24 finding 1). A mixed string+array previously resolved to array, which
+            # generated `str.concat(arr).join(...)` → runtime `join is not a function` when the
+            # mixed concat was nested inside join(). Cloudflare's concat is same-type only.
+            arg_types = [dynamic_expression_result_type(a) for a in node.get("args", [])]
+            if arg_types and all(t == _TYPE_STRING for t in arg_types):
+                return _TYPE_STRING
+            if arg_types and all(t == _TYPE_ARRAY for t in arg_types):
+                return _TYPE_ARRAY
+            return _TYPE_UNKNOWN
+        fc = _DYN_FUNC_CONTRACT.get(func)
+        return fc.result if fc else _TYPE_UNKNOWN
+    return _TYPE_UNKNOWN
+
+
+def check_dynamic_expression_signature(node, context=None):
+    """Recursively validate a parsed dynamic-expr tree against the FUNCTION CONTRACT registry.
+    Returns a reason string on the FIRST violation (unknown function, wrong arity, an arg whose
+    result type isn't accepted, a CONTEXT restriction, a node-shape/literal constraint), else
+    None. `context` ∈ {request_header, response_header, url_rewrite, redirect, custom_error,
+    None}; None skips the context check.
+
+    This turns the return-type table into a real signature proof (round-21/22): lower(len(...))
+    is rejected on arg type; a header context rejects a rewrite-only function; split's separator
+    must be a non-empty literal; decode_base64's source must be a field. Validates depth-first so
+    the innermost bad call is reported."""
+    if not isinstance(node, dict):
+        return None
+    ntype = node.get("type")
+    if ntype in (None, "literal", "field"):
+        return None
+    if ntype == "func_call" or "func" in node:
+        func = node.get("func")
+        args = node.get("args", [])
+        # validate children first (innermost error wins, and their types must be known to check us)
+        for a in args:
+            child = check_dynamic_expression_signature(a, context)
+            if child:
+                return child
+        if func == "concat":
+            # concat is HOMOGENEOUS: all-String or all-Array only (round-24 finding 1). Give a
+            # CLEAR reason at the signature layer for a mixed/unsupported-type concat rather than
+            # relying on the result-type collapsing to unknown (which produces a vaguer message).
+            if not args:
+                return "concat() requires at least one argument"
+            at = [dynamic_expression_result_type(a) for a in args]
+            if not (all(t == _TYPE_STRING for t in at) or all(t == _TYPE_ARRAY for t in at)):
+                return (f"concat() arguments must be ALL string or ALL array (got {at}); "
+                        "CloudFront has no mixed-type concat")
+            return None
+        # PURE low-level signature contract (SOURCE-AGNOSTIC): an unknown function (not in the
+        # capability table) has no faithful conversion. The SOURCE-policy narrow (a USER value may use
+        # ONLY SOURCE_CONVERTIBLE_FUNCTIONS) lives ONE layer up in validate_dynamic_tree(source=True) —
+        # so this checker keeps validating EVERY function's signature for the renderer/contract tests
+        # AND the internal producers (source=False, e.g. True-Client-IP's to_string). concat handled above.
+        fc = _DYN_FUNC_CONTRACT.get(func)
+        if fc is None:
+            return f"unknown function {func!r} — no CloudFront-faithful conversion"
+        n = len(args)
+        if n < fc.min_arity or (fc.max_arity is not None and n > fc.max_arity):
+            bound = f"{fc.min_arity}" if fc.max_arity == fc.min_arity else \
+                (f"{fc.min_arity}+" if fc.max_arity is None else f"{fc.min_arity}..{fc.max_arity}")
+            return f"{func}() takes {bound} argument(s), got {n}"
+        # per-arg type check; a variadic function repeats its LAST declared arg type.
+        for i, a in enumerate(args):
+            slot = fc.args[i] if i < len(fc.args) else (fc.args[-1] if fc.variadic else None)
+            if slot is None:
+                continue
+            at = dynamic_expression_result_type(a)
+            if at == _TYPE_UNKNOWN:
+                return (f"{func}() argument {i + 1} has an undetermined type — no faithful "
+                        "conversion")
+            if at not in slot:
+                return (f"{func}() argument {i + 1} is {at}, expected one of "
+                        f"{sorted(slot)}")
+        # NODE-SHAPE / literal constraints (field-only, non-empty literal, valid flags, …).
+        if fc.literal:
+            lit = fc.literal(args)
+            if lit:
+                return lit
+        # CONTEXT restriction. An EMPTY contexts set = TARGET-UNSUPPORTED everywhere (e.g.
+        # uuidv4 — no faithful renderer): reject regardless of the caller's context, so it can't
+        # slip through when a caller passes context=None. A non-empty set restricts to those
+        # contexts (only checked when the caller names one).
+        if fc.contexts is not None and not fc.contexts:
+            return f"{func}() has no faithful CloudFront conversion (target-unsupported)"
+        if context is not None and fc.contexts is not None and context not in fc.contexts:
+            return (f"{func}() is not available in the {context} context "
+                    f"(allowed: {sorted(fc.contexts)})")
+        return None
+    return None
+
+
+def value_expression_type_unconvertible(expr, context=None):
+    """Return a reason if a dynamic value expression is not a FAITHFUL string conversion for the
+    given emit `context`, else None. TWO proofs (round-21/22): (1) the whole call tree passes
+    signature validation (arity / arg-types / context / node-shape+literal constraints); (2) the
+    result type is exactly `string` (a header value must be a string; number/array/bytes/boolean/
+    ip/unknown → NC unless explicitly converted via to_string / join / encode_base64). Parse
+    failures are handled by value_expression_unmappable, so a parse failure returns None here
+    (no double-report). `context` is the emit context (e.g. request_header / response_header)."""
+    try:
+        tree = parse_dynamic_expression(expr)
+    except Exception:
+        return None
+    sig = check_dynamic_expression_signature(tree, context)
+    if sig:
+        return f"dynamic value expression {expr!r}: {sig}"
+    rtype = dynamic_expression_result_type(tree)
+    if rtype != _TYPE_STRING:
+        return (f"dynamic value expression {expr!r} has a non-string result type ({rtype}); a "
+                "header value must be a string — convert it explicitly (to_string / join / "
+                "encode_base64) to make the conversion faithful")
+    return None
+
+
+# ── TYPED LOWERING (round-26): the ONE data boundary between processor and generator ──
+# LoweredValue is a JSON-SAFE, VERSIONED tagged union stored IN THE IR. The processor lowers a
+# source action value EXACTLY ONCE (parse the tree, then run the full proof ON that tree); the
+# generator renders ONLY the stored `ast` and never re-parses. The persisted IR is INDEPENDENTLY
+# re-verified by validate_lowered_value (deep: re-derives the type from the AST, re-runs the
+# contract, checks context↔empty_behavior) so a hand-built/JSON-reloaded IR can't sneak a wrong
+# claim past a shallow shape check. `raw` is DIAGNOSTIC ONLY.
+#   Literal : {schema_version:1, kind:"literal", context, value:<str>, empty_behavior}
+#   Dynamic : {schema_version:1, kind:"dynamic", context, ast:<tree>, result_type:"string",
+#              empty_behavior, raw:<expr>}
+# empty_behavior ∈ {none, delete_header, clear_query} — a per-value policy: a dynamic header
+# empty→delete_header; a static rewrite query ""→clear_query (a distinct literal, see below);
+# everything else `none`. Carried ON the value so the gate can check the context↔behavior combo.
+LOWERED_SCHEMA_VERSION = 1
+LOWERED_EMPTY_NONE = "none"
+LOWERED_EMPTY_DELETE_HEADER = "delete_header"
+LOWERED_EMPTY_CLEAR_QUERY = "clear_query"
+_LOWERED_EMPTY_BEHAVIORS = frozenset({LOWERED_EMPTY_NONE, LOWERED_EMPTY_DELETE_HEADER,
+                                      LOWERED_EMPTY_CLEAR_QUERY})
+# (round-27: the coarse _LOWERED_CONTEXTS / _CONTEXT_EMPTY_OK maps were REPLACED by the SLOT model
+# below + _slot_empty_behavior_ok — context alone couldn't tell a path from a query or a header
+# literal from a dynamic, so the empty_behavior legality is now decided per (slot, kind).)
+
+# ── SLOTS (round-27 finding 1): the SPECIFIC place a LoweredValue is used ──
+# context alone was too coarse — path and query share context "url_rewrite", and a header literal
+# vs dynamic share "request_header", so the coarse gate let literal-header+delete_header (deletes
+# a static empty header), dynamic-header+none (keeps a runtime-empty value), empty-literal rewrite
+# path (request.uri=''), and dynamic query+clear_query (AST ignored, query blindly cleared) all
+# pass. A SLOT pins down (context, kind-legality, empty_behavior-legality per kind) exactly.
+SLOT_REQUEST_HEADER_VALUE = "request_header_value"
+SLOT_RESPONSE_HEADER_VALUE = "response_header_value"
+SLOT_REWRITE_PATH = "rewrite_path"
+SLOT_REWRITE_QUERY = "rewrite_query"
+SLOT_REDIRECT_TARGET = "redirect_target"
+# Each slot → its underlying context (what field-sourcing/signature the AST is checked against).
+_SLOT_CONTEXT = {
+    SLOT_REQUEST_HEADER_VALUE: "request_header",
+    SLOT_RESPONSE_HEADER_VALUE: "response_header",
+    SLOT_REWRITE_PATH: "url_rewrite",
+    SLOT_REWRITE_QUERY: "url_rewrite",
+    SLOT_REDIRECT_TARGET: "redirect",
+}
+_LOWERED_SLOTS = frozenset(_SLOT_CONTEXT)
+
+# THE single reason string for the viewer-response CFF error-response gap (round-27 finding 5 →
+# review 2 finding 1). EVERY response-CFF producer — the response-header processor tail AND the
+# native-RHP→CFF rehome in cdn-preprocess — uses this so the two can't drift (a rehomed static
+# security header and a dynamic set of the SAME header both run in the one viewer-response function
+# and share the same gap → both LOSSY). AWS-confirmed: a viewer-response function does NOT run on
+# CloudFront-generated error responses (origin 4xx/5xx, custom error pages, WAF blocks).
+VIEWER_RESPONSE_GAP_REASON = (
+    "converted to a viewer-response CloudFront Function: it applies on normal responses, but a "
+    "viewer-response function does not run on CloudFront-generated error responses (origin "
+    "4xx/5xx, custom error pages, WAF blocks), so the header is absent/unmodified there.")
+
+
+def lower_literal_value(value, context, empty_behavior=LOWERED_EMPTY_NONE):
+    """A static string value → a versioned LiteralValue node. Caller pre-validates the string
+    shape (validate_action_value); this stamps the version/context/empty_behavior."""
+    return {"schema_version": LOWERED_SCHEMA_VERSION, "kind": "literal", "context": context,
+            "value": value, "empty_behavior": empty_behavior}
+
+
+def lower_dynamic_value(expr, context, empty_behavior=LOWERED_EMPTY_NONE, source=True):
+    """Lower a DYNAMIC action-value expression to a versioned DynamicValue node, or return an NC
+    reason string. Parses ONCE, then runs the full faithful-conversion proof on that tree
+    (validate_dynamic_tree). Stores the JSON-safe AST so the generator never re-parses.
+    `source` marks provenance: True = a USER Cloudflare value (gated by SOURCE_CONVERTIBLE_FUNCTIONS);
+    False = an INTERNAL producer intrinsic (e.g. True-Client-IP's to_string(ip.src)) that bypasses the
+    source allowlist and validates against the low-level _DYN_FUNC_CONTRACT. Provenance is STAMPED as
+    `origin` so the persisted-IR re-validator (validate_lowered_value) applies the same mode post
+    round-trip — else a persisted internal op would falsely fail the narrow source gate at the sink."""
+    try:
+        tree = parse_dynamic_expression(expr)
+    except Exception as e:
+        return f"dynamic value expression {expr!r} could not be parsed ({e})"
+    bad = validate_dynamic_tree(tree, context, context_target(context), source)
+    if bad:
+        return bad
+    return {"schema_version": LOWERED_SCHEMA_VERSION, "kind": "dynamic", "context": context,
+            "ast": tree, "result_type": dynamic_expression_result_type(tree),
+            "empty_behavior": empty_behavior, "raw": expr,
+            "origin": "source" if source else "internal"}
+
+
+def _slot_empty_behavior_ok(slot, kind, eb, value_is_empty):
+    """Per-SLOT empty_behavior legality (round-27 finding 1). Returns a reason or None. This is the
+    precision the coarse context check lacked — it pins the LEGAL empty_behavior to the (slot,kind)
+    pair, and requires clear_query to line up with an actual empty query literal:
+      - header literal  → only `none` (a static "" is an empty header; delete_header would delete
+                          a value the source set, which is wrong).
+      - header dynamic  → MUST be `delete_header` (Cloudflare deletes the header on an empty/
+                          undefined dynamic result; `none` would keep a stray empty header).
+      - rewrite path    → only `none` (both kinds; an empty path literal is rejected separately).
+      - rewrite query literal  → `clear_query` IFF the value is "" (clear the query); else `none`.
+      - rewrite query dynamic  → only `none`. clear_query on a dynamic value would drop the AST and
+                          unconditionally clear — no runtime-empty branch is implemented.
+      - redirect        → only `none` (both kinds; empty literal rejected separately)."""
+    if slot in (SLOT_REQUEST_HEADER_VALUE, SLOT_RESPONSE_HEADER_VALUE):
+        if kind == "literal":
+            if eb != LOWERED_EMPTY_NONE:
+                return f"header literal must have empty_behavior=none, got {eb!r}"
+        else:  # dynamic
+            if eb != LOWERED_EMPTY_DELETE_HEADER:
+                return (f"header dynamic value must have empty_behavior=delete_header (Cloudflare "
+                        f"deletes the header on an empty result), got {eb!r}")
+        return None
+    if slot == SLOT_REWRITE_PATH:
+        if eb != LOWERED_EMPTY_NONE:
+            return f"rewrite path must have empty_behavior=none, got {eb!r}"
+        return None
+    if slot == SLOT_REWRITE_QUERY:
+        if kind == "literal":
+            if value_is_empty and eb != LOWERED_EMPTY_CLEAR_QUERY:
+                return "an empty rewrite query literal must have empty_behavior=clear_query"
+            if not value_is_empty and eb != LOWERED_EMPTY_NONE:
+                return f"a non-empty rewrite query literal must have empty_behavior=none, got {eb!r}"
+        else:  # dynamic
+            if eb != LOWERED_EMPTY_NONE:
+                return (f"a dynamic rewrite query must have empty_behavior=none (clear_query would "
+                        f"discard the expression and blindly clear the query), got {eb!r}")
+        return None
+    if slot == SLOT_REDIRECT_TARGET:
+        if eb != LOWERED_EMPTY_NONE:
+            return f"redirect target must have empty_behavior=none, got {eb!r}"
+        return None
+    return f"unknown slot {slot!r}"
+
+
+def validate_lowered_value(value, expected_slot):
+    """THE deep, independent hard-gate verifier for a persisted LoweredValue (round-26 finding 2;
+    round-27 finding 1 made it SLOT-specific). Returns a reason if `value` is not a fully-valid
+    LoweredValue for `expected_slot` (one of the SLOT_* constants), else None. Re-verifies
+    JSON-reloaded data from scratch — does NOT trust stored fields:
+      - strict allowed field set + schema_version + kind;
+      - context == the slot's underlying context (a response value can't fill a request slot,
+        a path value can't fill a query slot even though both are url_rewrite);
+      - empty_behavior legal for the (slot, kind, empty?) triple (_slot_empty_behavior_ok);
+      - literal: value is a string; an empty literal is rejected for path/redirect, and for a
+        header/query only in the exact shape the slot allows (empty query literal must be
+        clear_query — enforced above);
+      - dynamic: the AST passes validate_dynamic_tree (STRICT NODE SCHEMA + field-source +
+        signature + context + string result), AND result_type RE-DERIVED from the AST == the
+        stored result_type == "string" (a lie like ast=len(...) + result_type="string" is caught)."""
+    if expected_slot not in _LOWERED_SLOTS:
+        return f"unknown expected_slot {expected_slot!r} (must be one of {sorted(_LOWERED_SLOTS)})"
+    expected_context = _SLOT_CONTEXT[expected_slot]
+    if not isinstance(value, dict):
+        return f"LoweredValue must be an object, got {type(value).__name__}"
+    if value.get("schema_version") != LOWERED_SCHEMA_VERSION:
+        return f"LoweredValue schema_version must be {LOWERED_SCHEMA_VERSION}, got {value.get('schema_version')!r}"
+    kind = value.get("kind")
+    ctx = value.get("context")
+    eb = value.get("empty_behavior")
+    if ctx != expected_context:
+        return f"LoweredValue context {ctx!r} != {expected_context!r} required by slot {expected_slot!r}"
+    if eb not in _LOWERED_EMPTY_BEHAVIORS:
+        return f"LoweredValue has unknown empty_behavior {eb!r}"
+    if kind == "literal":
+        allowed = {"schema_version", "kind", "context", "value", "empty_behavior"}
+        extra = set(value) - allowed
+        if extra:
+            return f"literal LoweredValue has unknown field(s) {sorted(extra)}"
+        v = value.get("value")
+        if not isinstance(v, str):
+            return f"literal value must be a string, got {v!r}"
+        # An empty literal is only meaningful as a cleared query; every other slot rejects it.
+        if v == "" and expected_slot in (SLOT_REDIRECT_TARGET, SLOT_REWRITE_PATH):
+            return f"empty literal has no faithful meaning in slot {expected_slot!r}"
+        eb_bad = _slot_empty_behavior_ok(expected_slot, "literal", eb, v == "")
+        if eb_bad:
+            return eb_bad
+        return None
+    if kind == "dynamic":
+        allowed = {"schema_version", "kind", "context", "ast", "result_type", "empty_behavior",
+                   "raw", "origin"}
+        extra = set(value) - allowed
+        if extra:
+            return f"dynamic LoweredValue has unknown field(s) {sorted(extra)}"
+        ast = value.get("ast")
+        if not isinstance(ast, dict):
+            return f"dynamic LoweredValue ast must be an object, got {type(ast).__name__}"
+        # RE-DERIVE + RE-VALIDATE from the AST — do not trust the stored result_type. Honor the
+        # persisted `origin`: a source value re-validates against the narrow SOURCE_CONVERTIBLE_FUNCTIONS
+        # allowlist; an internal producer's value (origin="internal", e.g. True-Client-IP) against the
+        # low-level contract — else a persisted internal op would falsely fail the source gate here.
+        _src = value.get("origin", "source") == "source"
+        bad = validate_dynamic_tree(ast, ctx, context_target(ctx), _src)
+        if bad:
+            return f"dynamic LoweredValue ast fails the contract: {bad}"
+        derived = dynamic_expression_result_type(ast)
+        if derived != value.get("result_type"):
+            return (f"dynamic LoweredValue result_type {value.get('result_type')!r} != the type "
+                    f"re-derived from the ast ({derived!r})")
+        eb_bad = _slot_empty_behavior_ok(expected_slot, "dynamic", eb, False)
+        if eb_bad:
+            return eb_bad
+        return None
+    return f"LoweredValue has unknown kind {kind!r}"
+
+
+# (round-27: is_lowered_value — the shallow shape check — was DELETED. It let a JSON-reloaded
+# value with a lying result_type or a wrong context pass as "valid". Every consumer (chunk gate,
+# generator) now calls validate_lowered_value, which re-derives the AST type and re-runs the
+# contract against the expected context. There is no shallow fast-path anymore — a LoweredValue
+# is only "valid" if it fully re-verifies.)
+
+
+# ── VIEWER OP CONTRACTS (round-27 finding 2): the ONE authoritative op-shape registry ──
+# The chunk hard gate previously only checked op["type"] presence + forbidden `add` + the lowered
+# params — so a persisted op with an unknown type, a bad redirect status_code, a non-bool
+# preserve_query_string, or a LEFTOVER legacy raw field (target_expression beside a valid target,
+# value_expression beside value_lowered) sailed through and could be claimed as a converted
+# artifact (the generator then emits a bare `// TODO` for an unknown type). This registry is the
+# single definition the chunk validator (and the _append_viewer_op sink) enforce so no such op
+# reaches codegen / the ledger. Each entry:
+#   phase           : "request" | "response" | None(=either; e.g. bulk_redirect placement)
+#   lowered         : {param_name: SLOT_*}  — each MUST be a valid LoweredValue for that slot
+#   lowered_optional: subset of `lowered` keys that MAY be absent (rewrite path/query), with a
+#                     require_one rule enforced separately; everything else in `lowered` is required
+#   required        : {param_name: predicate(value)->bool}  — scalar params that MUST be present+valid
+#   optional        : {param_name: predicate(value)->bool}  — scalar params that MAY be present
+#   name_param      : the header-name param, validated as a non-empty header token, if set
+# ANY param on the op not covered by lowered/required/optional/name_param is UNKNOWN → rejected.
+# The op MUST NOT carry any _LEGACY_RAW_VALUE_FIELDS key (a pre-lowering raw string that must never
+# coexist with a LoweredValue).
+_REDIRECT_STATUS_CODES_SET = frozenset({301, 302, 303, 307, 308})
+_LEGACY_RAW_VALUE_FIELDS = frozenset({"target_expression", "value_expression", "path_expression",
+                                      "query_expression", "target_url", "value", "expression"})
+# A header field-name token per RFC 7230 (what CloudFront/CFF will accept as a header key).
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+
+
+def header_name_is_valid(v):
+    """True if `v` is a syntactically valid HTTP header field-name (RFC 7230 token). The SINGLE
+    definition the header processors (to NC a malformed SOURCE name) and the viewer-op contract
+    (to backstop an internal-producer bug) both use."""
+    return isinstance(v, str) and bool(_HEADER_NAME_RE.match(v))
+
+
+# ── CloudFront Functions header-mutation CAPABILITY (round-27 review-2 finding 2) ──
+# Beyond RFC-token SYNTAX, a CFF cannot add/modify/delete certain headers: it fails CloudFront's
+# post-execution validation and returns HTTP 502 to the viewer at RUNTIME (not at deploy, not in
+# the console test tool). AWS-confirmed (3 subagents + docs edge-function-restrictions-all.html):
+#   - DISALLOWED (not exposed to ANY edge function; a function can't add them) — both phases, incl.
+#     the two PREFIX families X-Amz-Cf-* and X-Edge-*.
+#   - READ-ONLY per event: viewer-request {CDN-Loop, Content-Length, Host, Transfer-Encoding, Via};
+#     viewer-response {Warning, Via}. (Content-Length/Encoding/Transfer-Encoding are writable in a
+#     CFF viewer-response — they're read-only only for Lambda@Edge, which this tool never emits.)
+# All names lower-cased; matched case-insensitively. A Cloudflare header transform whose target is
+# one of these has NO faithful CFF conversion → NON_CONVERTIBLE at the source; the persisted op
+# contract also FATALs it as a backstop (an internal producer must never emit one).
+_CFF_DISALLOWED_HEADERS = frozenset({
+    "connection", "expect", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "proxy-connection", "trailer", "upgrade",
+    "x-accel-buffering", "x-accel-charset", "x-accel-limit-rate", "x-accel-redirect",
+    "x-amzn-auth", "x-amzn-cf-billing", "x-amzn-cf-id", "x-amzn-cf-xff", "x-amzn-errortype",
+    "x-amzn-fle-profile", "x-amzn-header-count", "x-amzn-header-order",
+    "x-amzn-lambda-integration-tag", "x-amzn-requestid",
+    "x-cache", "x-forwarded-proto", "x-real-ip",
+    "cloudfront-viewer-cert-pem", "client-cert", "client-cert-chain",
+})
+_CFF_DISALLOWED_PREFIXES = ("x-amz-cf-", "x-edge-")
+_CFF_READONLY_REQUEST = frozenset({"cdn-loop", "content-length", "host", "transfer-encoding", "via"})
+_CFF_READONLY_RESPONSE = frozenset({"warning", "via"})
+
+
+def header_mutation_capability_reason(name, phase):
+    """Return a reason if a CloudFront Function in `phase` (request|response|request_header|
+    response_header) CANNOT faithfully add/modify/delete the header `name`, else None (round-27
+    review-2 finding 2). Checks the DISALLOWED list + prefix families (both phases) and the
+    phase-scoped READ-ONLY list. Case-insensitive. `name` must already be a valid token (caller
+    checks header_name_is_valid first). This is the SINGLE capability authority the processors (to
+    NC a source input) and the viewer-op contract (to reject an internal-producer bug) both use."""
+    if not isinstance(name, str):
+        return f"header name must be a string, got {type(name).__name__}"
+    low = name.lower()
+    if low in _CFF_DISALLOWED_HEADERS or low.startswith(_CFF_DISALLOWED_PREFIXES):
+        return (f"header {name!r} is DISALLOWED in a CloudFront Function (not exposed; adding it "
+                "fails CloudFront validation → HTTP 502 at runtime) — no faithful conversion")
+    is_response = phase in ("response", "response_header")
+    readonly = _CFF_READONLY_RESPONSE if is_response else _CFF_READONLY_REQUEST
+    if low in readonly:
+        return (f"header {name!r} is READ-ONLY in a viewer-{'response' if is_response else 'request'} "
+                "CloudFront Function (add/modify/delete → HTTP 502 at runtime) — no faithful conversion")
+    return None
+
+
+_is_header_name = header_name_is_valid  # local alias for the contract predicate table
+
+
+def _is_bool(v):
+    return isinstance(v, bool)
+
+
+def _is_redirect_status(v):
+    return v in _REDIRECT_STATUS_CODES_SET
+
+
+def _is_nonneg_int(v):
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def _is_tcp_port(v):
+    # A valid TCP port 1..65535 (round-27 review-2 finding 4: 0 and 65536 are not ports).
+    return isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 65535
+
+
+def _is_nonempty_str(v):
+    return isinstance(v, str) and v != ""
+
+
+def _is_str(v):
+    return isinstance(v, str)
+
+
+VIEWER_OP_CONTRACTS = {
+    "redirect": {
+        "phase": "request",
+        "lowered": {"target": SLOT_REDIRECT_TARGET},
+        "required": {"status_code": _is_redirect_status, "preserve_query_string": _is_bool},
+    },
+    "rewrite": {
+        "phase": "request",
+        "lowered": {"path_lowered": SLOT_REWRITE_PATH, "query_lowered": SLOT_REWRITE_QUERY},
+        "lowered_optional": {"path_lowered", "query_lowered"},  # ≥1 required (require_one)
+        "require_one": ("path_lowered", "query_lowered"),
+    },
+    "set_request_header": {
+        "phase": "request", "name_param": "name",
+        "lowered": {"value_lowered": SLOT_REQUEST_HEADER_VALUE},
+    },
+    "set_response_header": {
+        "phase": "response", "name_param": "name",
+        "lowered": {"value_lowered": SLOT_RESPONSE_HEADER_VALUE},
+    },
+    "remove_request_header": {"phase": "request", "name_param": "name"},
+    "remove_response_header": {"phase": "response", "name_param": "name"},
+    # origin_override: ≥1 real override (require_one), each a valid type — host/host_header/sni
+    # NON-EMPTY strings, port a valid TCP port 1..65535 (round-27 review-2 finding 4; was: int host
+    # accepted, port 0/65536 accepted, empty host accepted, no-override op marked EXACT then dropped).
+    "origin_override": {
+        "phase": "request",
+        "optional": {"origin_host": _is_nonempty_str, "host_header": _is_nonempty_str,
+                     "origin_port": _is_tcp_port, "sni": _is_nonempty_str},
+        "require_one": ("origin_host", "host_header", "origin_port", "sni"),
+    },
+    "cache_bypass": {"phase": "request"},
+    # bulk_redirect is KVS-driven (a fixed template block, not per-op codegen); entry_count is a
+    # descriptive count of the KVS entries it serves.
+    "bulk_redirect": {"phase": "request", "optional": {"entry_count": _is_nonneg_int}},
+}
+
+
+# ── CONVERSION-POLICY AUTHORITY (docs/conversion-policy.md) — the SINGLE source ─────────────────
+# ONE place for the convertible allow-lists so the processor, chunk validator, generator and
+# preprocess can't drift into disagreeing lists. STEP 1 initializes these to the CURRENT values (a
+# behavior-preserving consolidation — NC counts / ledger claims / generated JS+HCL must NOT change).
+# STEP 3 NARROWS them (functions → the core set; response header `add` → NC; numeric geo → NC).
+# Do NOT narrow here.
+
+# Header operations ACCEPTED FOR STRUCTURAL VALIDATION, PER PHASE (validate_header_input). NOT an
+# "is convertible" list: Cloudflare's Request Header Transform has no `add`; the response phase still
+# ACCEPTS `add` here so the response processor's dedicated block can NC it with a SPECIFIC reason (a
+# native RHP can't append) instead of a generic "unsupported operation" — `add` is NON-convertible in
+# both phases regardless. ORDERED tuples, not sets: the order is surfaced verbatim in the NC reason
+# (validate_header_input's ", ".join), so it must stay stable for a zero-diff conversion report.
+HEADER_OPS_ACCEPTED_FOR_VALIDATION_BY_PHASE = {
+    "request": ("set", "remove"),
+    "response": ("set", "add", "remove"),
+}
+
+# SOURCE allowlist: the dynamic-value functions a USER's Cloudflare rule value may auto-convert (the
+# narrowed policy core). SEPARATE from _DYN_FUNC_CONTRACT (the low-level renderer/capability table,
+# KEPT for internal producers + Step-5 reachability). `concat` is polymorphic and handled on its own
+# codegen path (not in _DYN_FUNC_CONTRACT); it is listed here to document the source core. INTERNAL
+# producers (lower_dynamic_value source=False, e.g. True-Client-IP's to_string(ip.src)) bypass this
+# allowlist and validate against _DYN_FUNC_CONTRACT directly.
+SOURCE_CONVERTIBLE_FUNCTIONS = frozenset({"concat", "lower", "upper", "regex_replace", "wildcard_replace"})
+
+# Condition-leaf short fields that are NON-convertible (checked by validate_condition_semantics, via
+# the shared processor-side _screen_condition_semantics in cdn_rule_processors). The NUMERIC geo
+# fields: CloudFront delivers them as header TEXT, so a faithful numeric comparison needs a parse the
+# narrowed policy declines to emit, and they don't occur in real configs. The STRING / BOOLEAN geo
+# fields (country, city, region, region_code, postal_code, timezone, continent, is_eu) stay
+# convertible — they are NOT in this set.
+NON_CONVERTIBLE_CONDITION_FIELDS = frozenset({"asnum", "latitude", "longitude", "metro_code"})
+
+# Header-`add` op types no producer may ever emit — an independent historical/error defense line for
+# the chunk validator's Check3. NOT derived from VIEWER_OP_CONTRACTS: add_*_header is not a legal
+# viewer op type at all (the complement of the allowlist, never a member). Pairs with
+# HEADER_OPS_ACCEPTED_FOR_VALIDATION_BY_PHASE — `add` is accepted there only for a better NC reason.
+FORBIDDEN_HEADER_ADD_OP_TYPES = frozenset({"add_request_header", "add_response_header", "add_header"})
+
+# Viewer-op contract types NOT routed through the GENERIC viewer-op artifact channel, so preprocess
+# derives _WIRED_VIEWER_OP_TYPES = VIEWER_OP_CONTRACTS − this set. `bulk_redirect` IS wired, but via
+# its OWN shared-artifact branch (special-cased before the generic set is consulted — deleting that
+# branch would silently drop bulk redirects). (serve_error_inline was RETIRED in Step 5: inline
+# custom-error is permanently NON_CONVERTIBLE, so the op type no longer exists in VIEWER_OP_CONTRACTS
+# and a stray op fails loud as an unknown type at the sink / generator / chunk gate.)
+VIEWER_OP_CONTRACT_NOT_GENERIC_WIRED = frozenset({"bulk_redirect"})
+
+
+def validate_viewer_op_contract(op, phase=None):
+    """Validate a persisted viewer op against VIEWER_OP_CONTRACTS (round-27 finding 2). Returns a
+    reason on the FIRST violation, else None. Enforces: known op type; op phase matches (if the
+    caller names one AND the contract pins a phase); every declared lowered param is a valid
+    LoweredValue for its SLOT (via validate_lowered_value); require_one for rewrite; scalar
+    required present+valid / optional valid-if-present; header name_param a valid token; NO unknown
+    param; NO leftover legacy raw-value field. This is the single op-shape authority the chunk
+    validator and the _append_viewer_op sink both call — no separate, drifting allow-lists."""
+    if not isinstance(op, dict):
+        return f"op must be an object, got {type(op).__name__}"
+    t = op.get("type")
+    spec = VIEWER_OP_CONTRACTS.get(t)
+    if spec is None:
+        return f"unknown op type {t!r} — not in VIEWER_OP_CONTRACTS (a converter bug or drift)"
+    want_phase = spec.get("phase")
+    if phase is not None and want_phase is not None and phase != want_phase:
+        return f"op type {t!r} is a {want_phase}-phase op but appears in the {phase} phase"
+    params = op.get("params", {})
+    if not isinstance(params, dict):
+        return f"op {t!r} params must be an object, got {type(params).__name__}"
+    # No leftover pre-lowering raw value field may coexist with (or stand in for) a LoweredValue.
+    raw_leftover = set(params) & _LEGACY_RAW_VALUE_FIELDS
+    if raw_leftover:
+        return (f"op {t!r} carries legacy raw value field(s) {sorted(raw_leftover)} — a raw "
+                "expression/value must never reach the persisted IR; only lowered params are valid")
+    lowered_spec = spec.get("lowered", {})
+    lowered_optional = spec.get("lowered_optional", set())
+    required = spec.get("required", {})
+    optional = spec.get("optional", {})
+    name_param = spec.get("name_param")
+    known = set(lowered_spec) | set(required) | set(optional)
+    if name_param:
+        known.add(name_param)
+    unknown = set(params) - known
+    if unknown:
+        return f"op {t!r} has unknown param(s) {sorted(unknown)}"
+    # lowered params (each validated against its slot)
+    for pkey, slot in lowered_spec.items():
+        if pkey not in params:
+            if pkey not in lowered_optional:
+                return f"op {t!r} missing lowered param {pkey!r}"
+            continue
+        reason = validate_lowered_value(params.get(pkey), slot)
+        if reason:
+            return f"op {t!r} param {pkey!r} is not a valid LoweredValue: {reason}"
+    if "require_one" in spec and not any(k in params for k in spec["require_one"]):
+        return f"op {t!r} must carry at least one of {list(spec['require_one'])}"
+    # scalar params
+    for pkey, pred in required.items():
+        if pkey not in params:
+            return f"op {t!r} missing required param {pkey!r}"
+        if not pred(params[pkey]):
+            return f"op {t!r} param {pkey!r} has an invalid value {params[pkey]!r}"
+    for pkey, pred in optional.items():
+        if pkey in params and not pred(params[pkey]):
+            return f"op {t!r} param {pkey!r} has an invalid value {params[pkey]!r}"
+    if name_param:
+        if name_param not in params:
+            return f"op {t!r} missing header name param {name_param!r}"
+        if not _is_header_name(params[name_param]):
+            return f"op {t!r} param {name_param!r} is not a valid header name: {params[name_param]!r}"
+        # CAPABILITY backstop (round-27 review-2 finding 2): a header op must not target a header a
+        # CloudFront Function can't set/remove (Host / Via / Content-Length / … → 502). The
+        # processor NCs such a SOURCE header; this catches an internal-producer bug that hand-built
+        # one. Phase from the op type (set_request_header→request, set_response_header→response).
+        _hphase = "response" if "response" in t else "request"
+        cap = header_mutation_capability_reason(params[name_param], _hphase)
+        if cap:
+            return f"op {t!r} {cap}"
+    return None
+
+
+# The condition-leaf value types the tree may carry: a scalar str/int/bool, or a list of scalars
+# for an `in`-set. float is NOT a valid CF condition value.
+def _is_condition_scalar(v):
+    return isinstance(v, (str, bool)) or (isinstance(v, int) and not isinstance(v, bool))
+
+
+def _is_condition_value(v):
+    if isinstance(v, list):
+        return all(_is_condition_scalar(x) for x in v)
+    return _is_condition_scalar(v)
+
+
+def validate_condition_tree(cond, _depth=0):
+    """STRICT structural schema for a parsed condition tree (round-27 review-2 finding 3). Returns a
+    reason for the FIRST malformed node, else None. The op contract validated type+params but NOT
+    the condition, so a persisted op could carry condition [] / "x" (→ generator AttributeError) or
+    {"future":"x"} / {"field":"host"} with no op (→ silently `if(false)` while the ledger still
+    claims the op converted). Every node must be EXACTLY one of:
+      - None                                   (unconditional; the op fires always)
+      - {"always": true}                       (unconditional)
+      - leaf   {"field": nonempty-str, "op": nonempty-str, "value": <str|int|bool|list>,
+                optional "size_check": bool, optional "transform": str}
+      - logic  {"logic": "and"|"or", "parts": [ <node>, ... ]}   (parts a list, ≥1, each recursed)
+      - logic  {"logic": "not", "item": <node>}                  (item recursed)
+    Unknown keys / wrong types / unknown logic / a leaf missing field-or-op → a reason. Bounded
+    recursion depth guards a pathological/cyclic reload."""
+    if _depth > 64:
+        return "condition tree is too deep (possible cycle or malformed reload)"
+    if cond is None:
+        return None
+    if not isinstance(cond, dict):
+        return f"condition must be an object or null, got {type(cond).__name__}"
+    if cond.get("always") is True:
+        if set(cond) != {"always"}:
+            return f"unconditional condition must be exactly {{'always': true}}, got keys {sorted(cond)}"
+        return None
+    if "logic" in cond:
+        logic = cond.get("logic")
+        if logic in ("and", "or"):
+            extra = set(cond) - {"logic", "parts"}
+            if extra:
+                return f"{logic} node has unknown field(s) {sorted(extra)}"
+            parts = cond.get("parts")
+            if not isinstance(parts, list) or not parts:
+                return f"{logic} node `parts` must be a non-empty list, got {parts!r}"
+            for p in parts:
+                bad = validate_condition_tree(p, _depth + 1)
+                if bad:
+                    return bad
+            return None
+        if logic == "not":
+            extra = set(cond) - {"logic", "item"}
+            if extra:
+                return f"not node has unknown field(s) {sorted(extra)}"
+            if "item" not in cond:
+                return "not node missing `item`"
+            return validate_condition_tree(cond.get("item"), _depth + 1)
+        return f"unknown logic operator {logic!r}"
+    # leaf. Base keys + per-field extras:
+    #  - a synthetic indexed field carries its NAME key (header_named→header_name, etc.);
+    #  - `kvs_ips`, a BUILD-TIME transient on in_kvs/not_in_kvs (resolved IP rows, popped into KVS
+    #    and stripped before persist — valid ON the op at the sink, gone by the chunk gate);
+    #  - a `full_uri` + wildcard/strict_wildcard leaf carries DERIVED host_pattern/path_pattern/
+    #    scheme (parser splits the absolute-URL wildcard so the renderer matches host and path
+    #    separately — round-27 review-4 finding 2). These are allowed ONLY on that exact shape.
+    field = cond.get("field")
+    op = cond.get("op")
+    base_op = op[4:] if isinstance(op, str) and op.startswith("not_") else op
+    allowed_leaf = {"field", "op", "value", "size_check", "transform"}
+    name_key = _SYNTHETIC_NAME_KEY.get(field)
+    if name_key:
+        allowed_leaf.add(name_key)
+    if base_op in ("in_kvs", "not_in_kvs"):
+        allowed_leaf.add("kvs_ips")
+    is_full_uri_wildcard = field == "full_uri" and base_op in ("wildcard", "strict_wildcard")
+    if is_full_uri_wildcard:
+        allowed_leaf |= {"host_pattern", "path_pattern", "scheme"}
+    extra = set(cond) - allowed_leaf
+    if extra:
+        return f"condition leaf has unknown field(s) {sorted(extra)}"
+    if not _is_nonempty_str(field):
+        return f"condition leaf `field` must be a non-empty string, got {field!r}"
+    if not _is_nonempty_str(op):
+        return f"condition leaf `op` must be a non-empty string, got {op!r}"
+    if "value" in cond and not _is_condition_value(cond.get("value")):
+        return f"condition leaf `value` has an invalid type: {cond.get('value')!r}"
+    if "size_check" in cond and not isinstance(cond.get("size_check"), bool):
+        return f"condition leaf `size_check` must be a boolean, got {cond.get('size_check')!r}"
+    if "transform" in cond and not _is_nonempty_str(cond.get("transform")):
+        return f"condition leaf `transform` must be a non-empty string, got {cond.get('transform')!r}"
+    # a synthetic indexed field's name key must be a non-empty string when present.
+    if name_key and name_key in cond and not _is_nonempty_str(cond.get(name_key)):
+        return f"condition leaf `{name_key}` must be a non-empty string, got {cond.get(name_key)!r}"
+    # full_uri wildcard comes in TWO legit shapes: (a) ABSOLUTE-URL wildcard (https://host/path*,
+    # *://host/path*) — the parser splits it into host_pattern/path_pattern(/scheme) derived fields and
+    # the generator matches host+path (cdn-generate-js ~397); (b) SCHEME/HOST-LESS wildcard (e.g.
+    # */admin/*) — NO derived fields, and the generator RECONSTRUCTS the absolute URL and matches the
+    # whole thing (cdn-generate-js ~408). Only shape (a) carries + requires derived fields; requiring
+    # them on shape (b) makes this validator reject a legal */admin/* at the sink (this shape has
+    # previously failed here under the full validator). So enforce ONLY when the leaf HAS derived
+    # fields or its value is an absolute-URL wildcard that SHOULD have them; otherwise pass it through
+    # to the generator's reconstruct branch.
+    if is_full_uri_wildcard:
+        v = cond.get("value")
+        if not _is_nonempty_str(v):
+            return f"full_uri wildcard leaf `value` must be a non-empty string, got {v!r}"
+        reparsed = _parse_full_uri_wildcard(v)
+        has_derived = any(k in cond for k in ("host_pattern", "path_pattern", "scheme"))
+        if has_derived or reparsed[0] or reparsed[1]:
+            hp, pp = cond.get("host_pattern"), cond.get("path_pattern")
+            if not _is_nonempty_str(hp) or not _is_nonempty_str(pp):
+                return ("full_uri absolute-URL wildcard leaf must carry BOTH a non-empty host_pattern "
+                        f"and path_pattern, got host_pattern={hp!r}, path_pattern={pp!r}")
+            if cond.get("scheme") not in ("http", "https", None):
+                return (f"full_uri wildcard `scheme` must be 'http', 'https', or None, got "
+                        f"{cond.get('scheme')!r}")
+            if reparsed != (hp, pp, cond.get("scheme")):
+                return (f"full_uri wildcard derived fields disagree with a fresh parse of value {v!r}: "
+                        f"{reparsed!r} vs {(hp, pp, cond.get('scheme'))!r}")
+    return None
+
+
+# ── CONDITION SEMANTICS (round-27 review-3 finding 1): the leaf must be EXECUTABLE, not just
+# structurally well-formed. The renderer (_op_to_js / _apply_leaf_modifiers / _get_accessor in
+# cdn-generate-js) can only emit a bounded set of operators, transforms, and fields; a leaf outside
+# them renders to `false` / compares against 'None' / queries an empty header name / silently drops
+# the transform — while the ledger still claims the op converted. These sets are the renderer's
+# actual capability; the generator has a completeness relationship to them (a field here must have
+# an accessor there). ──
+# The condition-leaf short field-names that DO have a CloudFront edge source (derived from the
+# authoritative CF_FIELD_MAP minus the unmappable set) + the synthetic indexed fields. A persisted
+# leaf carries the SHORT name (host, country, uri.path, header_named, …), not the raw CF name.
+_MAPPABLE_SHORT_FIELDS = (set(CF_FIELD_MAP.values()) - UNMAPPABLE_FIELDS) | _SYNTHETIC_CONVERTIBLE_FIELDS
+_TRANSFORMS = frozenset({"lowercase", "uppercase"})
+
+# ── TYPED CONDITION CONTRACT (round-27 review-4 finding 1): a leaf is executable only if FIELD ×
+# OPERATOR × VALUE agree. Checking them independently let host eq [list] / is_eu contains x /
+# host matches 123 / ip.src in_kvs 123 pass → wrong string compare, .includes() on a boolean, and
+# a generator crash on an int regex. Group operators by the value type they render correctly. ──
+# String comparisons/substring/pattern ops (render `x === s` / x.includes(s) / regex / wildcard).
+_STRING_OPS = frozenset({"eq", "ne", "contains", "starts_with", "ends_with", "matches",
+                         "wildcard", "strict_wildcard"})
+# Numeric comparisons (render `x OP n`). eq/ne are shared with string (a numeric eq/ne is fine).
+_NUMERIC_OPS = frozenset({"eq", "ne", "gt", "ge", "lt", "le"})
+# Boolean ops (is_eu eq/ne true|false).
+_BOOLEAN_OPS = frozenset({"eq", "ne"})
+# All renderer operators (a `not_` prefix wraps any). in_list is DELIBERATELY absent — an
+# unresolved named list renders to _NEVER (false); it must be resolved to in_kvs (or NC'd).
+_RENDERABLE_OPS = _STRING_OPS | _NUMERIC_OPS | frozenset({"in", "in_kvs"})
+# Field short-name → value TYPE for the condition contract. Reuses _FIELD_RESULT_TYPE (the single
+# field-type authority; its _TYPE_* values ARE "number"/"boolean"/"ip"/"string") so the two can't
+# drift. A field absent from it ⇒ string (host, uri.path, country, full_uri, referer, …).
+# size_check turns ANY field into a NUMBER length comparison, so it overrides the base type.
+def _condition_field_type(field):
+    return _FIELD_RESULT_TYPE.get(field, _TYPE_STRING)
+
+
+def _condition_leaf_semantics(cond, phase):
+    """The TYPED field × operator × value contract for ONE condition leaf (round-27 review-4
+    finding 1). Returns a reason on the first violation, else None. This is where field, operator
+    and value are checked TOGETHER — checking them independently let host eq [list] (list value on
+    a scalar op), is_eu contains x (.includes on a boolean), host matches 123 (int regex → generator
+    crash), ip.src in_kvs 123 (non-string list name) all pass. The type is: size_check ⇒ number
+    (len is a count); else _condition_field_type(field) (number/boolean/ip); else string. full_uri
+    is string-typed with a wildcard host/path special (validated in the leaf schema)."""
+    field = cond.get("field")
+    op = cond.get("op", "")
+    base_op = op[4:] if op.startswith("not_") else op
+    value = cond.get("value")
+    name_key = _SYNTHETIC_NAME_KEY.get(field)
+    has_value = "value" in cond
+    size_check = bool(cond.get("size_check"))
+
+    # FIELD source + phase.
+    if field != "full_uri" and field not in _MAPPABLE_SHORT_FIELDS:
+        return (f"field {field!r} has no CloudFront edge source — the renderer would emit `false` "
+                "while the ledger claims the op converted")
+    if field in RESPONSE_ONLY_FIELDS and phase != "response":
+        return f"field {field!r} is response-only but used in the {phase} phase"
+    # OPERATOR must be renderable; in_list (unresolved) must never persist.
+    if base_op == "in_list":
+        return ("uses an UNRESOLVED named list (in_list) — it renders to `false`; resolve it to "
+                "in_kvs or mark the rule non-convertible before persisting")
+    if base_op not in _RENDERABLE_OPS:
+        return f"operator {op!r} is not renderer-supported (renders to `false`)"
+    # INDEXED field must carry a non-empty name.
+    if name_key and not _is_nonempty_str(cond.get(name_key)):
+        return f"indexed field {field!r} is missing its {name_key!r}"
+    # in_kvs is an IP-list membership test: only on ip.src, value a non-empty list NAME (string).
+    if base_op == "in_kvs":
+        if field != "ip.src":
+            return f"in_kvs is only valid on ip.src (IP-list membership), not field {field!r}"
+        if not _is_nonempty_str(value):
+            return f"in_kvs value must be a non-empty list name (string), got {value!r}"
+        return None
+    # TRANSFORM (lower/upper) is a STRING operation — only on a string-typed leaf (not a
+    # number/boolean/ip/size_check leaf), and must be renderer-supported.
+    transform = cond.get("transform")
+    # EFFECTIVE type: len(x) is a NUMBER count (overrides base); an indexed field's value is a
+    # string; else the field's declared type (string default).
+    if size_check:
+        eff_type = _TYPE_NUMBER
+    elif name_key:
+        eff_type = _TYPE_STRING
+    else:
+        eff_type = _condition_field_type(field)
+    if transform is not None:
+        if transform not in _TRANSFORMS:
+            return f"transform {transform!r} is not renderer-supported (silently ignored)"
+        if eff_type != _TYPE_STRING:
+            return f"transform {transform!r} is only valid on a string field, not {eff_type} {field!r}"
+    # VALUE presence.
+    if not has_value:
+        return f"leaf (field {field!r}, op {op!r}) is missing `value`"
+    # EXISTENCE form: value is True is the "name present" check — ONLY on an indexed field, and
+    # only with eq (the renderer treats value=True as existence regardless of op, so pin it to eq).
+    if value is True and name_key and not size_check:
+        if base_op != "eq":
+            return f"indexed existence check (value=true) must use eq, not {op!r}"
+        return None
+    # `in` set-membership: a non-empty homogeneous list on a STRING field (the renderer emits
+    # js_array(value).includes(accessor) — only sound for string values / string field).
+    if base_op == "in":
+        if not isinstance(value, list) or not value:
+            return f"`in` needs a non-empty list value, got {value!r}"
+        if not all(isinstance(x, str) for x in value):
+            return f"`in` list must be all strings, got {value!r}"
+        if eff_type != _TYPE_STRING:
+            return f"`in` is only valid on a string field, not {eff_type} {field!r}"
+        return None
+    # a list value is ONLY valid with `in` (handled above); any other op with a list is wrong.
+    if isinstance(value, list):
+        return f"operator {op!r} does not take a list value, got {value!r}"
+    # TYPED scalar compare: pick the operator set for the effective type.
+    if eff_type == _TYPE_NUMBER:
+        if base_op not in _NUMERIC_OPS:
+            return f"operator {op!r} is not valid on a numeric field/len ({field!r})"
+        if not (isinstance(value, int) and not isinstance(value, bool)):
+            return f"numeric comparison on {field!r} needs an integer value, got {value!r}"
+        return None
+    if eff_type == _TYPE_BOOL:
+        if base_op not in _BOOLEAN_OPS:
+            return f"operator {op!r} is not valid on the boolean field {field!r} (use eq/ne)"
+        if not isinstance(value, bool):
+            return f"boolean field {field!r} needs a true/false value, got {value!r}"
+        return None
+    if eff_type == _TYPE_IP:
+        # ip.src as a scalar leaf has no string/number compare the renderer emits (only in_kvs,
+        # handled above). A bare ip.src eq/contains/… is not convertible.
+        return (f"field 'ip.src' has no scalar comparison at the edge — only an in_kvs IP-list "
+                "membership test is convertible")
+    # string field: a string-op with a string value.
+    if base_op not in _STRING_OPS:
+        return f"operator {op!r} is not valid on the string field {field!r}"
+    if not isinstance(value, str):
+        return f"string comparison on {field!r} needs a string value, got {value!r}"
+    return None
+
+
+def _continent_value_mentions_t1(value):
+    """True if a `continent` condition value references Cloudflare's Tor pseudo-continent "T1"
+    — a bare "T1" (eq/ne) or "T1" among an in-{set}. Case-insensitive, whitespace-tolerant."""
+    if isinstance(value, str):
+        return value.strip().upper() == "T1"
+    if isinstance(value, (list, tuple)):
+        return any(isinstance(v, str) and v.strip().upper() == "T1" for v in value)
+    return False
+
+
+def validate_condition_semantics(cond, phase, _depth=0):
+    """Prove a condition is EXECUTABLE for `phase` ("request"|"response") — the TYPED field ×
+    operator × value contract, applied to every leaf (round-27 review-3 finding 1 → review-4
+    finding 1). Returns a reason on the FIRST violation, else None. Assumes validate_condition_tree
+    already passed (shape valid). Recurses logic nodes; each leaf goes through
+    _condition_leaf_semantics."""
+    if _depth > 64:
+        return "condition tree too deep"
+    if cond is None or cond.get("always") is True:
+        return None
+    if "logic" in cond:
+        if cond["logic"] == "not":
+            return validate_condition_semantics(cond.get("item"), phase, _depth + 1)
+        for p in cond.get("parts", []):
+            bad = validate_condition_semantics(p, phase, _depth + 1)
+            if bad:
+                return bad
+        return None
+    field = cond.get("field")
+    if field in NON_CONVERTIBLE_CONDITION_FIELDS:
+        return f"condition leaf: field {field!r} is non-convertible per conversion policy"
+    # VALUE-level NC (conversion-policy geo decision): a `continent` condition mentioning
+    # Cloudflare's Tor pseudo-continent "T1" is non-convertible in EVERY form. CloudFront's continent
+    # is DERIVED from the country code (the continent KVS maps ISO country → NA/EU/AS/AF/SA/OC/AN) and
+    # can NEVER be T1, so eq "T1" would render a never-matching branch and ne "T1" an always-true one —
+    # both silent wrong conversions. Op-agnostic (eq/ne/in/not-in/outer-not all fail the same way).
+    if field == "continent" and _continent_value_mentions_t1(cond.get("value")):
+        return ("condition leaf: continent value 'T1' is non-convertible — Cloudflare's T1 is the "
+                "Tor pseudo-continent and cannot be derived from a CloudFront country code")
+    bad = _condition_leaf_semantics(cond, phase)
+    return f"condition leaf: {bad}" if bad else None
+
+
+def validate_viewer_op(op, phase=None):
+    """THE full persisted-op validator (round-27 review-2 finding 3 → review-3 finding 1): the
+    op-shape CONTRACT (validate_viewer_op_contract) PLUS the condition gate. Returns a reason on the
+    first violation, else None. This is what _append_viewer_op, the chunk validator, AND the
+    generator all call so no drifting per-caller checks exist. On top of the contract it enforces:
+      - a CONVERTED op MUST carry a STRUCTURED `condition` — NEVER `raw_expression` (review-3: raw
+        is only an NC diagnostic; the generator must not re-parse it, closing the last raw-drives-
+        codegen seam). An op with raw_expression set is rejected; an op with no condition is rejected;
+      - the condition is structurally valid (validate_condition_tree) — a list/string condition
+        would AttributeError in the generator, an unknown-key dict would silently render `if(false)`;
+      - the condition is SEMANTICALLY executable for `phase` (validate_condition_semantics) — every
+        field has a CloudFront source + is phase-legal, every operator/transform is renderer-
+        supported, values are present and well-typed, indexed fields carry their name. Without this
+        a bogus-but-well-formed leaf (op 'bogus', field 'future', missing value, unknown transform)
+        renders to `false`/'None'/an empty-name lookup while the ledger claims the op converted.
+    `phase` ("request"|"response") is required for the semantic check; when None (the generator's
+    phase-agnostic call) the field-source/phase checks that need it are still run against the
+    stricter 'request' rules is NOT assumed — instead the semantic check is run with the op-derived
+    phase when determinable, else skipped for the phase-only rules (structure + operator + value +
+    transform still apply)."""
+    contract = validate_viewer_op_contract(op, phase)
+    if contract:
+        return contract
+    cond = op.get("condition")
+    raw = op.get("raw_expression")
+    if raw is not None:
+        return ("op carries a raw_expression — a converted op must have a STRUCTURED condition; "
+                "raw_expression is an NC diagnostic only and must not drive codegen")
+    if cond is None:
+        return "op has no condition (a converted op needs a structured condition gate)"
+    bad = validate_condition_tree(cond)
+    if bad:
+        return f"op condition is malformed: {bad}"
+    # SEMANTIC executability. Phase for the field-source/response-only rule: the caller's phase if
+    # given, else derive from the op type (set_response_header/… → response; else request).
+    sem_phase = phase if phase in ("request", "response") else (
+        "response" if "response" in (op.get("type") or "") else "request")
+    bad = validate_condition_semantics(cond, sem_phase)
+    if bad:
+        return f"op condition is not executable: {bad}"
+    return None
+
+
 def _dyn_tree_fields(node):
     """Collect all field references (raw CF names) from a dynamic-expr tree.
 
@@ -1046,26 +2291,138 @@ def _dyn_tree_fields(node):
     return out
 
 
-def value_expression_unmappable(expr, target="cff"):
-    """Given a header/redirect/rewrite dynamic action value expression, return
-    a reason string if it references any non-convertible Cloudflare field, else
-    None. Parse failures are treated as convertible here (the generator has its
-    own fallback); this only flags fields with no CloudFront source.
+# ── AST-NATIVE validation cores (round-26 finding 4: parse ONCE, pass the tree) ──
+# The context→emit-target map (redirect/rewrite/header values are all request-phase; only a
+# response header can source response-only fields like http.response.code).
+_CONTEXT_TARGET = {"response_header": "response"}
 
-    ``target`` is the phase the value is emitted in so response-only fields
-    (http.response.code) are flagged when used in a request-phase value
-    (redirect target, rewrite path/query) — matching the generator's
-    target-aware _field_is_mappable.
-    """
-    try:
-        tree = parse_dynamic_expression(expr)
-    except Exception:
-        return None
+
+def context_target(context):
+    """The field-source `target` phase for an emit context (round-26)."""
+    return _CONTEXT_TARGET.get(context, "cff")
+
+
+def find_unmappable_fields(tree, target="cff"):
+    """AST-native: return a reason for the FIRST field in `tree` with no CloudFront source, else
+    None. The tree-native core of value_expression_unmappable — callers that already parsed pass
+    the tree so there's no re-parse (round-26 finding 4)."""
     for f in _dyn_tree_fields(tree):
         ok, reason = field_convertibility(f, target)
         if not ok:
             return reason
     return None
+
+
+def validate_ast_node_schema(node):
+    """STRICT structural schema for a parsed dynamic-expr AST node (round-27 finding 3). Returns a
+    reason for the FIRST malformed node, else None. This is the shape gate the result-type and
+    signature checks ASSUME but never enforced — a persisted/hand-built/JSON-reloaded AST could
+    carry a literal dict/list/None (str()-ified by the generator into a Python-repr string), a
+    field with a non-string/empty value, or a func_call whose args isn't a list, and still pass the
+    old checks. Every node must be EXACTLY one of:
+      - literal   : {type:"literal", value: str|int|float|bool}  (NO dict/list/None value)
+      - field     : {type:"field",   value: non-empty str}
+      - func_call : {type:"func_call", func: non-empty str, args: list}  (recurse into args)
+    Unknown `type`, unknown extra keys, or a wrong value type → a reason. Recurses func_call args.
+    NOTE: bool is a subclass of int — a boolean literal is allowed here (it's a real CF type)."""
+    if not isinstance(node, dict):
+        return f"AST node must be an object, got {type(node).__name__}"
+    ntype = node.get("type")
+    if ntype == "literal":
+        extra = set(node) - {"type", "value"}
+        if extra:
+            return f"literal node has unknown field(s) {sorted(extra)}"
+        v = node.get("value")
+        # bool is intentionally allowed (isinstance(True, int) is True, but a boolean literal is a
+        # legal Cloudflare type). Reject dict/list/None and anything else.
+        if not isinstance(v, (str, int, float, bool)):
+            return (f"literal value must be a string, number, or boolean, got "
+                    f"{type(v).__name__} ({v!r}) — not a source-expressible literal")
+        return None
+    if ntype == "field":
+        extra = set(node) - {"type", "value"}
+        if extra:
+            return f"field node has unknown field(s) {sorted(extra)}"
+        v = node.get("value")
+        if not (isinstance(v, str) and v != ""):
+            return f"field node value must be a non-empty string, got {v!r}"
+        return None
+    if ntype == "func_call":
+        extra = set(node) - {"type", "func", "args"}
+        if extra:
+            return f"func_call node has unknown field(s) {sorted(extra)}"
+        func = node.get("func")
+        if not (isinstance(func, str) and func != ""):
+            return f"func_call node func must be a non-empty string, got {func!r}"
+        args = node.get("args")
+        if not isinstance(args, list):
+            return f"func_call node args must be a list, got {type(args).__name__}"
+        for a in args:
+            bad = validate_ast_node_schema(a)
+            if bad:
+                return bad
+        return None
+    return f"AST node has unknown or missing type {ntype!r}"
+
+
+def _ast_func_names(node):
+    """Collect every function name used ANYWHERE in a parsed dynamic-expr AST (recursive). The
+    SOURCE-policy narrow must see NESTED funcs (e.g. the `len` in lower(len(...))), not just the
+    outermost call."""
+    names = set()
+    if isinstance(node, dict):
+        if (node.get("type") == "func_call" or "func" in node) and node.get("func"):
+            names.add(node["func"])
+        for _v in node.values():
+            names |= _ast_func_names(_v)
+    elif isinstance(node, list):
+        for _it in node:
+            names |= _ast_func_names(_it)
+    return names
+
+
+def validate_dynamic_tree(tree, context, target="cff", source=True):
+    """AST-native: the FULL faithful-conversion proof on an already-parsed tree. Returns a reason
+    on the first failure, else None. Runs (in order) the STRICT NODE SCHEMA, the field-source
+    screen, the signature/context/node-shape contract, and the string-result-type requirement — the
+    proofs that were spread across value_expression_unmappable + value_expression_type_unconvertible,
+    but on ONE tree (round-26 finding 4). Used by lower_dynamic_value AND the hard-gate re-verifier.
+    The node-schema runs FIRST so a structurally-bogus reloaded AST (literal dict/None, field with
+    no value) is rejected before any type inference trusts it (round-27 finding 3)."""
+    schema_bad = validate_ast_node_schema(tree)
+    if schema_bad:
+        return schema_bad
+    unmap = find_unmappable_fields(tree, target)
+    if unmap:
+        return unmap
+    sig = check_dynamic_expression_signature(tree, context)
+    if sig:
+        return sig
+    # SOURCE-policy narrow (conversion-policy authority): a USER value (source=True) may use ONLY the
+    # SOURCE_CONVERTIBLE_FUNCTIONS core. SEPARATE from the source-agnostic signature contract above, so
+    # the renderer/contract tests keep exercising every function. INTERNAL producers (source=False,
+    # e.g. True-Client-IP's to_string) skip this; a genuinely-unknown token was already caught above.
+    if source:
+        for _fn in _ast_func_names(tree):
+            if _fn in _DYN_FUNC_CONTRACT and _fn not in SOURCE_CONVERTIBLE_FUNCTIONS:
+                return f"function {_fn!r} is unsupported by conversion policy"
+    rtype = dynamic_expression_result_type(tree)
+    if rtype != _TYPE_STRING:
+        return (f"non-string result type ({rtype}); a value must be a string — convert it "
+                "explicitly (to_string / join / encode_base64)")
+    return None
+
+
+def value_expression_unmappable(expr, target="cff"):
+    """String-input wrapper around find_unmappable_fields (kept for compat/tests + the redirect/
+    rewrite/condition callers that still hold a string). Parse failure → a reason (round-15).
+    PRODUCTION lowering uses the tree-native API; do not add new string-input callers."""
+    try:
+        tree = parse_dynamic_expression(expr)
+    except Exception as e:
+        return (f"dynamic value expression {expr!r} could not be parsed ({e}); "
+                f"CloudFront has no faithful equivalent")
+    return find_unmappable_fields(tree, target)
 
 
 def condition_unmappable_fields(cond, target="cff"):

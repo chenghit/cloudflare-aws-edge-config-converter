@@ -2,6 +2,8 @@
 
 # 限制与注意事项
 
+> **转换边界以此为准**：[docs/conversion-policy.md](./conversion-policy.md) 是权威规范，定义了哪些能转换（EXACT / LOSSY）、哪些报告为 `NON_CONVERTIBLE`、以及哪些 Cloudflare 功能根本不读取。本文说明面向用户的注意事项，以规范文档为准。
+
 ## CDN Pipeline——能转换的内容
 
 CDN pipeline 把以下 Cloudflare 规则类型转换为 CloudFront 等价物：
@@ -62,8 +64,7 @@ Cloudflare 把完整请求转发给源站；CloudFront 则会剥掉一切不在 
 | `ip.src in $list_name`（含 CIDR） | 所有规则类型 | CFF `event.viewer.ip` 是单个 IP，无法做 CIDR 匹配 | AWS WAF IP set + Count action + 自定义 header（见 conversion_report.md 中的 WAF + Custom Header Pattern） |
 | `serve_stale` (SWR/SIE) | Cache Rules | CloudFront cache policy 没有对应项 | Origin `Cache-Control: stale-while-revalidate`（有限支持） |
 | `origin_error_page_passthru` | Cache Rules | 需要 Lambda@Edge 拦截 origin 错误 | Lambda@Edge origin-response |
-| 自定义错误 + inline content > 1 KB | Custom Error Rules | 超过 CloudFront KVS 1024 字符 value 限制 | 将错误页面部署为 origin 上的静态文件 + `response_page_path` |
-| 自定义错误 + inline content + response-phase 条件 | Custom Error Rules | CFF viewer-response 在 4xx+ 时不执行 | 将错误页面部署为 origin 上的静态文件 |
+| 自定义错误带**任何** inline content（`content`） | Custom Error Rules | CloudFront 原生 `custom_error_response` 没有 inline body，工具不再生成 CFF+KVS 内联错误页（该路径已退役） | 将错误页面部署为 origin 上的静态文件 + `response_page_path` |
 | 自定义错误 + 不支持的状态码 | Custom Error Rules | CloudFront 只支持：400、403、404、405、414、416、500–504 | Lambda@Edge origin-response |
 | 自定义错误 + 动态 headers/逻辑 | Custom Error Rules | CFF 和 L@E viewer-response 在 4xx+ 时不执行 | Lambda@Edge origin-response |
 | `browser_check` | Configuration | CloudFront 没有对应项 | AWS WAF Bot Control |
@@ -75,16 +76,13 @@ Cloudflare 把完整请求转发给源站；CloudFront 则会剥掉一切不在 
 | 非 path 表达式的 Cloud Connector | Cloud Connector | CloudFront cache behaviors 只能按 path pattern 匹配 | 手动配置 origin |
 | 不允许/只读的 response headers | Response Header Transform | CloudFront 限制修改某些 headers（`Via`、`X-Amz-Cf-*` 等） | N/A |
 
-### CORS `credentials: true` + 通配符 origin
+### CORS `credentials: true` + 通配符 origin（不转换，报告 NON_CONVERTIBLE）
 
-Cloudflare 允许 `Access-Control-Allow-Credentials: true` 与 `Access-Control-Allow-Origin: *` 同时使用。CloudFront 的 Response Headers Policy 按照 CORS 规范拒绝此组合。
+Cloudflare 规则如果同时设置 `Access-Control-Allow-Origin: *` 和 `Access-Control-Allow-Credentials: true`，本工具不转换，整条规则报告为 `NON_CONVERTIBLE`。
 
-工具通过 TLD 通配符模式（`*.com`、`*.net`、`*.io` 等约 60 个常见 TLD）替代 `*` 来解决此问题。CloudFront 将请求的 `Origin` header 与这些模式匹配，并回显实际的 origin 值，符合 CORS 规范。
+这个组合被 WHATWG Fetch（CORS）标准禁止。带凭证的响应如果 `Access-Control-Allow-Origin` 是 `*`，浏览器会拒绝。注意，拒绝的是浏览器，不是 CloudFront 的 Response Headers Policy。但就算把它生成出来，带凭证的请求也拿不到浏览器能接受的响应。CloudFront 没有忠实的等价配置，所以工具把它列进转换报告，而不是去猜。请在源头修正：改成具体的允许 origin，不要用 `*`；或者由源站返回正确的、按 origin 区分的 CORS 响应。
 
-限制：
-- 不在默认列表中的 TLD 的 origin 不会匹配。按需在 `policies.tf` 中添加模式。
-- 不带 scheme 的通配符模式（`*.com`）不匹配带非标准端口的 origin（如 `http://example.com:8080`）。CloudFront 仅在 80/443 端口提供服务，因此这只影响来自非标准端口 origin 的跨域请求。
-- 当 Cloudflare 规则使用 `add` 操作（而非 `set`）时，`origin_override` 设为 `false`。此模式下，CloudFront 仅在请求包含 `Origin` header 时返回 CORS headers。Cloudflare 无论请求是否包含 `Origin` header 都会添加 CORS headers。此差异仅影响非浏览器客户端（curl、SDK 等）— 浏览器在跨域请求时始终发送 `Origin`。
+早期版本试过用 TLD 通配符绕过，把 `*` 换成 `*.com`、`*.net` 等约 60 个 TLD。这个绕过已经删除，因为它会悄悄改变 CORS 语义，不是忠实转换。
 
 ### CloudFront Function 大小限制
 
@@ -194,5 +192,5 @@ AI 生成的配置在上生产前必须人工审查。重点关注：
 ### 本工具不配置的功能
 
 - **CloudFront access logging**——涉及 S3 bucket、日志格式、共享还是按域名分等决策，超出迁移范围。
-- **Lambda@Edge origin-response**——当某规则需要它时（default-cache-behavior 的 TTL handler），这是**全自动**的：IAM role、archive、Lambda 函数和 `main.tf` 中的 `qualified_arn` 引用都由 scaffold 生成。工具**不**为 custom-error 规则生成 Lambda@Edge origin-response——那些会转成原生 `custom_error_response`、CFF+KVS 内联错误页，或标记为 non-convertible（见上面的 Custom Error 行）。viewer 事件也没有 Lambda@Edge——超过 10 KB 的 CFF 会报告 `SIZE_EXCEEDED` 交由人工处理，绝不拆分到 L@E。
+- **Lambda@Edge origin-response**——当某规则需要它时（default-cache-behavior 的 TTL handler），这是**全自动**的：IAM role、archive、Lambda 函数和 `main.tf` 中的 `qualified_arn` 引用都由 scaffold 生成。工具**不**为 custom-error 规则生成 Lambda@Edge origin-response，也不再生成 CFF+KVS 内联错误页（该路径已退役）。Custom error 规则只有在 CloudFront 原生 `custom_error_response` 能表达 status/path/remap 时才转换，否则报告为 non-convertible（见上面的 Custom Error 行）。viewer 事件也没有 Lambda@Edge——超过 10 KB 的 CFF 会报告 `SIZE_EXCEEDED` 交由人工处理，绝不拆分到 L@E。
 - **DNS 切换**——工具会生成 CloudFront distributions，但不会动 DNS 记录。确认配置没问题后，你自己更新 DNS 指向 CloudFront。

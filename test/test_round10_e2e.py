@@ -189,6 +189,111 @@ def run(stage, *args):
     return p.returncode, p.stdout + p.stderr
 
 
+def _write_min_validatejs_fixture(cdn, warnings, completeness="COMPLETE_EXACT"):
+    """Build the MINIMAL on-disk inputs cdn-validate-js.py needs: one no-op domain whose
+    viewer_request.js PASSES validation, plus a cdn_summary.json carrying `warnings` and the
+    `completeness` field. Used by the finding-2 integration test (the FINAL STATUS mapping) and
+    the Step-6 completeness surfacing test."""
+    san = "h_example_com"
+    ir_dir = os.path.join(cdn, "ir", "final")
+    fn_dir = os.path.join(cdn, "terraform", "domains", san, "functions")
+    os.makedirs(ir_dir); os.makedirs(fn_dir)
+    ir = {"metadata": {"hostname": "h.example.com", "sanitized_name": san},
+          "cache_behaviors": [{"path_pattern": "default", "viewer_request_ops": [],
+                               "viewer_response_ops": [], "origin": {"s3_origin": False}}]}
+    with open(os.path.join(ir_dir, "h.example.com.json"), "w") as f:
+        json.dump(ir, f)
+    # A no-op viewer_request handler that passes the structure checks (handler + return).
+    with open(os.path.join(fn_dir, f"{san}_viewer_request.js"), "w") as f:
+        f.write("async function handler(event) {\n  var request = event.request;\n"
+                "  return request;\n}\n")
+    with open(os.path.join(cdn, "cdn_summary.json"), "w") as f:
+        json.dump({"domains": 1, "total_policies": 0, "non_convertible_items": 0,
+                   "completeness": completeness,
+                   # fixed ignored-feature breakdown so the RESULT surfacing is deterministic (Block 3):
+                   # count is FEATURES (Snippets = 1) though it has 2 evidence files.
+                   "ignored_features": {"active_abandoned": ["Snippets"], "active_abandoned_count": 1,
+                                        "active_abandoned_files": ["Snippet-Rules.txt", "Snippets.txt"],
+                                        "active_abandoned_files_count": 2, "native_or_no_action": [],
+                                        "handled_or_reported_by_waf_pipeline": [], "unknown_active": []},
+                   "warnings": warnings, "skipped_domains": []}, f)
+
+
+def test_validatejs_quota_status():
+    """Integration (finding 2/5): the REAL cdn-validate-js.py FINAL STATUS, driven by a
+    cdn_summary.json — a QUOTA-RAISE-only run must be STATUS: BLOCKED + ACTION: REQUEST_QUOTA
+    (was wrongly STATUS: OK), a clean run STATUS: OK, and a QUOTA-REDESIGN run BLOCKED + FIX."""
+    print("== INTEGRATION: cdn-validate-js final STATUS vs quota warnings (finding 2) ==")
+    # (label, warnings, want_status, want_action, want_completeness). completeness is ORTHOGONAL to
+    # STATUS (Step-6 Block 2): an NC run stays STATUS: OK (NC is not an execution failure) but is
+    # PARTIAL_WITH_NC; a quota-BLOCKED run can still be COMPLETE_EXACT (the conversion is exact, only
+    # the deploy is gated). Both directions are asserted here.
+    cases = [
+        ("clean-exact", [], "STATUS: OK", None, "COMPLETE_EXACT"),
+        ("clean-with-nc", [], "STATUS: OK", None, "PARTIAL_WITH_NC"),
+        ("raise-only", ["QUOTA-RAISE — RHP p1 Content-Security-Policy length: 3000 exceeds "
+                        "the default quota of 1783 (SOFT)."], "STATUS: BLOCKED", "REQUEST_QUOTA",
+         "COMPLETE_EXACT"),
+        ("redesign-only", ["QUOTA-REDESIGN — KVS: 2MB exceeds the HARD limit of 1MB."],
+         "STATUS: BLOCKED", "FIX", "COMPLETE_EXACT"),
+        ("both", ["QUOTA-RAISE — CSP too long.", "QUOTA-REDESIGN — KVS too big."],
+         "STATUS: BLOCKED", "FIX", "COMPLETE_EXACT"),
+    ]
+    for label, warnings, want_status, want_action, want_completeness in cases:
+        tmp = tempfile.mkdtemp(prefix=f"vjq_{label}_")
+        try:
+            cdn = os.path.join(tmp, "cloudflare-to-aws-cdn")
+            os.makedirs(cdn)
+            _write_min_validatejs_fixture(cdn, warnings, completeness=want_completeness)
+            rc, log = run("cdn-validate-js.py", cdn)
+            check(f"validate-js [{label}] -> {want_status}", want_status in log, log[-500:])
+            check(f"validate-js [{label}] -> COMPLETENESS: {want_completeness} (separate from STATUS)",
+                  f"COMPLETENESS: {want_completeness}" in log, log[-500:])
+            check(f"validate-js [{label}] -> IGNORED_FEATURES: 1 (separate axis, from summary)",
+                  "IGNORED_FEATURES: 1" in log, log[-500:])
+            if want_action:
+                check(f"validate-js [{label}] -> ACTION: {want_action}",
+                      f"ACTION: {want_action}" in log, log[-500:])
+            # exit code stays 0 for OK and BLOCKED (artifact generated); never a crash.
+            check(f"validate-js [{label}] exit 0 (OK/BLOCKED are both exit 0)", rc == 0,
+                  f"rc={rc} {log[-300:]}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # finding 3: cdn-finalize --csp-quota rejects invalid values at the CLI (no clamp). Runs
+    # against a nonexistent output dir — the arg is validated BEFORE any file work, so an
+    # invalid value must fail with the arg error, never reach "output dir not found".
+    print("== INTEGRATION: cdn-finalize --csp-quota CLI validation (finding 3) ==")
+    for bad in ("0", "-5", "9000", "abc"):
+        rc, log = run("cdn-finalize.py", "/nonexistent/x", "--csp-quota", bad)
+        check(f"finalize --csp-quota {bad} -> rejected (exit 1, arg error)",
+              rc == 1 and "--csp-quota" in log, f"rc={rc} {log[-300:]}")
+
+
+def test_chunk_rejects_add_op():
+    """Integration (round-19 finding 2): the chunk validator must REJECT a hand-injected
+    add_*_header op — header `add` is non-convertible, so an add op in an IR is a producer bug
+    that would otherwise get a spurious EXACT claim + CFF artifact downstream."""
+    print("== INTEGRATION: cdn-validate-chunk rejects add_*_header op (finding 2) ==")
+    _cspec = _ilu.spec_from_file_location("cdn_chunk", os.path.join(SCRIPTS, "cdn-validate-chunk.py"))
+    _chunk = _ilu.module_from_spec(_cspec)
+    sys.path.insert(0, SCRIPTS)
+    _cspec.loader.exec_module(_chunk)
+    for _optype, _ops_key in (("add_request_header", "viewer_request_ops"),
+                              ("add_response_header", "viewer_response_ops")):
+        ir = {"metadata": {"hostname": "h.example.com", "sanitized_name": "h_example_com",
+                           "apex_domain": "example.com", "cert_domain": "example.com",
+                           "origin_type": "custom", "kvs_requirements": {}},
+              "cache_behaviors": [{"path_pattern": "default", "precedence": 0,
+                                   "viewer_request_ops": [], "viewer_response_ops": [],
+                                   _ops_key: [{"type": _optype, "cf_source_rule": "x",
+                                               "params": {"name": "y"}, "condition": {"always": True}}]}]}
+        errors, _w = _chunk.validate_domain(ir, "h.example.com.json")
+        check(f"chunk validator flags {_optype} as forbidden",
+              any("forbidden op type" in e and _optype in e for e in errors),
+              f"errors={errors}")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="r10_e2e_")
     try:
@@ -237,12 +342,20 @@ def main():
         print("== Stage 9: Validate JS ==")
         rc, log = run("cdn-validate-js.py", cdn)
         check("validate-js OK (both domains pass)", "STATUS: OK" in log, log[-800:])
+        check("Stage-9 RESULT carries IGNORED_FEATURES (Block 3 wired end-to-end)",
+              "IGNORED_FEATURES:" in log, log[-800:])
 
         # ── Behavior assertions on the generated artifacts ──────────────────
         assert_artifacts(cdn)
         assert_cff_scope()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+    # Standalone integration: final STATUS vs quota warnings (finding 2/5) — its own
+    # minimal fixtures, independent of the big pipeline run above.
+    test_validatejs_quota_status()
+    # Standalone integration: the chunk validator rejects a forbidden `add` op (round-19).
+    test_chunk_rejects_add_op()
 
     print()
     if FAILURES:

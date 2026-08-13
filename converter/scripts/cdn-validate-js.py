@@ -14,7 +14,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdn_common import QUOTA_REDESIGN, QUOTA_TAGS, load_summary_or_fatal, emit_result
+from cdn_common import (QUOTA_RAISE, QUOTA_REDESIGN, QUOTA_TAGS,
+                        load_summary_or_fatal, emit_result)
 
 CFF_SIZE_LIMIT = 10240
 LAMBDA_SIZE_LIMIT = 1_048_576  # 1 MB
@@ -124,8 +125,13 @@ def validate_domain(ir, output_dir, manifest=None):
             coverage_issues.append(f"redirect op missing statusCode")
         elif op_type == "rewrite":
             params = op.get("params", {})
-            wants_path = bool(params.get("path") or params.get("path_expression"))
-            wants_query = bool(params.get("query_expression") or params.get("new_query"))
+            # FIELD PRESENCE, not truthiness (round-26 finding 5): a rewrite op carries Lowered
+            # values (path_lowered / query_lowered). A clear-query is a query_lowered whose
+            # empty_behavior is clear_query — no separate param — so presence of query_lowered
+            # alone means "wants a querystring assignment" (covers empty-string + clear cases the
+            # old bool(new_query) missed).
+            wants_path = "path_lowered" in params
+            wants_query = "query_lowered" in params
             if wants_path and "request.uri =" not in vr_js and "request.uri=" not in vr_js:
                 coverage_issues.append("rewrite op missing request.uri assignment")
             # Look for the ASSIGNMENT (`request.querystring =`), not a bare
@@ -142,10 +148,6 @@ def validate_domain(ir, output_dir, manifest=None):
                 coverage_issues.append("origin_override missing updateRequestOrigin in CFF")
         elif op_type == "bulk_redirect" and "redirect:" not in vr_js:
             coverage_issues.append(f"bulk_redirect missing KVS lookup")
-        elif op_type == "serve_error_inline":
-            kvs_key = op.get("params", {}).get("kvs_key", "")
-            if kvs_key and kvs_key not in vr_js:
-                coverage_issues.append(f"serve_error_inline missing KVS key: {kvs_key}")
     checks.append({
         "name": "ir_coverage",
         "status": "FAIL" if coverage_issues else "PASS",
@@ -269,6 +271,24 @@ def _report(hostname, overall, checks):
     }
 
 
+def deploy_block_decision(warnings):
+    """Classify quota warnings into a deploy-block decision (round-14 finding 2). BOTH a
+    QUOTA-REDESIGN (HARD limit) and a QUOTA-RAISE (raisable, but deploy is blocked until the
+    increase is granted) make the artifact NOT deployable as-is → STATUS: BLOCKED. They differ
+    only in the fix:
+      REDESIGN → ACTION FIX          (reduce/redesign the source; no quota bump exists)
+      RAISE    → ACTION REQUEST_QUOTA (request the increase, then deploy unchanged)
+    A run with BOTH is treated as FIX (the redesign is the harder blocker and must happen
+    regardless). Pure function of the warnings list so it's unit-testable without a pipeline.
+    Returns a dict: {blocked, redesign, raise_, action, items}."""
+    redesign = [w for w in warnings if str(w).startswith(QUOTA_REDESIGN)]
+    raise_ = [w for w in warnings if str(w).startswith(QUOTA_RAISE)]
+    blocked = bool(redesign or raise_)
+    action = "FIX" if redesign else ("REQUEST_QUOTA" if raise_ else None)
+    return {"blocked": blocked, "redesign": redesign, "raise_": raise_,
+            "action": action, "items": redesign + raise_}
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: cdn-validate-js.py <output_dir>", file=sys.stderr)
@@ -371,9 +391,20 @@ def main():
     # do NOT re-prefix — so the tag reaches the agent.
     for w in _s.get("warnings", []):
         summary_lines.append(w if w.startswith(QUOTA_TAGS) else f"QUOTA/WARNING — {w}")
-    # Any HARD-limit breach makes the config undeployable as-is (no quota bump
-    # exists) — surface it as a distinct deploy blocker the agent must not skip.
-    redesign = [w for w in _s.get("warnings", []) if w.startswith(QUOTA_REDESIGN)]
+    # Deploy-block decision (finding 2): BOTH QUOTA-REDESIGN (HARD) and QUOTA-RAISE
+    # (raisable, but blocked until granted) make the artifact undeployable as-is →
+    # STATUS: BLOCKED, differing only in ACTION (FIX vs REQUEST_QUOTA). One shared,
+    # unit-testable classifier so the ---RESULT--- status can't drift from the report's
+    # "deploy blocked" wording.
+    _block = deploy_block_decision(_s.get("warnings", []))
+    # Ignored-feature summary for the RESULT (Block 3): active Cloudflare features CloudFront won't
+    # get — a SEPARATE axis from STATUS and COMPLETENESS. Count + a truncated name list; the full
+    # breakdown (native / waf / unknown buckets + evidence files) lives in cdn_summary.json.
+    _ign = _s.get("ignored_features", {})
+    _ign_count = _ign.get("active_abandoned_count", 0)
+    _ign_names = ", ".join(_ign.get("active_abandoned", [])) or "none"
+    if len(_ign_names) > 200:
+        _ign_names = _ign_names[:197] + "… (full list in cdn_summary.json)"
     # ACM is the hardest prerequisite: each distribution reads its cert ARN from a
     # cert_arn_<san> variable, and an empty value FAILS `terraform plan` (a var
     # validation naming the exact SAN coverage the host needs). This is a deploy
@@ -421,21 +452,43 @@ def main():
 
     if fail_count == 0:
         fields = {"DOMAINS": len(results), "PASSED": pass_count,
+                  # CONVERSION completeness (from cdn-finalize's ledger scan) — SEPARATE from STATUS:
+                  # COMPLETE_EXACT = every claim EXACT; PARTIAL_WITH_NC = some NC/LOSSY. An expected
+                  # NC does NOT flip STATUS (a completed run stays OK); this field carries the "some
+                  # source wasn't converted, read the report" signal without conflating it with a
+                  # deploy/execution problem.
+                  "COMPLETENESS": _s.get("completeness", "UNKNOWN"),
+                  "IGNORED_FEATURES": _ign_count,
+                  "IGNORED_FEATURE_NAMES": _ign_names,
                   "DEPLOY_SUMMARY": summary_lines}
-        if redesign:
-            # A HARD-limit (QUOTA-REDESIGN) breach → structural STATUS: BLOCKED
-            # (per SCRIPT_STANDARDS, same class as the WAF hard-cap block), not a
-            # free-text note under OK. Exit stays 0: the JS is valid and the
-            # pipeline completed; BLOCKED carries the "don't deploy" signal.
-            fields["BLOCKED_COUNT"] = len(redesign)
-            fields["BLOCKED_ITEMS"] = redesign
-            fields["ACTION"] = "FIX"
-            fields["CONTEXT"] = (
-                "The Terraform was generated and the JS is valid, but the item(s) above "
-                "breach a HARD CloudFront limit (not raisable via Service Quotas/Support). "
-                "Deploy will be REJECTED as-is. Do NOT `terraform apply` — reduce/redesign "
-                "the named item in the source Cloudflare config (e.g. split KVS data across "
-                "stores), then re-run.")
+        if _block["blocked"]:
+            # A quota breach (HARD redesign OR raisable-but-ungranted) → structural
+            # STATUS: BLOCKED (per SCRIPT_STANDARDS, same class as the WAF hard-cap
+            # block), not a free-text note under OK. Exit stays 0: the JS is valid and
+            # the pipeline completed; BLOCKED carries the "don't deploy" signal. ACTION
+            # distinguishes the fix: FIX (redesign) vs REQUEST_QUOTA (raise, finding 2).
+            fields["BLOCKED_COUNT"] = len(_block["items"])
+            fields["BLOCKED_ITEMS"] = _block["items"]
+            fields["ACTION"] = _block["action"]
+            if _block["redesign"]:
+                fields["CONTEXT"] = (
+                    "The Terraform was generated and the JS is valid, but the item(s) above "
+                    "breach a HARD CloudFront limit (not raisable via Service Quotas/Support). "
+                    "Deploy will be REJECTED as-is. Do NOT `terraform apply` — reduce/redesign "
+                    "the named item in the source Cloudflare config (e.g. split KVS data across "
+                    "stores), then re-run." + (
+                        " Some items are also raisable quotas (QUOTA-RAISE) — request those "
+                        "increases too, but the redesign above is required regardless."
+                        if _block["raise_"] else ""))
+            else:
+                fields["CONTEXT"] = (
+                    "The Terraform was generated and the JS is valid, but the item(s) above "
+                    "exceed a DEFAULT CloudFront quota. The conversion is correct and deploys "
+                    "UNCHANGED once the quota is raised — but do NOT `terraform apply` until "
+                    "the increase is granted (deploy would be rejected meanwhile). Request the "
+                    "increase (see each QUOTA-RAISE line for where), then apply. If the account "
+                    "ALREADY has a sufficient quota, re-run cdn-finalize with --csp-quota N to "
+                    "declare it and clear this block.")
             fields["POST_ACTION"] = post_action
             emit_result("BLOCKED", **fields)
         else:
@@ -447,19 +500,24 @@ def main():
             for r in results if r["overall_status"] == "FAIL"
         ]
         # A JS-validation failure on one domain must NOT bury a deploy blocker on
-        # another: carry DEPLOY_SUMMARY here too, and if a QUOTA-REDESIGN breach
-        # exists surface it as structured BLOCKED_ITEMS (it survives fixing the
+        # another: carry DEPLOY_SUMMARY here too, and if a quota breach (redesign OR
+        # raise) exists surface it as structured BLOCKED_ITEMS (it survives fixing the
         # failed domains, so the agent must see it).
         fields = {"PASSED": pass_count, "FAILED": fail_count,
+                  "COMPLETENESS": _s.get("completeness", "UNKNOWN"),
+                  "IGNORED_FEATURES": _ign_count,
                   "FAILED_ITEMS": failed_items, "ACTION": "FIX",
                   "CONTEXT": f"{fail_count} domain(s) failed JS validation"}
-        if redesign:
-            fields["BLOCKED_COUNT"] = len(redesign)
-            fields["BLOCKED_ITEMS"] = redesign
+        if _block["blocked"]:
+            fields["BLOCKED_COUNT"] = len(_block["items"])
+            fields["BLOCKED_ITEMS"] = _block["items"]
             fields["BLOCKED_NOTE"] = (
-                "A HARD CloudFront limit is exceeded (see BLOCKED_ITEMS) and cannot be "
-                "raised. Independent of the JS failures above — even after those are fixed, "
-                "do NOT deploy until the source is redesigned. Report this to the user.")
+                "A CloudFront quota is exceeded (see BLOCKED_ITEMS): "
+                + ("HARD limit(s) requiring source redesign" if _block["redesign"] else "")
+                + (" and " if _block["redesign"] and _block["raise_"] else "")
+                + ("raisable quota(s) requiring a quota increase" if _block["raise_"] else "")
+                + ". Independent of the JS failures above — even after those are fixed, do NOT "
+                "deploy until this is resolved. Report this to the user.")
         fields["DEPLOY_SUMMARY"] = summary_lines
         # Same POST_ACTION as the OK/BLOCKED paths: even with a domain failing JS
         # validation, the ACM/quota/S3 directives (and any "See POST_ACTION"

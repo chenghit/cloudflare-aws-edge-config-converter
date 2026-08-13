@@ -74,16 +74,6 @@ def generate_test_script(ir):
                     "expect_location": target,
                 })
 
-            elif otype == "serve_error_inline":
-                status = params.get("status_code", 500)
-                ct = params.get("content_type", "text/plain")
-                tests.append({
-                    "name": f"error page: {desc or test_path}",
-                    "path": test_path,
-                    "expect_status": status,
-                    "expect_content_type": ct,
-                })
-
             elif otype == "bulk_redirect":
                 # Tested separately from kvs_data
                 pass

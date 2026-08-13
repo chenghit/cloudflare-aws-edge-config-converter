@@ -251,9 +251,11 @@ Check exit code:
 
 **Stage 5: Finalize**
 ```bash
-python3 "$REPO/converter/scripts/cdn-finalize.py" "$OUT/cloudflare-to-aws-cdn" [skipped_domains.json]
+python3 "$REPO/converter/scripts/cdn-finalize.py" "$OUT/cloudflare-to-aws-cdn" [skipped_domains.json] [--csp-quota N]
 ```
-If there are SKIPPED domains, write a JSON file with `[{"hostname": "...", "reason": "..."}]` and pass it as the second argument.
+If there are SKIPPED domains, write a JSON file with `[{"hostname": "...", "reason": "..."}]` and pass it as the second positional argument.
+
+`--csp-quota N` (optional): the account's effective Content-Security-Policy length quota. The default is 1783 (the CloudFront default). If a converted CSP exceeds the effective quota, the final validator reports `STATUS: BLOCKED` with `ACTION: REQUEST_QUOTA` (the conversion is correct, but deploy is blocked until the increase is granted). If the target account has ALREADY been granted a higher CSP quota, pass its actual value (a positive integer, max 8192) to declare it and clear that block. An invalid value (zero, negative, or over 8192) is rejected — the pipeline stops with an error.
 
 Check exit code:
 - 0 → proceed to Stage 6
@@ -312,8 +314,11 @@ python3 "$REPO/converter/scripts/cdn-validate-js.py" "$OUT/cloudflare-to-aws-cdn
 ```
 Parse the `---RESULT---` block:
 - `STATUS: OK` → all domains passed, proceed to Step 4 (final reporting)
-- `STATUS: BLOCKED` → JS is valid and the Terraform is written, but `BLOCKED_ITEMS` breach a HARD CloudFront limit (not raisable — e.g. a KVS store estimated over the 5 MB per-store cap) that makes it undeployable as-is. Report `BLOCKED_ITEMS`/`CONTEXT` to the user, tell them to reduce/redesign the named item in the source (e.g. split KVS data across stores) and re-run. Do NOT present it as ready to deploy. Still relay the DEPLOY_SUMMARY.
-- `STATUS: ERROR` → some domains failed validation. Report failed domains and their check failures to user. (If `BLOCKED_ITEMS`/a QUOTA-REDESIGN line also appears, surface it too — it survives fixing the failed domains.)
+- `STATUS: BLOCKED` → JS is valid and the Terraform is written, but `BLOCKED_ITEMS` make it undeployable as-is. Do NOT present it as ready to deploy; report `BLOCKED_ITEMS`/`CONTEXT` and relay the DEPLOY_SUMMARY. **Branch on `ACTION`, not on the assumption that BLOCKED == hard limit:**
+  - `ACTION: FIX` → a HARD CloudFront limit (not raisable — e.g. a KVS store over the per-store cap). Tell the user to reduce/redesign the named item in the source (e.g. split KVS data across stores) and re-run.
+  - `ACTION: REQUEST_QUOTA` → the conversion is CORRECT and deploys unchanged, but a raisable account quota (e.g. the Content-Security-Policy length quota, default 1783) must be increased first. Tell the user to request the increase for the named item (see each `QUOTA-RAISE` line), then apply — no source change is needed. If the account ALREADY has a sufficient quota, re-run Stage 5 with `--csp-quota N` to declare it and clear the block.
+  - Both may be present (`ACTION: FIX` wins) — `BLOCKED_ITEMS` keeps both tagged lines and `CONTEXT` requires BOTH remediations.
+- `STATUS: ERROR` → some domains failed validation. Report failed domains and their check failures to user. (If `BLOCKED_ITEMS` also appears — a `QUOTA-REDESIGN` or `QUOTA-RAISE` line — surface it too, with the matching remediation; it survives fixing the failed domains.)
 - `STATUS: FATAL` → a prerequisite is missing. Read `CONTEXT` — it names which one, and the fix depends on it: if the IR directory or IR files are missing, an earlier stage failed to produce them (re-run from Stage 3 preprocess, NOT just Stage 5/8); if `cdn_summary.json` is missing/unreadable/malformed, re-run Stage 5 (finalize) and Stage 8 (generate-js), which write and augment it. Report `CONTEXT` and stop; don't blindly re-run one fixed set of stages.
 
 ---

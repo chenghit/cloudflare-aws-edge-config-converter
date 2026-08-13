@@ -18,6 +18,9 @@ import sys
 _SCRIPTS = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "converter", "scripts")
+# So the loaded modules' own `import cdn_rhp_capabilities` / `import cdn_expr_parser`
+# resolve against converter/scripts (they run outside a package).
+sys.path.insert(0, _SCRIPTS)
 
 
 def _load(name, filename):
@@ -59,6 +62,13 @@ def check(label, got, expect_substr=None, forbid_substr=None):
 
 def emit(op):
     return " | ".join(_gen._generate_op_js(op, "cff")).strip()
+
+
+def _seed_inventory(ir, rule):
+    """Seed ir['_inventory'] for a phase `rule` exactly as process_domain does, so a
+    focused test that calls _place_result directly can still resolve NC provenance (the
+    ledger channel needs the unit's inventory keys). Mirror of the process_domain step."""
+    ir.setdefault("_inventory", []).extend(_pre._inventory_keys_for_rule(rule))
 
 
 # ── Redirect rule (from_value.target_url) ────────────────────────────────────
@@ -114,18 +124,30 @@ check("bare-field redirect resolves accessor", emit(op),
 op = first_op(_proc.process_rewrite_rule(rewrite_rule("true", path_expr="http.request.uri"), {}, ""))
 check("bare-field rewrite resolves accessor", emit(op),
       expect_substr="request.uri = request.uri", forbid_substr="'http.request.uri'")
+# round-21: a bare ip.src has result type `ip`, not string — Cloudflare requires to_string(ip.src)
+# to use it as a header value. The bare form is now NON_CONVERTIBLE; the wrapped form converts.
 op = first_op(_proc.process_request_header_transform(
     header_rule("true", {"X-IP": {"operation": "set", "expression": "ip.src"}}), {}, ""))
-check("bare-field header ip.src", emit(op),
-      expect_substr="event.viewer.ip", forbid_substr="'ip.src'")
+check("bare ip.src header -> non_convertible (needs to_string, an IP isn't a string)",
+      op.get("type", ""), expect_substr="non_convertible")
+# to_string(ip.src) as a USER header value is NON_CONVERTIBLE (to_string is not source-core under the
+# narrowed policy). The SAME intrinsic converts for the INTERNAL True-Client-IP producer (source=False)
+# and renders event.viewer.ip — that path is covered by test_nc_provenance FINDING-46.
+op = first_op(_proc.process_request_header_transform(
+    header_rule("true", {"X-IP": {"operation": "set", "expression": "to_string(ip.src)"}}), {}, ""))
+check("USER to_string(ip.src) header -> non_convertible (long-tail, source-narrowed)",
+      op.get("type", ""), expect_substr="non_convertible")
 op = first_op(_proc.process_request_header_transform(
     header_rule("true", {"X-H": {"operation": "set", "expression": "http.host"}}), {}, ""))
 check("bare-field header http.host", emit(op),
       expect_substr="request.headers.host.value", forbid_substr="'http.host'")
 
 print("== #7/#8 unmapped action value -> partial convert (non-convertible) ==")
+# X-Str is a plain string field (converts); X-Bot (unmapped) + X-WAF (to_string of an unmapped
+# field) are NC → the mappable one still converts alongside two NC's (round-21: use a genuine
+# string field for the converting header — a bare ip.src is now NC on its own).
 res = _proc.process_request_header_transform(header_rule("true", {
-    "X-IP": {"operation": "set", "expression": "ip.src"},
+    "X-Str": {"operation": "set", "expression": "http.host"},
     "X-Bot": {"operation": "set", "expression": "cf.bot_management.score"},
     "X-WAF": {"operation": "set", "expression": "to_string(cf.waf.score)"},
 }), {}, "")
@@ -166,10 +188,14 @@ print("== no-regression: function-wrapped expressions still work ==")
 op = first_op(_proc.process_redirect_rule(
     redirect_rule("true", target_expr='concat("https://x.com", http.request.uri.path)'), {}, ""))
 check("concat redirect", emit(op), expect_substr="'https://x.com' + request.uri")
+# concat is source-core, but concat(http.host, to_string(ip.src)) NESTS to_string (long-tail) → the
+# source narrow rejects the whole value as NON_CONVERTIBLE (a user value must be source-core
+# THROUGHOUT). concat with all-source-core args converts (see the redirect concat above).
 op = first_op(_proc.process_request_header_transform(
-    header_rule("true", {"X-C": {"operation": "set", "expression": "concat(http.host, ip.src)"}}), {}, ""))
-check("concat header", emit(op),
-      expect_substr="request.headers.host.value + event.viewer.ip")
+    header_rule("true", {"X-C": {"operation": "set",
+        "expression": "concat(http.host, to_string(ip.src))"}}), {}, ""))
+check("USER concat nesting to_string(ip.src) -> non_convertible (nested long-tail, source-narrowed)",
+      op.get("type", ""), expect_substr="non_convertible")
 
 
 # ── #1 full_uri contains/eq/wildcard now truly convertible (was `false`) ──────
@@ -212,13 +238,23 @@ check("subdivision_1 -> Country-Region accessor",
 check("subdivision_2 rule -> non_convertible",
       redirect_cond_js('ip.src.subdivision_2_iso_code eq "X"'), expect_substr="NON_CONVERTIBLE")
 
-print("== #3 query_expression sha256 pulls in crypto import ==")
+print("== #3 sha256 header value pulls in crypto import (round-26: LoweredValue) ==")
+# round-26: the op carries a LoweredValue (value_lowered), not a raw value_expression string.
+# encode_base64(sha256(...)) is header-context (rewrite would reject encode_base64), so use a
+# set_request_header op — the sha256-import scan walks the lowered AST.
+# A dynamic header value carries empty_behavior=delete_header (round-27 finding 1: the slot gate
+# requires it — a dynamic header that resolves empty deletes the header, matching Cloudflare).
+# encode_base64(sha256(...)) is LONG-TAIL (source-NC as a user value); its crypto RENDERER capability
+# is source-agnostic, so lower it via source=False to exercise the sha256 import scan.
+_hlow = _parser.lower_dynamic_value('encode_base64(sha256(http.host))', "request_header",
+                                    _parser.LOWERED_EMPTY_DELETE_HEADER, source=False)
+assert isinstance(_hlow, dict), _hlow
 ir_crypto = {"metadata": {"hostname": "h", "sanitized_name": "h"}, "cache_behaviors": [{"viewer_request_ops": [
-    {"type": "rewrite", "condition": None,
-     "params": {"query_expression": 'concat("h=", encode_base64(sha256(http.host)))'}}], "viewer_response_ops": []}]}
+    {"type": "set_request_header", "condition": {"always": True},
+     "params": {"name": "x-sig", "value_lowered": _hlow}}], "viewer_response_ops": []}]}
 vr = _gen.generate_viewer_request_js(ir_crypto)
-check("sha256 query rewrite -> import crypto", vr, expect_substr="import crypto")
-check("sha256 query rewrite -> createHash emitted", vr, expect_substr="crypto.createHash")
+check("sha256 header -> import crypto", vr, expect_substr="import crypto")
+check("sha256 header -> createHash emitted", vr, expect_substr="crypto.createHash")
 
 print("== #4 continent/is_eu in viewer-response: preamble + const request ==")
 resp_ops = _proc.process_response_header_transform(
@@ -230,10 +266,17 @@ check("viewer-response defines request", resp_js, expect_substr="const request =
 check("viewer-response emits continent preamble", resp_js, expect_substr="kvsHandle.get('continent:")
 check("viewer-response has no bare-undefined continent guard", resp_js, expect_substr="let continent = '';")
 
-print("== #5 unparseable value_expression emits leak marker (not silent '') ==")
+print("== #5 unparseable value_expression -> NON_CONVERTIBLE at the processor (round-15 finding 1) ==")
+# An expression that does NOT parse can only degrade to an empty value + leak marker in the
+# generator — that is NOT a faithful conversion, so the PROCESSOR must NC it (ledger honest),
+# rather than emit a converted op the generator then quietly guts. (Was: EXACT op + leak
+# marker, so the ledger disagreed with the emitted empty header.)
 op = first_op(_proc.process_request_header_transform(
     header_rule("true", {"X-B": {"operation": "set", "expression": "broken((("}}), {}, ""))
-check("parse failure tagged for validator", emit(op), expect_substr="no CloudFront source for")
+check("unparseable expression -> non_convertible (not a converted op)",
+      op.get("type", ""), expect_substr="non_convertible")
+check("unparseable expression NC reason names the parse failure",
+      op.get("reason", ""), expect_substr="could not be parsed")
 
 print("== OR expressions are structured (not deferred to raw) ==")
 res = _proc.process_origin_rule(
@@ -265,9 +308,11 @@ print("== F1 (r7): viewer ops emit in source (seq) order, not behavior order =="
 # (seq) so Cloudflare first-match precedence holds: rule seq=1 (broad) before seq=2
 # (narrow). Behaviors are deliberately listed narrow-first to prove seq wins.
 def _redir(target, seq):
+    # round-26: redirect target is a LoweredValue (LiteralValue), not a raw target_url string.
     return {"type": "redirect", "cf_source_rule": "r", "description": "d",
             "condition": {"always": True}, "raw_expression": None,
-            "params": {"target_url": target, "status_code": 301, "preserve_query_string": False},
+            "params": {"target": _parser.lower_literal_value(target, "redirect"), "status_code": 301,
+                       "preserve_query_string": False},
             "scope_pattern": "*", "seq": seq}
 _ord_ir = {"metadata": {"hostname": "h", "sanitized_name": "h"},
            "cache_behaviors": [
@@ -281,18 +326,40 @@ _bi, _ni = _ord_js.find("broad"), _ord_js.find("narrow")
 check("F1: broad (seq=1) emitted before narrow (seq=2) despite behavior order",
       "yes" if (0 <= _bi < _ni) else f"NO broad@{_bi} narrow@{_ni}", expect_substr="yes")
 
-print("== #5 response-side sha256 header pulls import crypto (runtime fix) ==")
-ops = _proc.process_response_header_transform(
-    header_rule("true", {"x-sig": {"operation": "set", "expression": "encode_base64(sha256(http.host))"}}), {}, "")
-rjs = resp_js(ops)
+print("== #5 response-side sha256 header pulls import crypto (renderer capability, source=False) ==")
+# encode_base64(sha256(...)) is long-tail (source-NC as a user value); its crypto renderer is
+# source-agnostic, so exercise it via an internal-lowered value (source=False) built into a
+# response-side op — the sha256 import scan must still run on the response handler.
+_rlow = _parser.lower_dynamic_value('encode_base64(sha256(http.host))', "response_header",
+                                    _parser.LOWERED_EMPTY_DELETE_HEADER, source=False)
+assert isinstance(_rlow, dict), _rlow
+rjs = resp_js([{"type": "set_response_header", "cf_source_rule": "x", "description": "",
+                "condition": {"always": True}, "params": {"name": "x-sig", "value_lowered": _rlow}}])
 check("response sha256 -> import crypto", rjs, expect_substr="import crypto")
 check("response sha256 -> createHash emitted", rjs, expect_substr="crypto.createHash")
 
-print("== #6 add_*_header honors value_expression (was dropped to '') ==")
-op = first_op(_proc.process_request_header_transform(
+print("== #6 request `add` is NON_CONVERTIBLE (round-18: Cloudflare has no request add) ==")
+# Cloudflare's Request Header Transform defines ONLY set/remove — there is no request `add`.
+# So a request `add` is non-convertible at the processor (no add_request_header op emitted).
+_addop = first_op(_proc.process_request_header_transform(
     header_rule("true", {"x-c": {"operation": "add", "expression": "concat(http.host, ip.src)"}}), {}, ""))
-check("add_header resolves expression", emit(op),
-      expect_substr="request.headers.host.value + event.viewer.ip", forbid_substr="{value: ''}")
+check("request add -> non_convertible", _addop.get("type", ""), expect_substr="non_convertible")
+check("request add reason names the unsupported operation", _addop.get("reason", ""),
+      expect_substr="unsupported operation")
+# The generator now REJECTS an add_*_header op at its entry gate (round-27 review-2): `add` is not
+# in VIEWER_OP_CONTRACTS, so validate_viewer_op fails it and the generator FATALs (LoweredError)
+# rather than rendering a dormant/inert branch. All three gates reject `add` uniformly.
+_add_fatal = False
+try:
+    _gen._generate_op_js(
+        {"type": "add_request_header", "params": {"name": "x-c",
+         "value_lowered": _parser.lower_dynamic_value('concat(http.host, "/x")', "request_header",
+                                                      _parser.LOWERED_EMPTY_DELETE_HEADER)},
+         "condition": {"always": True}}, "cff")
+except _gen.LoweredError:
+    _add_fatal = True
+check("add_*_header op -> generator FATAL (unknown op type, no dormant render path)",
+      "yes" if _add_fatal else "NO", expect_substr="yes")
 
 print("== #7 unmappable action value -> clean per-rule non_convertible (no leak) ==")
 r = _proc.process_redirect_rule(
@@ -338,11 +405,14 @@ r = _proc.process_redirect_rule(
     redirect_rule("true", target_expr='concat("https://x/", to_string(http.response.code))'), {}, "")
 check("request-phase response_code value -> non_convertible",
       r.get("type", "") if isinstance(r, dict) else "list", expect_substr="non_convertible")
-# but response_code in a RESPONSE header value is fine (sourceable there)
+# response_code in a RESPONSE value is phase-legal, but using it as a string header value needs
+# to_string (LONG-TAIL) → NON_CONVERTIBLE under the narrowed policy. (The phase distinction is now
+# moot: a request response_code is rejected by phase, a response one by the to_string source-narrow.)
 ops = _proc.process_response_header_transform(
     header_rule("true", {"x-code": {"operation": "set", "expression": "to_string(http.response.code)"}}), {}, "")
 types = [o["type"] for o in ops]
-check("response-phase response_code value still converts", str(types), expect_substr="set_response_header")
+check("response-phase to_string(response_code) value -> non_convertible (long-tail to_string)",
+      str(types), expect_substr="non_convertible")
 
 print("== B: not ip.src in $list -> fail CLOSED (negated KVS lookup) ==")
 r = _proc.process_redirect_rule(
@@ -389,6 +459,51 @@ check("condition references isEU", eu_js, expect_substr="if (isEU)")
 # and the preamble var name matches what conditions use (no drift)
 check("continent accessor matches preamble", _gen._get_accessor("continent"),
       expect_substr=_gen._PREAMBLE_ACCESSORS["continent"])
+
+print("== R1b: is_eu EXPLICIT boolean-literal comparison parses + renders (Step-6 parse-gap fix) ==")
+# `ip.src.is_in_european_union eq true` used to raise _ParseError: the tokenizer emits bare
+# true/false as a _TT_FIELD, and _read_value rejected a field token in value position. Now an
+# UNQUOTED true/false in a VALUE position parses to a Python bool — the SAME value shape a bare
+# boolean field produces — so it validates/renders identically. eq/ne + true/false all covered.
+def _pe(expr):
+    # parse -> (value_repr, js). A parse failure becomes a visible string (clean FAIL, no crash).
+    try:
+        tree = _parser.parse_expression(expr)[0]
+    except Exception as ex:  # noqa: BLE001 - a regression must surface as a check FAIL, not abort the file
+        return f"PARSE-FAIL({type(ex).__name__})", f"PARSE-FAIL({type(ex).__name__})"
+    return repr(tree.get("value")), _gen.condition_to_js(tree, "cff")
+_v, _j = _pe("ip.src.is_in_european_union eq true")
+check("is_eu eq true -> Python True (parses, no _ParseError)", _v, expect_substr="True")
+check("is_eu eq true renders as isEU (bare-field shape)", _j, expect_substr="isEU")
+_v, _j = _pe("ip.src.is_in_european_union eq false")
+check("is_eu eq false -> Python False", _v, expect_substr="False")
+check("is_eu eq false renders the false comparison", _j, expect_substr="=== false")
+_v, _j = _pe("ip.src.is_in_european_union ne true")
+check("is_eu ne true renders the not-equal comparison", _j, expect_substr="!== true")
+# CONTROL: a QUOTED "true" stays a STRING value — the fix only affects UNQUOTED true/false.
+_v, _j = _pe('http.host eq "true"')
+check("quoted \"true\" stays a STRING value (not coerced to bool)", _v, expect_substr="'true'")
+
+print("== R1c: EU-member KVS seed is EXACTLY the 27 current EU members (ISO 3166-1 alpha-2) ==")
+# Lock the geo seed against drift (a stray add, a typo, or GB creeping back post-Brexit). This is
+# the data behind `ip.src.is_in_european_union` (the preamble does kvsHandle.exists('eu:'+country)).
+_scaffold = _load("cdn_scaffold", "cdn-generate-tf-scaffold.py")
+_EU27 = {"AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE",
+         "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE"}
+_eu_seed = {e["key"].split(":", 1)[1] for e in _scaffold._eu_kvs_entries()}
+check("EU KVS seed == the 27 current members (locks against drift)",
+      ("ok" if _eu_seed == _EU27 else
+       f"MISMATCH extra={sorted(_eu_seed - _EU27)} missing={sorted(_EU27 - _eu_seed)}"),
+      expect_substr="ok")
+check("EU seed count is exactly 27", str(len(_eu_seed)), expect_substr="27")
+check("EU seed EXCLUDES GB (post-Brexit)", "GB" if "GB" in _eu_seed else "absent", expect_substr="absent")
+# Consistency: every EU member also has a continent: entry (the preamble looks up continent too).
+# NOT asserting continent=="EU" — some EU members are geographically Asia (e.g. Cyprus -> AS), which
+# is correct data (geographic continent != EU membership), not a bug.
+_cont_keys = {e["key"].split(":", 1)[1] for e in _scaffold._continent_kvs_entries()}
+check("every EU member also has a continent KVS entry (no missing lookup)",
+      ("ok" if _eu_seed <= _cont_keys else f"missing continent for {sorted(_eu_seed - _cont_keys)}"),
+      expect_substr="ok")
 
 print("== R2: OR-deferred not-in-list is structured + resolved (no fail-open) ==")
 r = _proc.process_redirect_rule(
@@ -854,18 +969,18 @@ check("W-C1d-all cloud connector w/ unparseable cond -> non_convertible",
           {"id": "r", "description": "d", "enabled": True, "expression": _unp,
            "provider": "aws_s3", "parameters": {"host": "h"}}, {}, "")),
       expect_substr="non_convertible")
-# custom_error with inline content + unstructurable condition (was serve_error_inline
-# then silently dropped); control: a `true`-gated inline error still converts.
+# custom_error with inline content is NON_CONVERTIBLE (step-3 decision #1) — both an unparseable-
+# condition rule and a plain `true`-gated one (inline content no longer converts at all).
 check("W-C1d-all custom_error inline + unparseable cond -> non_convertible",
       _nc(_proc.process_custom_error_rule(
           {"id": "e", "description": "d", "enabled": True, "expression": _unp, "action": "serve_error",
            "action_parameters": {"content": "<h1>x</h1>", "content_type": "text/html", "status_code": 503}}, {}, "http_custom_errors")),
       expect_substr="non_convertible")
-check("W-C1d-all control: custom_error inline + true -> serve_error_inline (no over-report)",
+check("W-C1d-all custom_error inline + true -> non_convertible (inline body, no CFF+KVS path)",
       _nc(_proc.process_custom_error_rule(
           {"id": "e", "description": "d", "enabled": True, "expression": "true", "action": "serve_error",
            "action_parameters": {"content": "<h1>x</h1>", "content_type": "text/html", "status_code": 503}}, {}, "http_custom_errors")),
-      expect_substr="serve_error_inline", forbid_substr="non_convertible")
+      expect_substr="non_convertible", forbid_substr="serve_error_inline")
 
 # W-C1e: Configuration Rule distribution-level settings (ssl / min_tls_version)
 # were applied UNCONDITIONALLY — the processor never parsed the condition, so a
@@ -1032,7 +1147,7 @@ print("== Z (round 13): origin Host override — CFF updateRequestOrigin, not re
 # through cf.updateRequestOrigin({hostHeader: ...}) instead. (The Lambda@Edge
 # origin-request target CAN write request.headers.host — Host is writable there.)
 _oo = {"type": "origin_override", "cf_source_rule": "r", "description": "d",
-       "condition": None, "raw_expression": None,
+       "condition": {"always": True}, "raw_expression": None,
        "params": {"origin_host": "backend.example.net", "host_header": "vhost.example.com"}}
 _cff = " | ".join(_gen._generate_op_js(_oo, "cff"))
 check("Z CFF host override via updateRequestOrigin hostHeader", _cff, expect_substr="hostHeader: 'vhost.example.com'")
@@ -1043,7 +1158,7 @@ check("Z CFF does NOT write read-only request.headers.host (502)", _cff, forbid_
 # Host-header-only override (no origin domain change) must NOT emit an empty
 # domainName — `domainName: ''` would blank the origin and break the request.
 _hoo = {"type": "origin_override", "cf_source_rule": "r", "description": "d",
-        "condition": None, "raw_expression": None,
+        "condition": {"always": True}, "raw_expression": None,
         "params": {"host_header": "vhost.example.com"}}  # no origin_host
 _hoo_cff = " | ".join(_gen._generate_op_js(_hoo, "cff"))
 check("Z host-only override emits hostHeader", _hoo_cff, expect_substr="hostHeader: 'vhost.example.com'")
@@ -1158,7 +1273,7 @@ print("== ZZ (round 14): viewer CFF-only (no L@E escalation), size guidance, quo
 # Lambda@Edge for viewer events (latency/cost). The generator no longer has an
 # escalation path or a generate_lambda_origin_request_js function.
 _oo = {"type": "origin_override", "cf_source_rule": "r", "description": "d",
-       "condition": None, "raw_expression": None,
+       "condition": {"always": True}, "raw_expression": None,
        "params": {"origin_host": "backend.net", "host_header": "vhost.example.com"}}
 check("ZZ origin_override is CFF updateRequestOrigin", " | ".join(_gen._generate_op_js(_oo, "cff")),
       expect_substr="cf.updateRequestOrigin")
@@ -1201,8 +1316,11 @@ def _place_override(origin_type, params):
           "origin_type": origin_type, "origin_content": "bucket.s3.amazonaws.com"}
     ir = _pre.make_empty_ir(dc)
     _pre.find_or_create_behavior(ir, "*", dc, "bucket.s3.amazonaws.com")
+    # outcome_status is mandatory on a converted result reaching generic placement (a real
+    # processor sets it; this hand-built fixture must too).
     _pre._place_result(ir, {"type": "origin_override", "cf_source_rule": "r",
-                            "description": "d", "condition": None, "raw_expression": None,
+                            "description": "d", "condition": {"always": True}, "raw_expression": None,
+                            "outcome_status": _pre.OUTCOME_EXACT,
                             "params": params}, dc, "bucket.s3.amazonaws.com", None, "true")
     return sum(1 for b in ir["cache_behaviors"] for op in b.get("viewer_request_ops", [])
                if op["type"] == "origin_override")
@@ -1212,8 +1330,11 @@ check("server origin override kept", str(_place_override("server", {"host_header
 
 print("== R16 (round 16): origin_override port/protocol, conditional host-override ORP, no-op drop ==")
 def _oo_js(params, cond=None):
+    # An unconditional op carries {"always": True} (round-27 review-2: the generator gate requires
+    # a real gate — condition⊕raw). A test passing cond=None means "unconditional".
     op = {"type": "origin_override", "cf_source_rule": "r", "description": "d",
-          "condition": cond, "raw_expression": None, "params": params}
+          "condition": cond if cond is not None else {"always": True},
+          "raw_expression": None, "params": params}
     return " | ".join(_gen._generate_op_js(op, "cff"))
 # #6: protocol inferred from port (not hardcoded https). HTTP ports → http.
 check("R16-#6 port 8080 -> protocol http", _oo_js({"origin_host": "o.net", "origin_port": 8080}), expect_substr="protocol: 'http'")
@@ -1237,10 +1358,10 @@ check("R16-#3 conditional host override -> AllViewer",
       _orp([{"type": "origin_override", "condition": {"field": "country", "op": "eq", "value": "CN"}, "params": {"host_header": "v.com"}}]),
       expect_substr=_AV, forbid_substr=_EH_ID)
 check("R16-#3 unconditional host override -> AllViewer (not ExceptHost)",
-      _orp([{"type": "origin_override", "condition": None, "params": {"host_header": "v.com"}}]),
+      _orp([{"type": "origin_override", "condition": {"always": True}, "params": {"host_header": "v.com"}}]),
       expect_substr=_AV, forbid_substr=_EH_ID)
 check("R16-#3 host==origin (no real replace) -> AllViewer",
-      _orp([{"type": "origin_override", "condition": None, "params": {"host_header": "o.net", "origin_host": "o.net"}}]),
+      _orp([{"type": "origin_override", "condition": {"always": True}, "params": {"host_header": "o.net", "origin_host": "o.net"}}]),
       expect_substr=_AV, forbid_substr=_EH_ID)
 assert not hasattr(_scaf, "_MANAGED_ORP_ALL_VIEWER_EXCEPT_HOST"), "ExceptHost constant should be removed"
 assert not hasattr(_scaf, "_behavior_replaces_host_unconditionally"), "host-replace helper should be removed"
@@ -1305,6 +1426,7 @@ def _place_bypass(expr):
     _pre.find_or_create_behavior(ir, "*", dc, "o.net")
     rule = {"id": "r", "description": "bypass", "expression": expr,
             "action_parameters": {"cache": False}}
+    _seed_inventory(ir, rule)
     cond, raw = _parser.parse_expression(expr)
     result = _proc.process_cache_rule(rule, {}, "cache")
     cond2 = _pre._strip_host_condition(cond)
@@ -1413,6 +1535,7 @@ def _scope_of(expr):
           "sanitized_name": "shop_example_com"}
     ir = _pre.make_empty_ir(dc); _pre.find_or_create_behavior(ir, "*", dc, "o.net")
     rule = {"id": "r", "description": "b", "expression": expr, "action_parameters": {"cache": False}}
+    _seed_inventory(ir, rule)
     cond, raw = _parser.parse_expression(expr)
     result = _proc.process_cache_rule(rule, {}, "cache")
     cond2 = _pre._strip_host_condition(cond); _pre._strip_host_in_result(result)
@@ -1452,6 +1575,181 @@ _crossop = [{"type": "rewrite", "scope_pattern": "*.js"}]
 check("needs_cff: cross-overlap *.js op attaches to overlapping /api/* behavior",
       str(_needs_map([_b("*", []), _b("/api/*", _crossop)])),
       expect_substr="'/api/*': True")
+
+print("== CSP length quota (round-13 finding 2): raisable soft quota, separate from outcome ==")
+# A CSP over the DEFAULT quota (1783) but under the 8192 ceiling converts EXACT; the quota
+# validator emits a QUOTA-RAISE deploy-readiness warning at the DEFAULT quota, and suppresses
+# it when the user declares a sufficient effective quota. Drives the REAL generate_report.
+_dccsp = {"hostname": "csp.example.com", "apex_domain": "example.com", "origin_type": "custom",
+          "origin_content": "o.net", "sanitized_name": "csp_example_com"}
+_ircsp = _pre.process_domain("csp.example.com", _dccsp, {"response_header": [
+    {"id": "c", "enabled": True, "expression": "true", "action": "rewrite",
+     "action_parameters": {"headers": {
+         "Content-Security-Policy": {"operation": "set", "value": "x" * 3000}}}}]}, {}, {}, {})
+_pre._strip_build_internals(_ircsp)
+_mancsp, _irscsp = _fin.dedup_policies([_ircsp])
+_rep_def, _ = _fin.generate_report(_irscsp, _mancsp, [], [])
+_rep_raised, _ = _fin.generate_report(_irscsp, _mancsp, [], [], csp_quota=4000)
+_csp_line_def = [l for l in _rep_def.splitlines() if "Content-Security-Policy length" in l]
+_csp_line_raised = [l for l in _rep_raised.splitlines() if "Content-Security-Policy length" in l]
+check("CSP over default quota -> QUOTA-RAISE warning (default 1783)",
+      "\n".join(_csp_line_def), expect_substr="QUOTA-RAISE")
+check("CSP QUOTA-RAISE routes users to AWS Support (not Service Quotas)",
+      "\n".join(_csp_line_def), expect_substr="AWS Support")
+check("CSP under a user-declared raised quota -> NO warning",
+      "NONE" if not _csp_line_raised else "\n".join(_csp_line_raised), expect_substr="NONE")
+
+print("== COMPLETENESS (Step-6 Block 2): report field from the LEDGER, separate from STATUS ==")
+# _completeness_from_claims reads each domain's _claims: COMPLETE_EXACT iff EVERY claim is EXACT;
+# any NON_CONVERTIBLE or LOSSY_WITH_WARNING → PARTIAL_WITH_NC. Computed from the ledger (not artifact
+# counts), and it does NOT flip the process STATUS (an expected NC is not an execution failure).
+def _ir_claims(*statuses):
+    return {"_claims": [{"status": s} for s in statuses]}
+check("all-EXACT domains -> COMPLETE_EXACT",
+      _fin._completeness_from_claims([_ir_claims("EXACT", "EXACT"), _ir_claims("EXACT")]),
+      expect_substr="COMPLETE_EXACT")
+check("no claims at all -> COMPLETE_EXACT (nothing non-exact present)",
+      _fin._completeness_from_claims([_ir_claims()]), expect_substr="COMPLETE_EXACT")
+check("a NON_CONVERTIBLE claim -> PARTIAL_WITH_NC",
+      _fin._completeness_from_claims([_ir_claims("EXACT"), _ir_claims("NON_CONVERTIBLE")]),
+      expect_substr="PARTIAL_WITH_NC")
+check("a LOSSY_WITH_WARNING claim -> PARTIAL_WITH_NC (known-gap is not a clean success)",
+      _fin._completeness_from_claims([_ir_claims("LOSSY_WITH_WARNING")]),
+      expect_substr="PARTIAL_WITH_NC")
+# FAIL CLOSED: an UNKNOWN or ABSENT claim status must NOT be silently treated as EXACT.
+check("an UNKNOWN claim status -> PARTIAL_WITH_NC (fail closed, never silent COMPLETE_EXACT)",
+      _fin._completeness_from_claims([_ir_claims("EXACT"), {"_claims": [{"status": "WEIRD"}]}]),
+      expect_substr="PARTIAL_WITH_NC")
+check("a claim with NO status field -> PARTIAL_WITH_NC (fail closed)",
+      _fin._completeness_from_claims([{"_claims": [{}]}]), expect_substr="PARTIAL_WITH_NC")
+# discriminators: the COMPLETE_EXACT result must NOT contain the PARTIAL token and vice-versa
+check("COMPLETE_EXACT is not the PARTIAL token", _fin._completeness_from_claims([_ir_claims("EXACT")]),
+      forbid_substr="PARTIAL_WITH_NC")
+check("PARTIAL_WITH_NC is not the COMPLETE token",
+      _fin._completeness_from_claims([_ir_claims("NON_CONVERTIBLE")]), forbid_substr="COMPLETE_EXACT")
+
+print("== MIN TLS (Step-6): CloudFront viewer min TLS floored to a uniform TLSv1.2_2021 + note ==")
+# User policy: CloudFront min TLS is uniformly >= 1.2. Every source min_tls_version maps to
+# TLSv1.2_2021. A source BELOW 1.2 is HARDENED (warning: legacy clients rejected); a source of 1.3 is
+# CAPPED (warning: can't enforce). It is a directed baseline override, NOT LOSSY/NC (setting IS
+# converted; completeness unaffected) — surfaced as a conversion warning, never silent.
+_DC_TLS = {"hostname": "mt.example.com", "apex_domain": "example.com", "origin_type": "custom",
+           "origin_content": "o.net", "sanitized_name": "mt_example_com"}
+def _min_tls_run(v):
+    ir = _pre.process_domain("mt.example.com", _DC_TLS, {"config": [{"id": "c", "description": "tls",
+        "expression": "true", "action": "set_config", "action_parameters": {"min_tls_version": v}}]},
+        {}, {}, {})
+    mpv = ir["cache_behaviors"][0]["distribution_settings"].get("minimum_protocol_version")
+    return mpv, " ".join(ir["metadata"].get("conversion_warnings", []))
+for _v in ["1.0", "1.1", "1.2", "1.3"]:
+    _mpv, _w = _min_tls_run(_v)
+    check(f"min_tls {_v} -> CloudFront minimum_protocol_version TLSv1.2_2021 (uniform floor)",
+          _mpv or "", expect_substr="TLSv1.2_2021")
+check("min_tls 1.0 -> hardening warning (legacy TLS clients rejected)",
+      _min_tls_run("1.0")[1], expect_substr="raised to the CloudFront TLSv1.2_2021 baseline")
+check("min_tls 1.3 -> cap warning (cannot enforce a 1.3 minimum)",
+      _min_tls_run("1.3")[1], expect_substr="cannot be enforced")
+check("min_tls 1.2 -> NO warning (already at the baseline)",
+      _min_tls_run("1.2")[1] or "NONE", expect_substr="NONE")
+check("min_tls UNRECOGNIZED value -> still TLSv1.2_2021 baseline (uniform)",
+      _min_tls_run("9.9")[0] or "", expect_substr="TLSv1.2_2021")
+check("min_tls UNRECOGNIZED value -> warning (fail closed, not silent)",
+      _min_tls_run("9.9")[1], expect_substr="unrecognized")
+
+print("== IGNORED FEATURES (Step-6 Block 3): curated-policy scan, active-only, native/WAF excluded ==")
+_EXAMPLES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "examples", "cloudflare-configs")
+_zone = _pre.find_zone_dir(_EXAMPLES)
+check("example zone backup resolves (ignored-feature scan fixture)", "yes" if _zone else "no",
+      expect_substr="yes")
+_scan = _pre.scan_ignored_features(_zone) if _zone else {}
+_ab = ", ".join(_scan.get("active_abandoned", []))
+_waf = ", ".join(_scan.get("handled_or_reported_by_waf_pipeline", []))
+check("Snippets is an active-abandoned ignored feature", _ab, expect_substr="Snippets")
+check("zone-level Min TLS Version is ignored (the zone setting is NOT read)", _ab, expect_substr="Min TLS Version")
+check("Custom Pages is ignored", _ab, expect_substr="Custom Pages")
+# CloudFront-native settings are NOT ignored (the false-gap the curated policy prevents)
+for _nat in ["HTTP2", "IPv6", "WebSockets", "TLS 1 3"]:
+    check(f"{_nat} is NOT in CDN ignored (CloudFront native)", _ab, forbid_substr=_nat)
+# WAF-pipeline files are NOT CDN-ignored (no cross-pipeline false alarm) — they're the other bucket
+check("WAF Custom Rules -> handled_or_reported_by_waf_pipeline", _waf, expect_substr="WAF Custom Rules")
+check("no WAF file leaks into CDN active_abandoned", _ab, forbid_substr="WAF")
+# Snippets merge: 10 features / 11 evidence files (Snippets.txt + Snippet-Rules.txt = one feature)
+check("active_abandoned counts 10 FEATURES (Snippets merged)",
+      str(len(_scan.get("active_abandoned", []))), expect_substr="10")
+check("active_abandoned_files counts 11 evidence files (Snippets = 2 files)",
+      str(len(_scan.get("active_abandoned_files", []))), expect_substr="11")
+check("no unknown_active (all example files mapped + parsed)",
+      "empty" if not _scan.get("unknown_active") else ",".join(_scan["unknown_active"]),
+      expect_substr="empty")
+
+print("== IGNORED FEATURES aggregate (finalize dedups across domains, report axis only) ==")
+_ir_ign = {"metadata": {"ignored_features": {
+    "active_abandoned": ["Ciphers", "Snippets"],
+    "active_abandoned_files": ["Ciphers.txt", "Snippet-Rules.txt", "Snippets.txt"],
+    "native_or_no_action": ["HTTP2"], "handled_or_reported_by_waf_pipeline": ["WAF Custom Rules"],
+    "unknown_active": []}}}
+_agg = _fin._aggregate_ignored_features([_ir_ign, _ir_ign])   # two domains of one zone → dedup
+check("aggregate dedups features across domains (2 identical domains -> 2 features, not 4)",
+      str(_agg["active_abandoned_count"]), expect_substr="2")
+check("aggregate counts evidence files separately (3, not doubled)",
+      str(_agg["active_abandoned_files_count"]), expect_substr="3")
+
+print("== FINALIZE LEDGER GATE (Step-6 Block 3b): ledger/report consistency, breach reason on each ==")
+def _gate_ir(claims, inventory=None, non_convertible=None, conversion_warnings=None):
+    return {"metadata": {"hostname": "g.example.com", "conversion_warnings": conversion_warnings or []},
+            "_claims": claims, "_inventory": inventory or [],
+            "cache_behaviors": [{"non_convertible": non_convertible or []}]}
+def _gate(ir):  # -> "PASS" (None) or the breach reason string
+    r = _fin.finalize_ledger_gate([ir])
+    return "PASS" if r is None else r
+# clean: all EXACT, every leaf covered, no NC/LOSSY -> pass
+check("gate: clean ledger passes",
+      _gate(_gate_ir([{"status": "EXACT", "source_keys": [["rule", "r", "/a"], ["rule", "r", "/b"]]}],
+                     inventory=[["rule", "r", "/a"], ["rule", "r", "/b"]])), expect_substr="PASS")
+# (1) invalid claim status -> breach
+check("gate check 1: invalid claim status -> breach",
+      _gate(_gate_ir([{"status": "WEIRD", "source_keys": [["rule", "r", "/a"]]}],
+                     inventory=[["rule", "r", "/a"]])), expect_substr="invalid ledger status")
+# (2) uncovered inventory leaf -> breach
+check("gate check 2: uncovered inventory leaf (silent drop) -> breach",
+      _gate(_gate_ir([{"status": "EXACT", "source_keys": [["rule", "r", "/a"]]}],
+                     inventory=[["rule", "r", "/a"], ["rule", "r", "/ORPHAN"]])),
+      expect_substr="NO outcome claim")
+# (3) NC claim hidden from the report -> breach; WITH report entry -> pass
+check("gate check 3: NC claim hidden from report -> breach",
+      _gate(_gate_ir([{"status": "NON_CONVERTIBLE", "source_keys": [["rule", "r", "/a"]]}],
+                     inventory=[["rule", "r", "/a"]], non_convertible=[])),
+      expect_substr="hidden from the user")
+check("gate check 3 control: NC claim WITH a report entry passes",
+      _gate(_gate_ir([{"status": "NON_CONVERTIBLE", "source_keys": [["rule", "r", "/a"]]}],
+                     inventory=[["rule", "r", "/a"]],
+                     non_convertible=[{"cf_source_rule": "r", "reason": "x"}])), expect_substr="PASS")
+# (3) LOSSY claim WITHOUT a reason -> breach; WITH a reason (no conversion_warning) -> pass (Option A)
+check("gate check 3: LOSSY claim with NO reason -> breach",
+      _gate(_gate_ir([{"status": "LOSSY_WITH_WARNING", "source_keys": [["rule", "r", "/a"]], "reason": ""}],
+                     inventory=[["rule", "r", "/a"]])), expect_substr="has no reason")
+check("gate check 3 control: LOSSY WITH a reason but NO conversion_warning passes (report derives from ledger)",
+      _gate(_gate_ir([{"status": "LOSSY_WITH_WARNING", "source_keys": [["rule", "r", "/a"]],
+                       "reason": "viewer-response gap"}], inventory=[["rule", "r", "/a"]])),
+      expect_substr="PASS")
+
+print("== LOSSY items from the LEDGER (Step-6 Block 3b / Option A): claim-derived, no undercount/double ==")
+_DC_L = {"hostname": "l.example.com", "apex_domain": "example.com", "origin_type": "custom",
+         "origin_content": "o.net", "sanitized_name": "l_example_com"}
+def _lossy_count(rules):
+    ir = _pre.process_domain("l.example.com", _DC_L, rules, {}, {}, {})
+    return len(_fin._lossy_items_from_claims([ir]))
+_bt = {"cache": [{"id": "bt", "expression": "true", "action": "set_cache_settings",
+       "action_parameters": {"browser_ttl": {"mode": "override_origin", "default": 60}}}]}
+_rh = {"response_header": [{"id": "rh", "expression": "true", "action": "rewrite",
+       "action_parameters": {"headers": {"X-C": {"operation": "set", "expression": "http.host"}}}}]}
+check("browser_ttl LOSSY -> lossy_items == 1 (claim-counted, not doubled with its conversion_warning)",
+      str(_lossy_count(_bt)), expect_substr="1")
+check("response-header viewer-op LOSSY -> lossy_items == 1 (even with NO conversion_warning)",
+      str(_lossy_count(_rh)), expect_substr="1")
+check("mixed browser_ttl + response-header LOSSY -> lossy_items == 2",
+      str(_lossy_count({**_bt, **_rh})), expect_substr="2")
 
 print()
 if FAILURES:

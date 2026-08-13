@@ -11,7 +11,8 @@ Exit 0 = all PASS, 1 = any FAIL, 2 = fatal error.
 import json, sys, os, re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdn_expr_parser import FIELD_TO_ORP_HEADERS, extract_orp_headers
+from cdn_expr_parser import (FIELD_TO_ORP_HEADERS, extract_orp_headers,
+                             validate_viewer_op, FORBIDDEN_HEADER_ADD_OP_TYPES)
 
 # All valid CloudFront-Viewer-* headers that can appear in required_orp_headers
 VALID_ORP_HEADERS = set()
@@ -31,8 +32,15 @@ VR_OPS_ORDER_GROUP = {
     # rewrite/bulk. Same group as headers so IR order [rewrite, cache_bypass,
     # set_request_header] is accepted; codegen emits bypass first within the group.
     "cache_bypass": 4,
-    "set_request_header": 4, "add_request_header": 4, "remove_request_header": 4,
+    # NO add_request_header (round-19 finding 2): header `add` is non-convertible, so no add op
+    # is ever emitted. An add_*_header op in an IR is a producer bug → Check3 rejects it.
+    "set_request_header": 4, "remove_request_header": 4,
 }
+
+# Op types no producer may emit (header `add` has no faithful CloudFront conversion in either
+# phase). Present in an IR → a hard validation error (the artifact would otherwise get a
+# spurious EXACT claim + CFF artifact). Kept as a set so Check3 can name the offender.
+_FORBIDDEN_OP_TYPES = FORBIDDEN_HEADER_ADD_OP_TYPES  # the ONE authority (cdn_expr_parser); `add` is NC both phases
 
 REQUIRED_METADATA_FIELDS = [
     "hostname", "sanitized_name", "apex_domain", "cert_domain", "origin_type",
@@ -72,11 +80,36 @@ def validate_domain(ir, filename):
         for j, op in enumerate(b.get("viewer_request_ops", [])):
             if "type" not in op:
                 errors.append(f"Check3: cache_behaviors[{i}].viewer_request_ops[{j}] missing type")
+            elif op["type"] in _FORBIDDEN_OP_TYPES:
+                errors.append(f"Check3: cache_behaviors[{i}].viewer_request_ops[{j}] has "
+                              f"forbidden op type '{op['type']}' (header `add` is non-convertible)")
             if "cf_source_rule" not in op:
                 errors.append(f"Check3: cache_behaviors[{i}].viewer_request_ops[{j}] missing cf_source_rule")
         for j, op in enumerate(b.get("viewer_response_ops", [])):
             if "type" not in op:
                 errors.append(f"Check3: cache_behaviors[{i}].viewer_response_ops[{j}] missing type")
+            elif op["type"] in _FORBIDDEN_OP_TYPES:
+                errors.append(f"Check3: cache_behaviors[{i}].viewer_response_ops[{j}] has "
+                              f"forbidden op type '{op['type']}' (header `add` is non-convertible)")
+
+    # Check 3b: FULL viewer-op validator (round-26 finding 2 → round-27 finding 2 → review-2
+    # finding 3). Every persisted viewer op must satisfy validate_viewer_op — the SINGLE op-shape +
+    # condition authority the processor sink and the generator also consult (no separate, drifting
+    # allow-lists). This is the persisted-IR HARD GATE for the "processor parses once, generator
+    # renders the AST" boundary: it rejects an unknown op type (the generator would emit a bare
+    # `// TODO` while the ledger claimed it converted), wrong phase, illegal redirect status_code,
+    # non-bool preserve_query_string, invalid header name, UNKNOWN param, a leftover legacy raw
+    # field, a lowered param wrong for its SLOT, AND a malformed/absent condition (list/str →
+    # generator AttributeError; unknown-key dict → silent if(false); neither/both condition+raw).
+    # It SUBSUMES the old Check11 (condition⊕raw mutual-exclusivity) for every registry op type.
+    for i, b in enumerate(behaviors):
+        for opsname, phase in (("viewer_request_ops", "request"), ("viewer_response_ops", "response")):
+            for j, op in enumerate(b.get(opsname, [])):
+                t = op.get("type", "")
+                reason = validate_viewer_op(op, phase)
+                if reason:
+                    errors.append(f"Check3b: cache_behaviors[{i}].{opsname}[{j}] ({t}) "
+                                  f"violates the viewer-op contract: {reason}")
 
     # Check 4: non_convertible reason non-empty
     for i, b in enumerate(behaviors):
@@ -119,8 +152,6 @@ def validate_domain(ir, filename):
         errors.append("Check8: kvs_requirements has active flags but kvs_data is empty")
     if kvs_req.get("needs_redirects") and not any(e.get("key", "").startswith("redirect:") for e in kvs_data):
         errors.append("Check8: needs_redirects is true but no redirect: entries in kvs_data")
-    if kvs_req.get("needs_error_pages") and not any(e.get("key", "").startswith("error:") for e in kvs_data):
-        errors.append("Check8: needs_error_pages is true but no error: entries in kvs_data")
 
     # Check 9: metadata required fields
     metadata = ir.get("metadata", {})
@@ -130,23 +161,22 @@ def validate_domain(ir, filename):
 
     # Check 10: no .error.json residual (checked at directory level, not here)
 
-    # Check 11: condition and raw_expression mutual exclusivity
+    # Check 11: a converted op must carry a STRUCTURED condition and NO raw_expression (round-27
+    # review-3 finding 1 — the raw-drives-codegen seam is closed; raw is an NC diagnostic only).
+    # Check3b's validate_viewer_op already enforces this for every registry op; this stays as an
+    # explicit, independently-readable statement of the invariant (and catches a non-null raw on
+    # any op shape).
     for i, b in enumerate(behaviors):
         for ops_name in ("viewer_request_ops", "viewer_response_ops"):
             for j, op in enumerate(b.get(ops_name, [])):
-                cond = op.get("condition")
-                raw = op.get("raw_expression")
-                has_cond = cond is not None
-                has_raw = raw is not None
-                if has_cond and has_raw:
+                if op.get("raw_expression") is not None:
                     errors.append(
-                        f"Check11: cache_behaviors[{i}].{ops_name}[{j}] "
-                        f"has both condition and raw_expression (must be mutually exclusive)"
+                        f"Check11: cache_behaviors[{i}].{ops_name}[{j}] has a raw_expression — a "
+                        "converted op must use a structured condition (raw is NC-diagnostic only)"
                     )
-                if not has_cond and not has_raw:
+                if op.get("condition") is None:
                     errors.append(
-                        f"Check11: cache_behaviors[{i}].{ops_name}[{j}] "
-                        f"has neither condition nor raw_expression"
+                        f"Check11: cache_behaviors[{i}].{ops_name}[{j}] has no structured condition"
                     )
 
     # Check 12: required_orp_headers consistency

@@ -13,6 +13,7 @@ import json, sys, os, glob
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdn_expr_parser import custom_orp_hash, orp_header_union
+from cdn_rhp_capabilities import SECURITY_CAPABILITIES
 
 
 def hcl_id(pid):
@@ -220,28 +221,7 @@ def gen_orp(pid, config):
     return "\n".join(lines)
 
 
-# Default TLD wildcard list for CORS credentials=true + origin=* workaround.
-# CloudFront rejects literal "*" with credentials=true. Instead, we use TLD
-# wildcard patterns (e.g., "*.com") which CloudFront matches against the
-# request Origin header and echoes back the exact origin value.
-# Scheme-agnostic: "*.com" matches both http:// and https:// origins.
-# Limitation: does not match origins with non-standard ports (e.g., :8080).
-# Users can add/remove TLDs in the generated policies.tf as needed.
-CORS_WILDCARD_TLDS = [
-    # Generic TLDs
-    "*.com", "*.net", "*.org", "*.info", "*.biz", "*.xyz", "*.top",
-    "*.site", "*.online", "*.store", "*.app", "*.dev", "*.io", "*.ai",
-    "*.co", "*.me", "*.cc", "*.tv", "*.link", "*.cloud",
-    # Country/region TLDs
-    "*.cn", "*.uk", "*.de", "*.jp", "*.fr", "*.au", "*.ca", "*.br",
-    "*.in", "*.kr", "*.ru", "*.it", "*.es", "*.nl", "*.eu", "*.tw",
-    "*.hk", "*.sg", "*.se", "*.ch", "*.pl", "*.be", "*.at", "*.dk",
-    "*.fi", "*.no", "*.nz", "*.za", "*.mx", "*.ar", "*.th", "*.vn",
-    "*.id", "*.ph", "*.my", "*.pt", "*.ie", "*.cz", "*.il", "*.us",
-]
-
-
-def gen_rhp(pid, config, zone_tld=None):
+def gen_rhp(pid, config):
     sec = config.get("security_headers", {})
     custom = config.get("custom_headers", [])
     cors = config.get("cors")
@@ -270,28 +250,19 @@ def gen_rhp(pid, config, zone_tld=None):
         origin_list = [o.strip() for o in origins.split(",")]
 
         if allow_creds and "*" in origin_list:
-            # Workaround: replace "*" with TLD wildcard patterns
-            # CloudFront echoes back the exact request Origin when a pattern matches
-            tld_list = list(CORS_WILDCARD_TLDS)
-            # Ensure the zone's own TLD is included
-            if zone_tld:
-                zone_pattern = f"*.{zone_tld}"
-                if zone_pattern not in tld_list:
-                    tld_list.append(zone_pattern)
-            # Keep any non-wildcard origins from the original list
-            explicit_origins = [o for o in origin_list if o != "*"]
-            origin_list = sorted(set(tld_list + explicit_origins))
-            w('    # Cloudflare allowed credentials=true with wildcard origin (*), but')
-            w('    # CloudFront requires explicit origins per CORS spec. Using TLD wildcard')
-            w('    # patterns as workaround — CloudFront echoes back the exact request Origin.')
-            w('    # Add or remove TLD patterns as needed for your use case.')
-            w('    # NOTE: Does not match origins with non-standard ports (e.g., :8080).')
-            if not origin_override:
-                w('    # Cloudflare operation was "add" (not "set"): when the request has no')
-                w('    # Origin header, CloudFront will not return CORS headers. This differs')
-                w('    # from Cloudflare which adds CORS headers unconditionally. This only')
-                w('    # affects non-browser clients (curl, SDKs) — browsers always send Origin')
-                w('    # for cross-origin requests.')
+            # DORMANT + FAIL-LOUD (Step 5): the Access-Control-Allow-Origin "*" +
+            # Access-Control-Allow-Credentials=true combo is NON_CONVERTIBLE (the Fetch/CORS
+            # standard forbids it and CloudFront rejects a literal "*" with credentials) — it is
+            # NC'd at the processor (process_response_header_transform, FINDING-61) and must never
+            # reach a native cors_config. No producer populates `cors` today (the native path is
+            # dormant), so this is unreachable; if someone re-enables native CORS, this combo MUST
+            # go through a group-level semantic check first. Fail loud rather than silently emit a
+            # literal "*" (an invalid, policy-violating RHP) or resurrect the old TLD-wildcard hack.
+            raise ValueError(
+                f"RHP {pid}: CORS Access-Control-Allow-Origin '*' with "
+                "Access-Control-Allow-Credentials=true is non-convertible (Fetch/CORS forbids it; "
+                "CloudFront rejects a literal '*' with credentials) — it must be NC'd at the "
+                "processor, never emitted to a native cors_config")
         elif not allow_creds and "*" in origin_list:
             # credentials=false with * is fine — CloudFront allows it
             pass
@@ -317,61 +288,31 @@ def gen_rhp(pid, config, zone_tld=None):
         w(f'    origin_override = {"true" if origin_override else "false"}')
         w('  }')
 
-    # Security headers
+    # Security headers — render from the NORMALIZED value the processor's capability.parse()
+    # accepted, via the SAME capability's render() (shared cdn_rhp_capabilities registry).
+    # The generator MUST NOT re-parse the raw header value: parse() already decided EXACT-vs-NC
+    # and produced the exact fields render() reproduces (no more hardcoded HSTS max-age=31536000
+    # / forced nosniff). Iterate the registry so ordering is deterministic and adding a header
+    # can't drift the two sides. `operation == "set"` → override=true (Cloudflare set replaces).
     if sec:
-        w('')
-        w('  security_headers_config {')
-        # Extract value — support both old format (string) and new format ({value, operation})
-        def _sec_val(key):
-            v = sec.get(key)
-            if v is None:
-                return None, True
-            if isinstance(v, dict):
-                return v.get("value", ""), v.get("operation", "set") == "set"
-            return v, True  # legacy string format → default override=true
-
-        val, override = _sec_val("X-Content-Type-Options")
-        if val is not None:
-            w(f'    content_type_options {{ override = {"true" if override else "false"} }}')
-
-        val, override = _sec_val("X-Frame-Options")
-        if val is not None:
-            w(f'    frame_options {{')
-            w(f'      frame_option = "{val.upper()}"')
-            w(f'      override     = {"true" if override else "false"}')
-            w(f'    }}')
-
-        val, override = _sec_val("Strict-Transport-Security")
-        if val is not None:
-            w('    strict_transport_security {')
-            w('      access_control_max_age_sec = 31536000')
-            w('      include_subdomains         = true')
-            w('      preload                    = false')
-            w(f'      override                   = {"true" if override else "false"}')
-            w('    }')
-
-        val, override = _sec_val("Referrer-Policy")
-        if val is not None:
-            w(f'    referrer_policy {{')
-            w(f'      referrer_policy = "{val}"')
-            w(f'      override        = {"true" if override else "false"}')
-            w(f'    }}')
-
-        val, override = _sec_val("X-XSS-Protection")
-        if val is not None:
-            w('    xss_protection {')
-            w('      mode_block  = true')
-            w(f'      override    = {"true" if override else "false"}')
-            w('      protection  = true')
-            w('    }')
-
-        val, override = _sec_val("Content-Security-Policy")
-        if val is not None:
-            w(f'    content_security_policy {{')
-            w(f'      content_security_policy = "{val}"')
-            w(f'      override                = {"true" if override else "false"}')
-            w(f'    }}')
-        w('  }')
+        block = []
+        for cap in SECURITY_CAPABILITIES:
+            entry = sec.get(cap["canonical_name"])
+            if not isinstance(entry, dict):
+                continue
+            normalized = entry.get("normalized")
+            if normalized is None:
+                # A security header reaches the RHP only after parse() accepted it, so its
+                # normalized value is always present. Absent → don't guess/emit a wrong value.
+                continue
+            override = entry.get("operation", "set") == "set"
+            block.extend(cap["render"](normalized, override))
+        if block:
+            w('')
+            w('  security_headers_config {')
+            for ln in block:
+                w(ln)
+            w('  }')
 
     # Custom headers
     if custom:
@@ -454,19 +395,6 @@ def main():
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    # Extract zone TLD from domain_scope.json for CORS wildcard workaround
-    zone_tld = None
-    scope_path = os.path.join(output_dir, "domain_scope.json")
-    if os.path.exists(scope_path):
-        try:
-            with open(scope_path) as f:
-                scope = json.load(f)
-            zone_name = scope.get("zone_name", "")
-            if "." in zone_name:
-                zone_tld = zone_name.rsplit(".", 1)[-1]
-        except (json.JSONDecodeError, KeyError):
-            pass
-
     policies = manifest.get("policies", {})
     # Shared custom ORPs (native CloudFront-* header forwarding), deduped by
     # header-set content — separate from the manifest's forward-config ORPs.
@@ -501,7 +429,7 @@ def main():
         elif ptype == "origin_request_policy":
             sections.append(gen_orp(pid, config))
         elif ptype == "response_headers_policy":
-            result = gen_rhp(pid, config, zone_tld=zone_tld)
+            result = gen_rhp(pid, config)
             if result:
                 sections.append(result)
             else:

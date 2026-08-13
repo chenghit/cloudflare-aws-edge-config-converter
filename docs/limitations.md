@@ -2,6 +2,10 @@
 
 # Limitations and Caveats
 
+> **Authoritative conversion boundary:** [docs/conversion-policy.md](./conversion-policy.md) is the
+> spec for what converts (EXACT / LOSSY) vs what is reported `NON_CONVERTIBLE`, and which Cloudflare
+> features are not read at all. This page describes the user-facing caveats; the policy doc governs.
+
 ## CDN Pipeline — What Gets Converted
 
 The CDN pipeline converts these Cloudflare rule types to CloudFront equivalents:
@@ -62,8 +66,7 @@ A **Host override** (Cloudflare Origin Rule) does **not** change this choice —
 | `ip.src in $list_name` with CIDR entries | All rule types | CFF `event.viewer.ip` is a single IP; cannot perform CIDR matching | AWS WAF IP set with Count action + custom header (see WAF + Custom Header Pattern in conversion_report.md) |
 | `serve_stale` (SWR/SIE) | Cache Rules | No CloudFront cache policy equivalent | Origin `Cache-Control: stale-while-revalidate` (limited) |
 | `origin_error_page_passthru` | Cache Rules | Requires Lambda@Edge to intercept origin errors | Lambda@Edge origin-response |
-| Custom error with inline content > 1 KB | Custom Error Rules | Inline content exceeds CloudFront KVS 1024-character value limit | Deploy error page as static file + `response_page_path` |
-| Custom error with inline content + response-phase condition | Custom Error Rules | CFF viewer-response does not execute on 4xx+ responses | Deploy error page as static file on origin |
+| Custom error with **any** inline content (`content`) | Custom Error Rules | CloudFront's native `custom_error_response` has no inline body; the tool no longer generates a CFF+KVS inline page (that path was retired) | Host the error page as a static file on an origin + `response_page_path` |
 | Custom error with unsupported status code | Custom Error Rules | CloudFront only supports: 400, 403, 404, 405, 414, 416, 500–504 | Lambda@Edge origin-response |
 | Custom error with dynamic headers/logic | Custom Error Rules | CFF and L@E viewer-response do not execute on 4xx+ responses | Lambda@Edge origin-response |
 | `browser_check` | Configuration | No CloudFront equivalent | AWS WAF Bot Control |
@@ -75,16 +78,13 @@ A **Host override** (Cloudflare Origin Rule) does **not** change this choice —
 | Cloud Connector with non-path expressions | Cloud Connector | CloudFront cache behaviors only match on path patterns | Manual origin configuration |
 | Disallowed/read-only response headers | Response Header Transform | CloudFront restricts modification of certain headers (`Via`, `X-Amz-Cf-*`, etc.) | N/A |
 
-### CORS with `credentials: true` and wildcard origin
+### CORS with `credentials: true` and wildcard origin — NON_CONVERTIBLE
 
-Cloudflare allows `Access-Control-Allow-Credentials: true` with `Access-Control-Allow-Origin: *`. CloudFront's Response Headers Policy rejects this combination per the CORS spec.
+A Cloudflare rule that sets `Access-Control-Allow-Origin: *` together with `Access-Control-Allow-Credentials: true` is **not converted** — the whole rule is reported `NON_CONVERTIBLE`.
 
-The tool works around this by replacing `*` with TLD wildcard patterns (`*.com`, `*.net`, `*.io`, etc. — ~60 common TLDs). CloudFront matches the request `Origin` header against these patterns and echoes back the exact origin value, satisfying the CORS spec.
+The combination is forbidden by the WHATWG Fetch (CORS) standard: a browser rejects a credentialed response whose `Access-Control-Allow-Origin` is `*`. (CloudFront's Response Headers Policy does not itself reject the pair; the *browser* does. But emitting it would ship a response no browser accepts for a credentialed request.) There is no faithful CloudFront equivalent, so the tool surfaces it in the conversion report instead of guessing. Fix it at the source: set specific allowed origins (not `*`), or serve the correct per-origin CORS response from your origin.
 
-Limitations:
-- Origins on TLDs not in the default list will not match. Add patterns to `policies.tf` as needed.
-- Scheme-less wildcard patterns (`*.com`) do not match origins with non-standard ports (e.g., `http://example.com:8080`). CloudFront only serves on ports 80/443, so this only affects cross-origin requests *from* non-standard-port origins.
-- When the Cloudflare rule used `add` operation (not `set`), `origin_override` is set to `false`. In this mode, CloudFront only returns CORS headers when the request contains an `Origin` header. Cloudflare adds CORS headers unconditionally regardless of request headers. This difference only affects non-browser clients (curl, SDKs) — browsers always send `Origin` for cross-origin requests.
+Earlier builds attempted a TLD-wildcard workaround (replacing `*` with `*.com`, `*.net`, … ~60 TLDs). **That workaround has been removed**. It silently changed CORS semantics and was not a faithful conversion.
 
 ### CloudFront Function size limit
 
@@ -194,5 +194,5 @@ AI-generated configurations require manual review before production deployment. 
 ### Features not configured by this tool
 
 - **CloudFront access logging** — involves decisions (S3 bucket, log format, shared vs per-domain) outside migration scope
-- **Lambda@Edge origin-response** — this IS fully automated when a rule needs it (the default-cache-behavior TTL handler): the IAM role, archive, Lambda function, and `qualified_arn` reference in `main.tf` are all generated by the scaffold. The tool does **not** generate a Lambda@Edge origin-response for custom-error rules — those convert to native `custom_error_response`, or a CFF+KVS inline error page, or are reported non-convertible (see the Custom Error rows above). There is no Lambda@Edge for viewer events either — a CFF over 10 KB is reported `SIZE_EXCEEDED` for human intervention, never split to L@E.
+- **Lambda@Edge origin-response** — this IS fully automated when a rule needs it (the default-cache-behavior TTL handler): the IAM role, archive, Lambda function, and `qualified_arn` reference in `main.tf` are all generated by the scaffold. The tool does **not** generate a Lambda@Edge origin-response for custom-error rules, and it does **not** generate CFF+KVS inline custom error pages (that path was retired). Custom error rules convert to native `custom_error_response` when CloudFront can express the status/path/remap, otherwise they are reported non-convertible (see the Custom Error rows above). There is no Lambda@Edge for viewer events either — a CFF over 10 KB is reported `SIZE_EXCEEDED` for human intervention, never split to L@E.
 - **DNS cutover** — the tool generates CloudFront distributions but does not modify DNS records. You must update DNS to point to CloudFront after verifying the configuration.

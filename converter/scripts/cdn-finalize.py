@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdn_expr_parser import orp_header_union
 from cdn_common import (QUOTA_RAISE, QUOTA_REDESIGN, derive_cert_domain,
-                        pattern_contains)
+                        emit_result, pattern_contains)
+from cdn_rhp_capabilities import CSP_DEFAULT_QUOTA, CSP_MAX_LEN, validate_csp_quota
 
 
 def _nbytes(v):
@@ -202,8 +203,126 @@ def dedup_policies(all_irs):
     return manifest, all_irs
 
 
-def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
-    """Generate conversion_report.md content."""
+def _completeness_from_claims(all_irs):
+    """Report-level CONVERSION completeness, computed from the LEDGER (each domain's `_claims`) —
+    NOT inferred from artifact counts. Returns "COMPLETE_EXACT" iff EVERY decision claim across all
+    domains is EXACT; ANY non-EXACT claim → "PARTIAL_WITH_NC". FAIL CLOSED: only "EXACT" is a clean
+    conversion — NON_CONVERTIBLE and LOSSY_WITH_WARNING are the expected not-clean statuses, and an
+    ABSENT or UNEXPECTED status is an internal/ledger anomaly ALSO treated as not-clean (never
+    silently COMPLETE_EXACT; the preprocess ledger validator is the primary status guard, this is
+    defense-in-depth).
+
+    A SEPARATE axis from the process STATUS (SCRIPT_STANDARDS): STATUS (OK/BLOCKED/PARTIAL/FATAL) is
+    the EXECUTION-layer outcome (did the run complete, is it deployable), while completeness is the
+    CONVERSION-fidelity outcome (did we convert everything exactly). They are ORTHOGONAL — a fully
+    EXACT conversion can still be STATUS: BLOCKED (e.g. a KVS-size / quota gate), which is a
+    COMPLETE_EXACT conversion that merely can't deploy as-is. So completeness deliberately does NOT
+    fold in execution/deploy warnings (quota, KVS size): those live in STATUS + the warnings list.
+    Folding them here would mislabel a clean conversion "PARTIAL_WITH_NC", implying non-convertible
+    content that isn't present. NC/LOSSY presence is read from the ledger, so it can't drift from the
+    per-behavior non_convertible report or the LOSSY warnings (all three project the same claims)."""
+    for ir in all_irs:
+        for c in ir.get("_claims", []):
+            if c.get("status") != "EXACT":   # fail closed: NC/LOSSY AND any unknown/absent status
+                return "PARTIAL_WITH_NC"
+    return "COMPLETE_EXACT"
+
+
+_LEDGER_VALID_STATUSES = frozenset({"EXACT", "LOSSY_WITH_WARNING", "NON_CONVERTIBLE"})
+
+
+def finalize_ledger_gate(all_irs):
+    """L2 finalize CONSISTENCY gate (Block 3b) — a LIGHT ledger/report check, NOT the full reconciler
+    (`_reconcile_ledger` stays OFF; this does NOT require the deferred artifact-ownership channels).
+    Returns a reason string on the FIRST breach (→ FATAL: a converter bug, not a config problem), else
+    None. Three invariants:
+      1. every DecisionClaim status is a real outcome (EXACT / LOSSY_WITH_WARNING / NON_CONVERTIBLE) —
+         an unknown/invalid status is a producer bug and must fail loud (also backstops the Block-2
+         completeness helper, which fails closed on non-EXACT);
+      2. every READ source-inventory leaf is covered by >= 1 claim — no silently-dropped source. EXACT
+         leaves ARE claimed today via their outcome channel (verified), so this holds without the
+         reconciler; a genuine orphan is a drop bug;
+      3. NC / LOSSY claims are SURFACED in the report (a non_convertible entry / a LOSSY warning),
+         never recorded in the ledger ONLY (a user-invisible outcome).
+    Does NOT touch ignored-feature or completeness semantics — those are separate report axes."""
+    for ir in all_irs:
+        host = ir.get("metadata", {}).get("hostname", "?")
+        claims = ir.get("_claims", [])
+        # (1) valid claim statuses
+        for i, c in enumerate(claims):
+            if c.get("status") not in _LEDGER_VALID_STATUSES:
+                return (f"{host}: claim {i} has invalid ledger status {c.get('status')!r} "
+                        f"(must be one of {sorted(_LEDGER_VALID_STATUSES)})")
+        # (2) every read inventory leaf is covered by a claim (no silent drop)
+        inv = {tuple(k) for k in ir.get("_inventory", [])}
+        covered = {tuple(k) for c in claims for k in c.get("source_keys", [])}
+        orphans = sorted(inv - covered)
+        if orphans:
+            return (f"{host}: {len(orphans)} source-inventory leaf/leaves have NO outcome claim "
+                    f"(silently dropped): {orphans[:5]}")
+        # (3) NC claims must reach the non_convertible report SECTION; LOSSY claims must carry a REASON
+        #     so they can be surfaced in the ledger-derived Lossy section (report + summary lossy_items).
+        #     LOSSY is NO LONGER required to carry a conversion_warning — the report/summary now DERIVE
+        #     LOSSY from the LEDGER (Option A), so a claim-only viewer-op LOSSY is correctly surfaced; a
+        #     reason-less LOSSY is the only ledger bug left here (it can't be listed meaningfully).
+        nc_claims = [c for c in claims if c.get("status") == "NON_CONVERTIBLE"]
+        nc_report = [e for b in ir.get("cache_behaviors", []) for e in b.get("non_convertible", [])]
+        if nc_claims and not nc_report:
+            return (f"{host}: {len(nc_claims)} NON_CONVERTIBLE claim(s) in the ledger but the "
+                    "non_convertible report is empty (a NC outcome hidden from the user)")
+        for i, c in enumerate(claims):
+            if c.get("status") == "LOSSY_WITH_WARNING" and not str(c.get("reason") or "").strip():
+                return (f"{host}: LOSSY_WITH_WARNING claim {i} has no reason — a lossy outcome that "
+                        "can't be surfaced meaningfully in the ledger-derived report (a ledger bug)")
+    return None
+
+
+def _aggregate_ignored_features(all_irs):
+    """Aggregate the per-domain ignored-feature scans (Block 3) into ONE de-duplicated report. Each
+    domain IR carries its zone's scan (identical across a zone's domains), so union + dedup by feature
+    NAME across all domains — and, in a multi-zone run, across zones — collapses the repeats. A REPORT
+    axis only: never touches STATUS or conversion completeness (an unread feature is not a claim).
+    active_abandoned = the real "not covered by this conversion" signal (→ IGNORED_FEATURES count);
+    files vs features are counted separately so a multi-file feature (Snippets) isn't double-counted."""
+    keys = ("active_abandoned", "active_abandoned_files", "native_or_no_action",
+            "handled_or_reported_by_waf_pipeline", "unknown_active")
+    buckets = {k: set() for k in keys}
+    for ir in all_irs:
+        feat = ir.get("metadata", {}).get("ignored_features", {})
+        for k in keys:
+            buckets[k].update(feat.get(k, []))
+    out = {k: sorted(v) for k, v in buckets.items()}
+    out["active_abandoned_count"] = len(buckets["active_abandoned"])
+    out["active_abandoned_files_count"] = len(buckets["active_abandoned_files"])
+    return out
+
+
+def _lossy_items_from_claims(all_irs):
+    """The LOSSY_WITH_WARNING outcomes, read from the LEDGER (each domain's _claims) — the source of
+    truth (Block 3b / Option A). Returns [{hostname, source_keys, reason}], one per LOSSY claim.
+    SUPERSEDES the old conversion_warnings scan, which only saw the ONE path that called
+    _mark_result_lossy (browser_ttl) and MISSED every viewer-op LOSSY (response-header / RHP-rehome),
+    undercounting them. Counting CLAIMS also avoids double-counting browser_ttl (which has both a claim
+    and a conversion_warning) — a LOSSY claim is exactly one item. conversion_warnings stays for
+    NON-outcome notes (quota, min-TLS baseline, case-sensitive path) but is no longer the LOSSY source."""
+    out = []
+    for ir in all_irs:
+        host = ir.get("metadata", {}).get("hostname", "?")
+        for c in ir.get("_claims", []):
+            if c.get("status") == "LOSSY_WITH_WARNING":
+                out.append({"hostname": host,
+                            "source_keys": [list(k) for k in c.get("source_keys", [])],
+                            "reason": c.get("reason", "")})
+    return out
+
+
+def generate_report(all_irs, manifest, shadow_warnings, skipped_domains, csp_quota=None):
+    """Generate conversion_report.md content.
+
+    csp_quota: the EFFECTIVE account Content-Security-Policy length quota (default 1783 when
+    None). The user can declare a raised quota (up to the 8192 hard ceiling) so a large CSP
+    that the conversion already carries EXACT doesn't emit a spurious deploy-blocking warning.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     total_behaviors = sum(len(ir["cache_behaviors"]) for ir in all_irs)
     # Detect S3 the SAME way the scaffold decides to generate an OAC: any
@@ -314,6 +433,24 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     else:
         lines.append("No non-convertible items.")
 
+    # Lossy Converted Items (Block 3b / Option A): LOSSY_WITH_WARNING outcomes read from the LEDGER —
+    # deployed, but NOT a clean EXACT conversion. Listed here (not merely counted or reflected in
+    # COMPLETENESS) so a viewer-op LOSSY (e.g. a response header a viewer-response CFF won't apply to
+    # error responses) is VISIBLE to the user, never ledger-only.
+    lines += ["", "---", "", "## Lossy Converted Items", ""]
+    _lossy = _lossy_items_from_claims(all_irs)
+    if _lossy:
+        lines.append("_Deployed, but each carries a KNOWN behavioral gap you must accept "
+                     "(not a clean EXACT conversion). Read from the ledger._")
+        lines.append("")
+        lines.append("| Domain | Rule | Reason |")
+        lines.append("|--------|------|--------|")
+        for it in _lossy:
+            _ids = ", ".join(sorted({str(k[1]) for k in it["source_keys"]})) or "—"
+            lines.append(f"| {it['hostname']} | {_ids} | {it['reason']} |")
+    else:
+        lines.append("No lossy conversions.")
+
     lines += ["", "---", "", "## Policy Deduplication Summary", ""]
     shared = {pid: v for pid, v in manifest.items() if v["count"] > 1}
     if shared:
@@ -341,7 +478,11 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     for ir in all_irs:
         hostname = ir["metadata"]["hostname"]
         kvs_data = ir["metadata"].get("kvs_data", [])
-        if not kvs_data and not ir["metadata"].get("kvs_requirements", {}).get("needs_continent"):
+        kvs_req = ir["metadata"].get("kvs_requirements", {})
+        # Skip only when there is genuinely nothing to size: no kvs_data AND neither geo KVS table
+        # is needed. A needs_eu-ONLY domain still seeds the eu: entries, so it must NOT be skipped —
+        # the old guard checked needs_continent alone and under-counted the eu-only case.
+        if not kvs_data and not kvs_req.get("needs_continent") and not kvs_req.get("needs_eu"):
             continue
         # Estimate: each entry = key bytes + value bytes + ~20 bytes overhead.
         # AWS measures the store size in BYTES (_nbytes encodes to UTF-8) — a char
@@ -350,7 +491,6 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
         total_bytes = sum(_nbytes(e.get("key", "")) + _nbytes(e.get("value", "")) + 20
                           for e in kvs_data)
         # Continent/EU mappings add ~3KB
-        kvs_req = ir["metadata"].get("kvs_requirements", {})
         if kvs_req.get("needs_continent"):
             total_bytes += 3000
         if kvs_req.get("needs_eu"):
@@ -394,7 +534,8 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     # one means the config must be redesigned before it can deploy. The messages
     # say which, so the user doesn't waste a Support request on an unraisable
     # limit. See _quota_warn.
-    def _quota_warn(count, limit, hard, subject, raise_via="Service Quotas"):
+    def _quota_warn(count, limit, hard, subject, raise_via="Service Quotas",
+                    limit_label="default quota"):
         """Append a soft/hard quota warning if count exceeds (or nears) limit.
 
         Each over-limit warning starts with a machine-readable tag so the final
@@ -407,7 +548,10 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
                            unchanged (the tool has already minimized usage via
                            dedup — there is no further code-side lever).
         `raise_via` names where to request the increase (some quotas are
-        Support-only, not in the Service Quotas console)."""
+        Support-only, not in the Service Quotas console). `limit_label` names the
+        limit in the message — "default quota" for the built-in defaults, or e.g.
+        "declared quota" when the user supplied a custom value (round-14 finding
+        3: never call a user-declared value the "default")."""
         if count > limit:
             if hard:
                 all_warnings.append(
@@ -416,12 +560,21 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
                     f"be rejected as-is — reduce/redesign the source before deploying.")
             else:
                 all_warnings.append(
-                    f"{QUOTA_RAISE} — {subject}: {count} exceeds the default quota of "
+                    f"{QUOTA_RAISE} — {subject}: {count} exceeds the {limit_label} of "
                     f"{limit} (SOFT). The conversion is correct; request an increase via "
                     f"{raise_via}, then deploy unchanged. Deploy is blocked until raised.")
         elif not hard and count > limit * 0.8:
             all_warnings.append(
-                f"{subject}: {count} approaching the default quota of {limit} (SOFT).")
+                f"{subject}: {count} approaching the {limit_label} of {limit} (SOFT).")
+
+    # Effective CSP length quota: default 1783, or a user-declared value (positive, ≤8192)
+    # validated by the SHARED validate_csp_quota (round-14 finding 3 — REJECT zero/negative/
+    # over-ceiling, never clamp). This is a DEPLOY-READINESS gate, NOT a conversion outcome:
+    # a CSP the conversion carries EXACT still needs the account quota raised to deploy, so an
+    # over-quota CSP is a QUOTA-RAISE (deploy blocked until raised), never a redesign. When the
+    # user declares a value the message must call it the "declared quota", not "default".
+    csp_quota_is_custom = csp_quota is not None
+    eff_csp_quota = validate_csp_quota(csp_quota) if csp_quota_is_custom else CSP_DEFAULT_QUOTA
 
     # Per-account custom policy counts (SOFT: 20 each).
     policy_counts = {"cache_policy": 0, "origin_request_policy": 0, "response_headers_policy": 0}
@@ -472,6 +625,18 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
             ch = cfg.get("custom_headers", [])
             _quota_warn(len(ch) if isinstance(ch, list) else 0, 10, False,
                         f"Response headers policy {pid} (used by {used}) custom headers")
+            # CSP length vs the EFFECTIVE account quota (default 1783, raisable to 8192). The
+            # conversion is EXACT regardless; over the effective quota → QUOTA-RAISE (deploy
+            # blocked until the account quota is raised, then deploys unchanged). This is a
+            # soft, raisable limit — request an increase via AWS Support (not Service Quotas).
+            csp_entry = (cfg.get("security_headers") or {}).get("Content-Security-Policy")
+            csp_val = ((csp_entry or {}).get("normalized") or {}).get("value") if csp_entry else None
+            if isinstance(csp_val, str):
+                _quota_warn(len(csp_val), eff_csp_quota, False,
+                            f"Response headers policy {pid} (used by {used}) "
+                            f"Content-Security-Policy length", raise_via="AWS Support",
+                            limit_label=("declared quota" if csp_quota_is_custom
+                                         else "default quota"))
 
     # Per-distribution quotas (all keyed on the domain's own IR).
     for ir in all_irs:
@@ -1011,16 +1176,26 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     # deploy concerns aren't buried in the report / diluted by later steps).
     total_nc = sum(len(b.get("non_convertible", []))
                    for ir in all_irs for b in ir.get("cache_behaviors", []))
-    # LOSSY_WITH_WARNING: converted-and-deployed but with a KNOWN behavioral gap the
-    # user must accept (e.g. a header a viewer CFF won't apply to error responses).
-    # Counted SEPARATELY from clean warnings so it's never conflated with success —
-    # only EXACT conversions (neither non_convertible nor lossy) are clean.
-    lossy_items = [w for w in all_warnings if str(w).startswith("LOSSY_WITH_WARNING")]
+    # LOSSY_WITH_WARNING: converted-and-deployed but with a KNOWN behavioral gap the user must accept
+    # (e.g. a header a viewer CFF won't apply to error responses). Read from the LEDGER (_claims) — the
+    # source of truth (Block 3b / Option A), NOT from conversion_warnings, which only carried the
+    # browser_ttl path and undercounted every viewer-op LOSSY. Counting claims also avoids
+    # double-counting browser_ttl (claim + warning). Only EXACT conversions are clean.
+    lossy_details = _lossy_items_from_claims(all_irs)
     summary = {
         "domains": len(all_irs),
         "total_policies": len(manifest),
         "non_convertible_items": total_nc,
-        "lossy_items": len(lossy_items),          # known-gap conversions (not clean successes)
+        "lossy_items": len(lossy_details),        # known-gap conversions (from the LEDGER, not clean)
+        "lossy_details": lossy_details,           # per-LOSSY {hostname, source_keys, reason} for the report
+        # CONVERSION completeness (from the ledger, separate from STATUS): COMPLETE_EXACT iff every
+        # claim is EXACT; any NON_CONVERTIBLE/LOSSY_WITH_WARNING → PARTIAL_WITH_NC. Does NOT flip the
+        # process STATUS (an expected NC is not an execution failure) — see _completeness_from_claims.
+        "completeness": _completeness_from_claims(all_irs),
+        # IGNORED FEATURES (Block 3): active Cloudflare features the CDN pipeline does not read (a
+        # SEPARATE report axis — NOT in STATUS, NOT in completeness). active_abandoned = real gaps;
+        # native/waf/unknown buckets kept for the full breakdown. See _aggregate_ignored_features.
+        "ignored_features": _aggregate_ignored_features(all_irs),
         "warnings": all_warnings,               # quota + shadow + limit + lossy warnings
         "s3_oac_bucket_policy_required": has_s3,  # every S3 origin needs a manual bucket policy
         "skipped_domains": [sd.get("hostname", "?") for sd in skipped_domains],
@@ -1028,15 +1203,53 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains):
     return "\n".join(lines) + "\n", summary
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: cdn-finalize.py <output_dir> [skipped_domains_json]", file=sys.stderr)
-        sys.exit(1)
+_USAGE = ("Usage: cdn-finalize.py <output_dir> [skipped_domains_json] "
+          "[--csp-quota N]")
 
-    output_dir = os.path.expanduser(sys.argv[1])
+
+def _arg_error(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    print(_USAGE, file=sys.stderr)
+    sys.exit(1)
+
+
+def main():
+    # Optional --csp-quota N: the account's EFFECTIVE Content-Security-Policy length quota
+    # (default 1783, raisable to 8192). Declaring a raised quota suppresses the QUOTA-RAISE
+    # warning for a large CSP the conversion already carries EXACT. Parsed out first so it
+    # doesn't shift the positional args; ALL arg validation (finding 4) happens here so a bad
+    # invocation gives a usage error, never a traceback.
+    argv = list(sys.argv[1:])
+    csp_quota = None
+    while "--csp-quota" in argv:
+        i = argv.index("--csp-quota")
+        if i + 1 >= len(argv):
+            _arg_error("--csp-quota requires a value")
+        if csp_quota is not None:
+            _arg_error("--csp-quota given more than once")
+        try:
+            # SHARED validator (finding 3): reject zero/negative/over-8192, never clamp — so
+            # the CLI and generate_report() agree and the report can't misstate the quota.
+            csp_quota = validate_csp_quota(argv[i + 1])
+        except ValueError as e:
+            _arg_error(f"--csp-quota: {e}")
+        del argv[i:i + 2]
+
+    # Re-validate the POSITIONAL args AFTER stripping options (finding 4): removing an option
+    # can leave zero positionals (`--csp-quota N` alone → argv[0] IndexError), and an unknown
+    # flag or a third positional is a mistake, not a silently-ignored arg.
+    unknown = [a for a in argv if a.startswith("--")]
+    if unknown:
+        _arg_error(f"unknown option(s): {' '.join(unknown)}")
+    if len(argv) < 1:
+        _arg_error("missing required <output_dir>")
+    if len(argv) > 2:
+        _arg_error(f"unexpected extra argument(s): {' '.join(argv[2:])}")
+
+    output_dir = os.path.expanduser(argv[0])
     skipped_domains = []
-    if len(sys.argv) >= 3 and os.path.exists(sys.argv[2]):
-        with open(sys.argv[2]) as f:
+    if len(argv) >= 2 and os.path.exists(argv[1]):
+        with open(argv[1]) as f:
             skipped_domains = json.load(f)
 
     acc_dir = os.path.join(output_dir, "ir", "accumulator")
@@ -1098,8 +1311,18 @@ def main():
         json.dump(manifest_out, f, indent=2, ensure_ascii=False)
     print(f"OK: dedup_manifest.json → {len(manifest)} unique policies")
 
+    # L2 finalize consistency gate (Block 3b): halt LOUD on a ledger/report integrity breach — a
+    # converter bug, not a config problem. FATAL (exit 2) here, BEFORE the report is written, so a
+    # corrupt ledger never ships a misleading conversion_report / cdn_summary.
+    _gate_breach = finalize_ledger_gate(all_irs)
+    if _gate_breach:
+        emit_result("FATAL", exit_after=True, ACTION="FIX",
+                    CONTEXT=f"L2 ledger/report consistency breach — {_gate_breach}. This is a converter "
+                            "bug (not a config problem); the run is halted before the report is written.")
+
     # Step 7: Write conversion report + machine-readable deploy summary
-    report, summary = generate_report(all_irs, manifest, all_shadow_warnings, skipped_domains)
+    report, summary = generate_report(all_irs, manifest, all_shadow_warnings, skipped_domains,
+                                       csp_quota=csp_quota)
     report_path = os.path.join(output_dir, "conversion_report.md")
     with open(report_path, "w") as f:
         f.write(report)
