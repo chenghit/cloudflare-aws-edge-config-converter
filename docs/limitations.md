@@ -55,7 +55,7 @@ A **Host override** (Cloudflare Origin Rule) does **not** change this choice —
 | Snippets | JavaScript code running on Cloudflare's V8 runtime. While Snippets cannot use storage bindings (KV, D1, R2, DO), they can use `fetch()` (subrequests), `HTMLRewriter`, and `request.body` — none of which are available in CloudFront Functions. Snippets that only manipulate headers, URLs, and cookies are theoretically convertible, but these use cases are already covered by Cloudflare's declarative rule types (Redirect Rules, Transform Rules, etc.) which this tool does convert. Snippets that use `fetch()`, `HTMLRewriter`, or body access require Lambda@Edge. | Evaluate each Snippet individually. Simple header/URL logic → CloudFront Functions. `fetch()` or `HTMLRewriter` → Lambda@Edge. `request.cf.botManagement` → AWS WAF Bot Control. |
 | Workers | TypeScript/JavaScript with full Cloudflare platform bindings (KV, Durable Objects, R2, D1, Queues, etc.). Arbitrary business logic that requires understanding intent to rewrite. | Lambda@Edge for request/response processing. Complex Workers may need standalone Lambda behind CloudFront, or a full application rewrite. |
 | URL Normalization | CloudFront normalizes URIs per RFC 3986 by default. No conversion needed. | N/A |
-| Managed Transforms (except True-Client-IP) | Cloudflare-specific features. | CloudFront native equivalents where available |
+| Managed Transforms (except True-Client-IP and security headers) | Cloudflare-specific features. | CloudFront native equivalents where available |
 | Trace | Cloudflare-specific testing feature. | CloudWatch Logs, CloudFront real-time logs |
 
 ### Settings within convertible rule types that cannot be mapped
