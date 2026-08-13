@@ -22,15 +22,21 @@ from cdn_rhp_capabilities import (
     canonical_header as _canonical_rhp_header, security_capability,
 )
 from cdn_common import (emit_result, derive_cert_domain,
-                        pattern_contains, patterns_overlap)
+                        pattern_contains, patterns_overlap, _bad_source_key)
 from cdn_rule_processors import (
     process_redirect_rule, process_rewrite_rule, process_config_rule,
     process_origin_rule, process_cache_rule, process_request_header_transform,
     process_response_header_transform, process_custom_error_rule,
-    process_cloud_connector, process_bulk_redirect_items,
+    process_cloud_connector,
     process_compression_rule,
     IP_SRC_NON_CONVERTIBLE_PHASES,
 )
+
+
+class LedgerError(Exception):
+    """A ledger-integrity breach — a CONVERTER BUG (not a per-config issue). The
+    caller turns this into a FATAL exit; it must never be swallowed."""
+
 
 # ── file discovery ───────────────────────────────────────────────────────────
 
@@ -452,24 +458,16 @@ def make_empty_ir(domain_config):
         # a (source_kind, source_id, json_pointer) TRIPLE per leaf of a config unit's
         # original parameters, captured at source-entry BEFORE any conversion decision,
         # covering ALL source kinds (rule / cloud_connector / bulk_redirect /
-        # managed_transform). Duplicates are PRESERVED (not set-collapsed) so L2 can
-        # reject a repeated key. `_ledger`: the list of recorded Outcome dicts
-        # {source_key:[kind,id,pointer], status, reason, artifact_ids, exact_noop}. The
-        # finalize validator (L2) enforces inventory-keys == ledger-keys, one outcome
-        # per key, NC⇒no artifacts, and artifact back-ownership. Both are KEPT in the
-        # written IR (finalize reads them, then strips) — NOT stripped here. L1 builds
-        # the STRUCTURES + inventory only; sinks start writing outcomes in L2/L3.
+        # managed_transform). Duplicates are PRESERVED (not set-collapsed) so the finalize
+        # gate can reject a repeated key. `_inventory` + `_claims` are KEPT in the written IR
+        # (the finalize ledger gate reads them). L1 builds the inventory; sinks write outcomes
+        # (claims) in L2/L3.
         "_inventory": [],
-        # Three-layer outcome model (L2). `_claims`: DecisionClaims (the capability
-        # layer's verdict per source-key set). `_logical_artifacts`: converted outputs
-        # owned by source keys. `_physical_artifacts`: the dedup/many-to-one layer +
-        # baseline objects. The reconciler (`_reconcile_ledger`) joins these into the
-        # persisted `_ledger` and FATALs on any contract breach. All KEPT in the
-        # written IR for the finalize validator, then stripped there.
+        # `_claims`: the DecisionClaims (the capability layer's verdict per source-key set) —
+        # the ledger the system runs on (finalize gate + completeness read it). The
+        # artifact/physical/reconciler layer (_logical_artifacts / _physical_artifacts /
+        # _ledger) was removed in the round-2 bucket-B cleanup; only claims remain.
         "_claims": [],
-        "_logical_artifacts": [],
-        "_physical_artifacts": [],
-        "_ledger": [],
     }
 
 
@@ -906,30 +904,24 @@ def process_domain(hostname, domain_config, all_rules, ip_lists,
     # filter. (Both internal, stripped below with _native_effects.)
     _enforce_every_rule_accounted(ir)
 
-    # Coordination layer: register logical artifacts from the WIRED producers (bulk
-    # redirect + shared IP-list this turn) and emit one DecisionClaim per group of source
-    # keys sharing an (artifact-set, status, reason). MUST run before _strip_build_internals
-    # (which removes the per-op / per-KVS provenance the coordinator reads). _reconcile_ledger
-    # is still NOT called — most inventory keys have no channel yet, so the hard validator
-    # would FATAL; it goes in once every channel is wired.
+    # Coordination layer: group source keys by (artifact-id-label set, status, reason) and emit
+    # one DecisionClaim per group (the artifact REGISTRY was removed in bucket B; the id labels
+    # remain as stable claim grouping keys). MUST run before _strip_build_internals (which removes
+    # the per-op / per-KVS provenance the coordinator reads).
     _coordinate_artifacts_and_claims(ir)
 
     # Drop build-time-only bookkeeping from the emitted IR (see _strip_build_internals).
     # (`seq` stays ON each op — the JS generator sorts by it; harmless persisted
-    # metadata.) The ledger lists are DELIBERATELY KEPT: the finalize validator (L2)
-    # reads them from the written IR to enforce the outcome contract, then strips them.
+    # metadata.) `_inventory` + `_claims` are DELIBERATELY KEPT: the finalize ledger gate
+    # reads them from the written IR to enforce the no-silent-drop contract.
     _strip_build_internals(ir)
     return ir
 
 
-# Build-time-only IR keys that must NOT reach the written IR. `_logical_index` is an
-# accelerator for emit_artifact holding the SAME dict objects as `_logical_artifacts`;
-# leaving it in would be redundant and, after a JSON round-trip, reload as a SECOND
-# detached copy of every artifact. NB: the ledger lists (_inventory / _ledger / _claims
-# / _logical_artifacts / _physical_artifacts) are DELIBERATELY kept for the finalize
-# validator and are NOT in this set.
+# Build-time-only IR keys that must NOT reach the written IR. NB: `_inventory` and `_claims`
+# are DELIBERATELY kept for the finalize ledger gate and are NOT in this set.
 _BUILD_INTERNAL_KEYS = ("_native_effects", "_entered_rule_ids", "_accounted_rule_ids",
-                        "_seq", "_logical_index", "_unit_ids", "_kvs_index",
+                        "_seq", "_unit_ids", "_kvs_index",
                         "_native_applied", "_native_overlap_nc")
 
 
@@ -973,48 +965,6 @@ _OUTCOME_STATUSES = (OUTCOME_EXACT, OUTCOME_LOSSY, OUTCOME_NON_CONVERTIBLE)
 # is a (kind, id, pointer) triple (list, to stay JSON-safe).
 
 
-def _key(kind, source_id, pointer):
-    return [kind, source_id, pointer]
-
-
-def _bad_source_key(k):
-    """Return a human reason string if `k` is NOT a well-formed source key, else None.
-    The contract (see make_empty_ir) is a (kind, id, pointer) TRIPLE: `kind` and
-    `pointer` are non-empty strings; `id` is a string but MAY be empty — a rule without
-    an id is legal (two empty-id units collide and are caught by the duplicate check,
-    not here). Exception-agnostic so both the API (ValueError) and the reconciler
-    (LedgerError) can enforce the same shape."""
-    if not isinstance(k, (list, tuple)):
-        return f"source key must be a list/tuple, got {type(k).__name__}: {k!r}"
-    if len(k) != 3:
-        return f"source key must be a (kind, id, pointer) triple, got {len(k)} parts: {k!r}"
-    kind, sid, ptr = k
-    if not kind or not isinstance(kind, str):
-        return f"source key kind must be a non-empty string, got {kind!r}"
-    if not isinstance(sid, str):
-        return f"source key id must be a string, got {sid!r}"
-    if not ptr or not isinstance(ptr, str):
-        return f"source key pointer must be a non-empty string, got {ptr!r}"
-    return None
-
-
-def _bad_logical_id_list(lids):
-    """Return a reason string if `lids` is NOT a well-formed logical-artifact-id list,
-    else None. Contract: a list/tuple (NOT a bare string — "abc" would iterate as three
-    ids), non-empty, every element a non-empty string. Exception-agnostic so the emitter
-    (ValueError) and the finalize validator (LedgerError) enforce the same shape with no
-    str() coercion (which would turn None into "None" and collide with a real id)."""
-    if isinstance(lids, str) or not isinstance(lids, (list, tuple)):
-        return (f"logical_artifact_ids must be a list/tuple of ids, got "
-                f"{type(lids).__name__}: {lids!r}")
-    if not lids:
-        return "logical_artifact_ids must have at least one id"
-    for x in lids:
-        if not x or not isinstance(x, str):
-            return f"logical_artifact_ids must all be non-empty strings, got {x!r}"
-    return None
-
-
 def claim_decision(ir, source_keys, status, reason=None, exact_noop=False,
                    artifact_ids=None):
     """Record a DecisionClaim: the capability/decision layer's verdict for a SET of
@@ -1054,65 +1004,6 @@ def claim_decision(ir, source_keys, status, reason=None, exact_noop=False,
     })
 
 
-def emit_artifact(ir, artifact_id, kind, owner_keys):
-    """Register a LOGICAL artifact (a converted output) owned by ≥1 inventory source
-    key. Idempotent per artifact_id — a re-emit MERGES owner_keys (shared/deduped
-    artifacts legitimately have multiple owners), but a re-emit with a DIFFERENT kind
-    is a bug and raises. Uses a dict index (`_logical_index`) so N emits are O(N).
-    `artifact_id` and `kind` must be non-empty stable strings; ≥1 owner is required
-    (an unowned artifact can never trace back to a source leaf)."""
-    if not artifact_id or not isinstance(artifact_id, str):
-        raise ValueError(f"emit_artifact needs a non-empty string id, got {artifact_id!r}")
-    if not kind or not isinstance(kind, str):
-        raise ValueError(f"artifact {artifact_id!r} needs a non-empty string kind, "
-                         f"got {kind!r}")
-    # Validate RAW owner keys before any per-key list() (list("abc") would fabricate a
-    # legal-looking triple). Materialize the iterator, check, then convert.
-    raw_owner_keys = list(owner_keys)
-    if not raw_owner_keys:
-        raise ValueError(f"artifact {artifact_id!r} needs at least one owner key")
-    for k in raw_owner_keys:
-        bad = _bad_source_key(k)
-        if bad:
-            raise ValueError(f"artifact {artifact_id!r} owner: {bad}")
-    owner_keys = [list(k) for k in raw_owner_keys]
-    idx = ir.setdefault("_logical_index", {})
-    if artifact_id in idx:
-        a = idx[artifact_id]
-        if a["kind"] != kind:
-            raise ValueError(f"artifact {artifact_id!r} re-emitted with kind {kind!r} "
-                             f"!= existing {a['kind']!r}")
-        have = {tuple(k) for k in a["owner_keys"]}
-        for k in owner_keys:
-            if tuple(k) not in have:
-                a["owner_keys"].append(list(k))
-                have.add(tuple(k))
-        return
-    a = {"artifact_id": artifact_id, "kind": kind,
-         "owner_keys": [list(k) for k in owner_keys]}
-    ir.setdefault("_logical_artifacts", []).append(a)
-    idx[artifact_id] = a
-
-
-def emit_non_convertible(ir, source_keys, reason, description=""):
-    """A NON_CONVERTIBLE decision for a set of source keys (no artifact). Mirrors into
-    the legacy cache_behaviors[0].non_convertible list too, so the existing report /
-    conversion_report keep working while the ledger is the source of truth."""
-    # Materialize ONCE up front: claim_decision consumes `source_keys` (it does
-    # list(source_keys) internally), so a generator would be exhausted before the report
-    # id-extraction below ran — silently emptying cf_source_rule. Both consumers get the
-    # SAME materialized list.
-    source_keys = list(source_keys)
-    claim_decision(ir, source_keys, OUTCOME_NON_CONVERTIBLE, reason=reason)
-    ids = sorted({k[1] for k in source_keys}) or [""]
-    ir["cache_behaviors"][0]["non_convertible"].append({
-        "cf_source_rule": ids[0] if len(ids) == 1 else ",".join(ids),
-        "description": description,
-        "outcome": OUTCOME_NON_CONVERTIBLE,
-        "reason": reason,
-    })
-
-
 def claim_non_convertible(ir, source_kind, source_id, reason, description="",
                           owned_pointers=None, legacy_behavior=None,
                           legacy_cf_source_rule=None):
@@ -1142,13 +1033,12 @@ def claim_non_convertible(ir, source_kind, source_id, reason, description="",
 
 
 # ── Coordination layer (L2): artifact registration + decision aggregation ──────
-# Artifact-producing channels (this turn: bulk-redirect CFF op + KVS entries, shared
-# IP-list KVS) register LOGICAL artifacts owned by resolved source keys. The coordinator
-# then groups source keys by (artifact-set, status, reason) and emits EXACTLY ONE
-# DecisionClaim per group. Status/reason live on the CONTRIBUTION (the owner ref), never
-# inferred from "has an artifact". This is generic — no bulk/IP-specific branches; those
-# are just the first two producers wired to feed it. _reconcile_ledger stays OFF (most
-# inventory keys are still unclaimed).
+# Artifact-producing channels (bulk-redirect CFF op + KVS entries, shared IP-list KVS)
+# contribute an artifact-id LABEL owned by resolved source keys. The coordinator groups source
+# keys by (artifact-id-set, status, reason) and emits EXACTLY ONE DecisionClaim per group.
+# Status/reason live on the CONTRIBUTION (the owner ref), never inferred from "has an artifact".
+# Generic — no bulk/IP-specific branches. (The artifact REGISTRY was removed in bucket B; the id
+# labels remain as stable claim grouping keys.)
 
 
 def _resolve_ref_to_keys(ir, ref):
@@ -1179,15 +1069,14 @@ def _op_owner_refs(op_or_entry):
 
 
 def _register_artifact_contributions(ir, artifact_id, kind, refs, contributions):
-    """Register ONE logical artifact `artifact_id` (kind) and record each ref's
-    contribution. `refs` are pre-validated owner refs. For each ref: resolve its source
-    keys, emit_artifact(owner=those keys) so the artifact's owner set is the UNION across
-    all refs/callers (shared artifacts accumulate owners), and append (key → artifact_id,
-    status, reason) to `contributions[key]` for the coordinator to aggregate. NC status
-    never reaches here (validator forbids it on an artifact ref)."""
+    """Record each ref's contribution to `contributions[key]` for the coordinator to aggregate.
+    `refs` are pre-validated owner refs. For each ref: resolve its source keys and append
+    (key → artifact_id-label, status, reason). `artifact_id` is the stable grouping LABEL a claim
+    carries (its `artifact_ids`); it no longer materializes a logical artifact (the registry was
+    removed in bucket B). `kind` is now vestigial — kept to avoid churning the coordinator's call
+    sites. NC status never reaches here (the validator forbids it on an artifact ref)."""
     for ref in refs:
         keys = _resolve_ref_to_keys(ir, ref)
-        emit_artifact(ir, artifact_id, kind, keys)
         for k in keys:
             contributions.setdefault(k, []).append(
                 (artifact_id, ref["outcome_status"], ref.get("outcome_reason")))
@@ -1213,10 +1102,10 @@ def _coordinate_artifacts_and_claims(ir):
         if c["status"] == OUTCOME_NON_CONVERTIBLE:
             nc_keys.update(tuple(k) for k in c["source_keys"])
 
-    # Domain namespace — logical artifact ids MUST be globally unique after finalize
-    # flattens every domain's _logical_artifacts into one list. Two domains sharing an IP
-    # list would both mint `kvs:ip:blk:1.1.1.1`, and both would mint `cff:*:bulk_redirect`;
-    # namespacing by the domain's sanitized name keeps them distinct.
+    # Domain namespace — the artifact-id LABELS on claims are DOMAIN-NAMESPACED so two domains
+    # sharing an IP list don't both mint `kvs:ip:blk:1.1.1.1` (or both `cff:*:bulk_redirect`).
+    # The registry that once flattened these is gone (bucket B); the namespacing is kept as the
+    # stable id scheme so a claim's artifact_ids stay distinct across domains.
     ns = ir["metadata"]["sanitized_name"]
 
     # (2) walk WIRED viewer-op producers, register their CFF artifacts, and accumulate —
@@ -1283,6 +1172,13 @@ def _coordinate_artifacts_and_claims(ir):
     for o in ir.get("_native_overlap_nc", []):
         _native_effect_by_id[id(o["effect"])] = o["effect"]
 
+    # A rule applied to N behaviors records N effect OBJECTS for the SAME source leaf; when they
+    # cross-overlap only (win no slot), each would mint a DUPLICATE NC claim (and report line) for
+    # that one leaf. The ledger contract is one claim per leaf, so dedup the cross-overlap NC by
+    # NORMALIZED source identity (source_kind, source_id, owned_pointers) — NOT id(effect), which is
+    # per-object. The winner/exact_noop paths need no such guard (their contributions fold by
+    # grouping). Keep the first effect's reason (duplicates carry the same reason anyway).
+    _claimed_nc_leaves = set()
     for eid, e in _native_effect_by_id.items():
         won = _native_won.get(eid, set())
         overlapped = eid in _native_overlapped
@@ -1299,12 +1195,17 @@ def _coordinate_artifacts_and_claims(ir):
             # cross-overlap ONLY, nothing survived → NON_CONVERTIBLE (via the NC channel so
             # its keys are claimed NC, not left artifact-less-EXACT). The legacy
             # non_convertible report entry was already written at replay time.
-            claim_non_convertible(
-                ir, e["_source_kind"], e["_source_id"],
-                reason=(f"native {e['kind']} cross-overlaps every behavior it could apply "
-                        f"to and survives on none — no CloudFront equivalent"),
-                owned_pointers=(None if e["_owned_key_segments"] is None
-                                else [_key_path_to_pointer(s) for s in e["_owned_key_segments"]]))
+            owned_pointers = (None if e["_owned_key_segments"] is None
+                              else [_key_path_to_pointer(s) for s in e["_owned_key_segments"]])
+            nc_leaf = (e["_source_kind"], e["_source_id"],
+                       None if owned_pointers is None else tuple(owned_pointers))
+            if nc_leaf not in _claimed_nc_leaves:
+                _claimed_nc_leaves.add(nc_leaf)
+                claim_non_convertible(
+                    ir, e["_source_kind"], e["_source_id"],
+                    reason=(f"native {e['kind']} cross-overlaps every behavior it could apply "
+                            f"to and survives on none — no CloudFront equivalent"),
+                    owned_pointers=owned_pointers)
         else:
             # PURE overwrite loser → EXACT exact_noop (sentinel None artifact_id).
             ref = {"source_kind": e["_source_kind"], "source_id": e["_source_id"],
@@ -1431,301 +1332,6 @@ def _viewer_op_artifact_id(ns, beh, phase, idx, op):
 
 def _viewer_op_artifact_kind(op):
     return "cff_op"
-
-
-def emit_physical_artifact(ir, artifact_id, kind, logical_artifact_ids):
-    """Register a non-baseline PHYSICAL artifact (the dedup/many-to-one layer: several
-    logical artifacts collapsing to one deployed policy). `artifact_id` and `kind` must
-    be non-empty strings. Validated at finalize: unique physical id, all referenced
-    logical ids exist, kind consistent."""
-    if not artifact_id or not isinstance(artifact_id, str):
-        raise ValueError(f"emit_physical_artifact needs a non-empty string id, "
-                         f"got {artifact_id!r}")
-    if not kind or not isinstance(kind, str):
-        raise ValueError(f"physical artifact {artifact_id!r} needs a non-empty string "
-                         f"kind, got {kind!r}")
-    bad = _bad_logical_id_list(logical_artifact_ids)
-    if bad:
-        raise ValueError(f"physical artifact {artifact_id!r} {bad}")
-    ir.setdefault("_physical_artifacts", []).append({
-        # Store the caller's real ids verbatim (NO str() coercion — that would turn
-        # None into the string "None" and collide with a same-named logical artifact).
-        "artifact_id": artifact_id, "kind": kind,
-        "logical_artifact_ids": list(logical_artifact_ids),
-        "baseline": False, "baseline_reason": None,
-    })
-
-
-def emit_baseline(ir, artifact_id, kind, reason):
-    """Register a PHYSICAL artifact that is source-INDEPENDENT infrastructure (default
-    behavior, cert vars, DNS) — excluded from reverse-ownership. `artifact_id` must be a
-    non-empty string; `kind` must be in the baseline allowlist; a reason is required.
-    NEVER auto-classify an unowned artifact as baseline."""
-    if not artifact_id or not isinstance(artifact_id, str):
-        raise ValueError(f"emit_baseline needs a non-empty string id, got {artifact_id!r}")
-    if kind not in _BASELINE_KINDS:
-        raise ValueError(f"baseline kind {kind!r} not in allowlist {_BASELINE_KINDS}")
-    if not reason:
-        raise ValueError("baseline requires a reason")
-    ir.setdefault("_physical_artifacts", []).append({
-        "artifact_id": artifact_id, "logical_artifact_ids": [],
-        "baseline": True, "baseline_reason": reason, "kind": kind,
-    })
-
-
-# Physical-artifact kinds that are legitimately source-independent infrastructure.
-_BASELINE_KINDS = ("default_behavior", "cert_var", "dns", "distribution_shell")
-
-
-class LedgerError(Exception):
-    """A ledger-integrity breach — a CONVERTER BUG (not a per-config issue). The
-    caller turns this into a FATAL exit; it must never be swallowed."""
-
-
-def _reconcile_ledger(ir):
-    """Join DecisionClaims + inventory + logical/physical artifacts into the final
-    `_ledger`, enforcing the L2 contract. Raises LedgerError (→ FATAL) on ANY breach —
-    these are converter bugs, not config problems. Returns the ledger (list of
-    per-source-key outcome rows) on success.
-
-    Enforced invariants:
-      1. inventory keys are unique (no duplicate source key);
-      2. every inventory key has EXACTLY ONE DecisionClaim covering it;
-      3. NC claims reference no artifact; LOSSY/NC claims carry a reason;
-      4. EXACT/LOSSY claims have ≥1 logical artifact OR exact_noop;
-      5. every logical artifact has ≥1 owner, and every owner key is in the inventory;
-      6. outcome ↔ ownership are bidirectionally consistent (a claim's artifacts are
-         owned by that claim's keys; an artifact's owners all claim it);
-      7. every claim status is a real status (no UNCLASSIFIED survives)."""
-    # Every inventory key must be a well-formed (kind, id, pointer) triple BEFORE it's
-    # tuple()'d — otherwise a 2-element key would silently become a legal-looking 2-tuple
-    # and produce an illegal ledger row (the API guards this, but a hand-built /
-    # round-tripped _inventory bypasses the API).
-    for k in ir.get("_inventory", []):
-        bad = _bad_source_key(k)
-        if bad:
-            raise LedgerError(f"inventory {bad}")
-    inv = [tuple(k) for k in ir.get("_inventory", [])]
-    # (1) unique inventory keys — Counter is O(n) (was inv.count() per item = O(n²),
-    # which degrades under many bulk-redirect items).
-    from collections import Counter
-    dups = sorted(k for k, n in Counter(inv).items() if n > 1)
-    if dups:
-        raise LedgerError(f"duplicate inventory source keys: {dups}")
-    inv_set = set(inv)
-
-    claims = ir.get("_claims", [])
-    # Build the logical-artifact index WITHOUT a dict comprehension: a comprehension
-    # silently keeps only the last entry when two artifacts share an id, so a
-    # malformed/round-tripped IR carrying a duplicate id (e.g. same id, different kind)
-    # would pass unnoticed. The emit_artifact API prevents duplicates by merging, so a
-    # duplicate in the persisted list is itself an integrity breach — reject it here,
-    # and re-verify id/kind shape (the API guard is gone after a JSON round-trip).
-    logical = {}
-    for a in ir.get("_logical_artifacts", []):
-        aid = a.get("artifact_id")
-        if not aid or not isinstance(aid, str):
-            raise LedgerError(f"logical artifact has empty/invalid id: {a!r}")
-        if not a.get("kind") or not isinstance(a.get("kind"), str):
-            raise LedgerError(f"logical artifact {aid!r} has empty/invalid kind: "
-                              f"{a.get('kind')!r}")
-        if aid in logical:
-            raise LedgerError(f"duplicate logical artifact id {aid!r} in "
-                              f"_logical_artifacts (would silently overwrite)")
-        logical[aid] = a
-
-    # (2) one claim per inventory key
-    covered = {}  # key -> claim index
-    for i, c in enumerate(claims):
-        if c["status"] not in _OUTCOME_STATUSES:
-            raise LedgerError(f"claim {i} has non-final status {c['status']!r}")
-        # A claim with no source key is meaningless — it can neither cover an inventory
-        # key nor own an artifact. Reject (the API guards this, but a hand-built /
-        # round-tripped claim can carry [] and would otherwise sit as a silent no-op).
-        if not c["source_keys"]:
-            raise LedgerError(f"claim {i} has no source key")
-        for k in c["source_keys"]:
-            bad = _bad_source_key(k)
-            if bad:
-                raise LedgerError(f"claim {i} {bad}")
-        # exact_noop is an artifact-less EXACT (re-verified here — the API guard is gone
-        # for a hand-built / JSON-reloaded claim).
-        if c["exact_noop"] and c["status"] != OUTCOME_EXACT:
-            raise LedgerError(f"claim {i} exact_noop is only valid with EXACT, "
-                              f"not {c['status']!r}")
-        if c["exact_noop"] and c["artifact_ids"]:
-            raise LedgerError(f"claim {i} is exact_noop but references artifacts "
-                              f"{c['artifact_ids']} (exact_noop means artifact-less)")
-        # (3) reason / artifact rules
-        if c["status"] in (OUTCOME_LOSSY, OUTCOME_NON_CONVERTIBLE) and not c.get("reason"):
-            raise LedgerError(f"{c['status']} claim {i} missing reason")
-        if c["status"] == OUTCOME_NON_CONVERTIBLE and c["artifact_ids"]:
-            raise LedgerError(f"NON_CONVERTIBLE claim {i} references artifacts "
-                              f"{c['artifact_ids']}")
-        # (4) EXACT/LOSSY need an artifact or exact_noop
-        if c["status"] in (OUTCOME_EXACT, OUTCOME_LOSSY) \
-                and not c["artifact_ids"] and not c["exact_noop"]:
-            raise LedgerError(f"{c['status']} claim {i} has no artifact and is not exact_noop")
-        for aid in c["artifact_ids"]:
-            if aid not in logical:
-                raise LedgerError(f"claim {i} references unknown logical artifact {aid!r}")
-        for k in c["source_keys"]:
-            kt = tuple(k)
-            if kt not in inv_set:
-                raise LedgerError(f"claim {i} covers key not in inventory: {kt}")
-            if kt in covered:
-                raise LedgerError(f"key {kt} covered by >1 claim ({covered[kt]}, {i})")
-            covered[kt] = i
-
-    # (2 cont.) every inventory key must be covered
-    missing = sorted(inv_set - set(covered))
-    if missing:
-        raise LedgerError(f"inventory keys with no DecisionClaim (would be a silent "
-                          f"drop): {missing}")
-
-    # (5) logical artifact ownership + (6) STRICT bidirectional consistency.
-    claim_arts = {}  # artifact_id -> set of claim indices referencing it
-    for i, c in enumerate(claims):
-        for aid in c["artifact_ids"]:
-            claim_arts.setdefault(aid, set()).add(i)
-    # A claim that references artifacts asserts ALL its keys co-own them. So for each
-    # artifact, its owner-set must EQUAL the union of the keys of every claim that
-    # references it — not merely be a subset (a claim over [/a,/b] whose artifact is
-    # owned only by /a would falsely give /b's ledger row that artifact; split the
-    # claim or add /b as an owner).
-    for aid, a in logical.items():
-        if not a["owner_keys"]:
-            raise LedgerError(f"logical artifact {aid!r} has no owner")
-        for k in a["owner_keys"]:
-            bad = _bad_source_key(k)
-            if bad:
-                raise LedgerError(f"artifact {aid!r} owner: {bad}")
-            if tuple(k) not in inv_set:
-                raise LedgerError(f"artifact {aid!r} owner {tuple(k)} not in inventory")
-        if aid not in claim_arts:
-            raise LedgerError(f"logical artifact {aid!r} is owned but no claim "
-                              f"references it (orphan artifact)")
-        owner_set = {tuple(k) for k in a["owner_keys"]}
-        claim_key_set = set()
-        for ci in claim_arts[aid]:
-            claim_key_set |= {tuple(k) for k in claims[ci]["source_keys"]}
-        if owner_set != claim_key_set:
-            raise LedgerError(
-                f"artifact {aid!r} ownership mismatch: owners={sorted(owner_set)} "
-                f"but claiming-keys={sorted(claim_key_set)} (every key of a claim that "
-                f"lists an artifact must co-own it — split the claim or fix owners)")
-
-    # Build the per-source-key ledger rows (one row per inventory key). PHYSICAL-layer
-    # validation is deferred to finalize (physical dedup/mapping only exists then) —
-    # see validate_physical_artifacts; process_domain does the LOGICAL reconcile only.
-    ledger = []
-    for kt in sorted(inv_set):
-        c = claims[covered[kt]]
-        ledger.append({
-            "source_key": list(kt),
-            "status": c["status"],
-            "reason": c.get("reason"),
-            "artifact_ids": list(c["artifact_ids"]),
-            "exact_noop": c["exact_noop"],
-        })
-    return ledger
-
-
-def validate_physical_artifacts(logical_artifacts, physical_artifacts):
-    """FINALIZE-stage physical-layer validation (physical dedup/mapping only exists
-    after policies are deduped). Takes the LOSSLESS raw data — `logical_artifacts` is
-    the flattened list of every domain's `_logical_artifacts` dicts, `physical_artifacts`
-    the list of physical-artifact dicts — and builds its own id→kind index internally
-    so no caller can drop the kind (a {id: kind} map or bare set of ids let finding-1's
-    kind check be bypassed at the interface; a caller-built dict comprehension would
-    silently collapse a cross-domain duplicate id). There is NO compatibility mode and
-    NO unknown-kind branch: every non-baseline mapping runs the kind check.
-
-    Raises LedgerError on: a logical artifact with an empty/invalid id or kind, or a
-    DUPLICATE logical id across the flattened input; duplicate physical id; a
-    non-baseline physical with an empty/invalid kind; a non-baseline physical
-    referencing a logical id that doesn't exist (ghost); a physical whose kind ≠ a
-    logical artifact it collapses (a dedup collapse is kind-HOMOGENEOUS — a cff_op
-    logical must never map into an rhp physical); a baseline carrying logical ids or a
-    bad kind/reason; a non-baseline with no logical ids; a logical artifact mapped to NO
-    physical artifact. Returns None."""
-    # Build the id→kind index HERE (not the caller) — validating id/kind shape and
-    # rejecting duplicate ids, so a cross-domain collision can't be silently overwritten.
-    logical_kinds = {}
-    for a in logical_artifacts:
-        if not isinstance(a, dict):
-            raise LedgerError(f"logical artifact must be a dict, got "
-                              f"{type(a).__name__}: {a!r} (pass the raw "
-                              f"_logical_artifacts list, not a set/map of ids)")
-        lid = a.get("artifact_id")
-        if not lid or not isinstance(lid, str):
-            raise LedgerError(f"logical artifact has empty/invalid id: {a!r}")
-        lkind = a.get("kind")
-        if not lkind or not isinstance(lkind, str):
-            raise LedgerError(f"logical artifact {lid!r} has empty/invalid kind: {lkind!r}")
-        if lid in logical_kinds:
-            raise LedgerError(f"duplicate logical artifact id {lid!r} across domains "
-                              f"(would silently overwrite)")
-        logical_kinds[lid] = lkind
-
-    seen = set()
-    mapped_logical = set()
-    for p in physical_artifacts:
-        if not isinstance(p, dict):
-            raise LedgerError(f"physical artifact must be a dict, got "
-                              f"{type(p).__name__}: {p!r}")
-        pid = p.get("artifact_id")
-        if not pid or not isinstance(pid, str):
-            raise LedgerError(f"physical artifact has empty/invalid id: {p!r}")
-        if pid in seen:
-            raise LedgerError(f"duplicate physical artifact id {pid!r}")
-        seen.add(pid)
-        # `baseline` is a SCHEMA field — require a real bool. Truthiness would accept
-        # the string "false", a number, or a missing key, letting a hand-built /
-        # round-tripped IR misclassify an artifact and skip the ownership contract.
-        baseline = p.get("baseline")
-        if not isinstance(baseline, bool):
-            raise LedgerError(f"physical {pid!r} baseline must be a bool, got "
-                              f"{type(baseline).__name__}: {baseline!r}")
-        if baseline:
-            # A baseline carries NO logical ids — the persisted schema is EXACTLY the
-            # empty list, not None / "" / () (all of which are falsy but off-schema).
-            lids = p.get("logical_artifact_ids")
-            if lids != [] or not isinstance(lids, list):
-                raise LedgerError(f"baseline physical {pid!r} logical_artifact_ids must "
-                                  f"be exactly [], got {lids!r}")
-            if p.get("kind") not in _BASELINE_KINDS:
-                raise LedgerError(f"baseline physical {pid!r} kind {p.get('kind')!r} "
-                                  f"not in allowlist")
-            if not p.get("baseline_reason"):
-                raise LedgerError(f"baseline physical {pid!r} missing reason")
-            continue
-        pkind = p.get("kind")
-        if not pkind or not isinstance(pkind, str):
-            raise LedgerError(f"non-baseline physical {pid!r} has empty/invalid kind "
-                              f"{pkind!r}")
-        # The persisted gate reads JSON (never yields tuples), so require a strict list —
-        # not the list/tuple the emitter API accepts.
-        lids = p.get("logical_artifact_ids")
-        if not isinstance(lids, list):
-            raise LedgerError(f"non-baseline physical {pid!r} logical_artifact_ids must "
-                              f"be a list, got {type(lids).__name__}: {lids!r}")
-        bad = _bad_logical_id_list(lids)
-        if bad:
-            raise LedgerError(f"non-baseline physical {pid!r} {bad}")
-        for lid in lids:
-            if lid not in logical_kinds:
-                raise LedgerError(f"physical {pid!r} references ghost logical id {lid!r}")
-            if logical_kinds[lid] != pkind:
-                raise LedgerError(
-                    f"physical {pid!r} (kind {pkind!r}) collapses logical {lid!r} of "
-                    f"kind {logical_kinds[lid]!r} — a physical artifact must be "
-                    f"kind-homogeneous (cannot map e.g. a cff_op logical into an rhp "
-                    f"physical)")
-            mapped_logical.add(lid)
-    unmapped = sorted(set(logical_kinds) - mapped_logical)
-    if unmapped:
-        raise LedgerError(f"logical artifacts mapped to NO physical artifact: {unmapped}")
 
 
 def _mark_result_non_convertible(ir, result, reason, expr=None, source_kind="rule",
@@ -3217,6 +2823,21 @@ def _process_managed_transforms(ir, managed_transforms, default_beh):
                                    "operation": "add", "_managed": True}, src,
                                   source_kind="managed_transform", source_id=mt_id)
 
+    # Every OTHER enabled managed transform (e.g. add_visitor_location_headers) is inventoried above
+    # but has NO CloudFront-equivalent managed transform — mark it NON_CONVERTIBLE (claim + report) so
+    # it cannot silently vanish (the stated intent of inventorying every MT). The two ids handled
+    # above already produce their own claims (True-Client-IP = EXACT viewer op; security headers =
+    # native RHP effect), so skip them here.
+    _HANDLED_MT_IDS = {"add_true_client_ip_headers", "add_security_headers"}
+    for h in req_headers + resp_headers:
+        if h.get("enabled") and h.get("id") not in _HANDLED_MT_IDS:
+            claim_non_convertible(
+                ir, "managed_transform", unit_of[id(h)],
+                reason=(f"Cloudflare managed transform {h.get('id')!r} has no CloudFront-equivalent "
+                        "managed transform; apply the equivalent request/response header logic "
+                        "explicitly if needed"),
+                description=f"Managed Transform: {h.get('id')}")
+
 
 def _mark_cache_non_convertible(ir, result, expr=None, source_kind="rule", source_id=None):
     """Record a cache rule whose scope can't be expressed as a CloudFront path
@@ -3271,21 +2892,6 @@ def _mark_status_code_ttl_non_convertible(ir, result, source_kind="rule", source
                    "(not exact, not 2xx). Handle per-status caching at the origin "
                    "via Cache-Control."),
     })
-
-
-# Cloudflare default cached extensions (~70 types)
-# Source: https://developers.cloudflare.com/cache/concepts/default-cache-behavior/
-CLOUDFLARE_DEFAULT_CACHED_EXTENSIONS = {
-    "7z", "csv", "gif", "midi", "png", "tif", "zip",
-    "avi", "doc", "gz", "mkv", "ppt", "tiff", "zst",
-    "avif", "docx", "ico", "mp3", "pptx", "ttf",
-    "apk", "dmg", "iso", "mp4", "ps", "webm",
-    "bin", "ejs", "jar", "ogg", "rar", "webp",
-    "bmp", "eot", "jpg", "otf", "svg", "woff",
-    "bz2", "eps", "jpeg", "pdf", "svgz", "woff2",
-    "class", "exe", "js", "pict", "swf", "xls",
-    "css", "flac", "mid", "pls", "tar", "xlsx",
-}
 
 
 def _process_default_cache_behavior(ir, hostname, domain_config, origin_content, all_rules, apex):

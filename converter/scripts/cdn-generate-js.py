@@ -209,20 +209,6 @@ def _cf_regex_to_js(pattern):
     return pattern.replace("/", "\\/")
 
 
-# ── full_uri wildcard splitting ──────────────────────────────────────────────
-
-def _split_full_uri_wildcard(pattern):
-    """Split full_uri wildcard into (host_pattern, path_pattern) or None."""
-    m = re.match(r"https?://", pattern)
-    if not m:
-        return None
-    rest = pattern[m.end():]
-    slash_idx = rest.find("/")
-    if slash_idx == -1:
-        return rest, "/*"
-    return rest[:slash_idx], rest[slash_idx:]
-
-
 # ── Condition → JS ───────────────────────────────────────────────────────────
 
 # Short field names that have no direct accessor but ARE convertible because

@@ -1428,7 +1428,7 @@ def value_expression_type_unconvertible(expr, context=None):
     signature validation (arity / arg-types / context / node-shape+literal constraints); (2) the
     result type is exactly `string` (a header value must be a string; number/array/bytes/boolean/
     ip/unknown → NC unless explicitly converted via to_string / join / encode_base64). Parse
-    failures are handled by value_expression_unmappable, so a parse failure returns None here
+    failures are reported upstream (lowering/processor), so a parse failure returns None here
     (no double-report). `context` is the emit context (e.g. request_header / response_header)."""
     try:
         tree = parse_dynamic_expression(expr)
@@ -1755,10 +1755,6 @@ def _is_tcp_port(v):
 
 def _is_nonempty_str(v):
     return isinstance(v, str) and v != ""
-
-
-def _is_str(v):
-    return isinstance(v, str)
 
 
 VIEWER_OP_CONTRACTS = {
@@ -2304,7 +2300,7 @@ def context_target(context):
 
 def find_unmappable_fields(tree, target="cff"):
     """AST-native: return a reason for the FIRST field in `tree` with no CloudFront source, else
-    None. The tree-native core of value_expression_unmappable — callers that already parsed pass
+    None. The tree-native field-source check — callers that already parsed pass
     the tree so there's no re-parse (round-26 finding 4)."""
     for f in _dyn_tree_fields(tree):
         ok, reason = field_convertibility(f, target)
@@ -2385,7 +2381,7 @@ def validate_dynamic_tree(tree, context, target="cff", source=True):
     """AST-native: the FULL faithful-conversion proof on an already-parsed tree. Returns a reason
     on the first failure, else None. Runs (in order) the STRICT NODE SCHEMA, the field-source
     screen, the signature/context/node-shape contract, and the string-result-type requirement — the
-    proofs that were spread across value_expression_unmappable + value_expression_type_unconvertible,
+    proofs that were previously spread across separate string-input value checks,
     but on ONE tree (round-26 finding 4). Used by lower_dynamic_value AND the hard-gate re-verifier.
     The node-schema runs FIRST so a structurally-bogus reloaded AST (literal dict/None, field with
     no value) is rejected before any type inference trusts it (round-27 finding 3)."""
@@ -2411,18 +2407,6 @@ def validate_dynamic_tree(tree, context, target="cff", source=True):
         return (f"non-string result type ({rtype}); a value must be a string — convert it "
                 "explicitly (to_string / join / encode_base64)")
     return None
-
-
-def value_expression_unmappable(expr, target="cff"):
-    """String-input wrapper around find_unmappable_fields (kept for compat/tests + the redirect/
-    rewrite/condition callers that still hold a string). Parse failure → a reason (round-15).
-    PRODUCTION lowering uses the tree-native API; do not add new string-input callers."""
-    try:
-        tree = parse_dynamic_expression(expr)
-    except Exception as e:
-        return (f"dynamic value expression {expr!r} could not be parsed ({e}); "
-                f"CloudFront has no faithful equivalent")
-    return find_unmappable_fields(tree, target)
 
 
 def condition_unmappable_fields(cond, target="cff"):

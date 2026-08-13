@@ -1316,8 +1316,10 @@ def _place_override(origin_type, params):
           "origin_type": origin_type, "origin_content": "bucket.s3.amazonaws.com"}
     ir = _pre.make_empty_ir(dc)
     _pre.find_or_create_behavior(ir, "*", dc, "bucket.s3.amazonaws.com")
-    # outcome_status is mandatory on a converted result reaching generic placement (a real
-    # processor sets it; this hand-built fixture must too).
+    # A real processor sets outcome_status AND process_domain inventories the unit at
+    # source-entry; this hand-built fixture must do both, so a result reaching generic
+    # placement can resolve its provenance (the S3-drop path claims the whole unit EXACT).
+    _seed_inventory(ir, {"id": "r", "action_parameters": params})
     _pre._place_result(ir, {"type": "origin_override", "cf_source_rule": "r",
                             "description": "d", "condition": {"always": True}, "raw_expression": None,
                             "outcome_status": _pre.OUTCOME_EXACT,
@@ -1733,6 +1735,47 @@ check("gate check 3 control: LOSSY WITH a reason but NO conversion_warning passe
       _gate(_gate_ir([{"status": "LOSSY_WITH_WARNING", "source_keys": [["rule", "r", "/a"]],
                        "reason": "viewer-response gap"}], inventory=[["rule", "r", "/a"]])),
       expect_substr="PASS")
+# (2) malformed inventory source key (not a (kind,id,pointer) triple) -> breach
+check("gate check 2: malformed inventory source key -> breach",
+      _gate(_gate_ir([{"status": "EXACT", "source_keys": [["rule", "r", "/a"]]}],
+                     inventory=[["rule", "r"]])), expect_substr="malformed inventory source key")
+# (3) malformed claim source key -> breach
+check("gate check 3s: malformed claim source key -> breach",
+      _gate(_gate_ir([{"status": "EXACT", "source_keys": [["rule", "r"]]}],
+                     inventory=[["rule", "r", "/a"]])), expect_substr="malformed source key")
+# (4) duplicate inventory key -> breach (a leaf inventoried twice merges units)
+check("gate check 4: duplicate inventory source key -> breach",
+      _gate(_gate_ir([{"status": "EXACT", "source_keys": [["rule", "r", "/a"]]}],
+                     inventory=[["rule", "r", "/a"], ["rule", "r", "/a"]])),
+      expect_substr="duplicate inventory source key")
+# (5) one inventory leaf covered by TWO claims -> breach (one leaf, one fate = disjointness)
+check("gate check 5: inventory leaf covered by two claims -> breach",
+      _gate(_gate_ir([{"status": "EXACT", "source_keys": [["rule", "r", "/a"]]},
+                      {"status": "EXACT", "source_keys": [["rule", "r", "/a"]]}],
+                     inventory=[["rule", "r", "/a"]])), expect_substr="MORE THAN ONE")
+# control: a valid artifact-less exact_noop EXACT claim passes (the gate must NOT reject it)
+check("gate control: valid exact_noop claim passes",
+      _gate(_gate_ir([{"status": "EXACT", "source_keys": [["rule", "r", "/a"]],
+                       "exact_noop": True, "artifact_ids": []}],
+                     inventory=[["rule", "r", "/a"]])), expect_substr="PASS")
+# (5, no-silent-drop) an UNCLAIMED leaf whose unit IS in the non_convertible report -> pass (the
+# legitimate second channel: many cache-rule leaves are reported at the rule level, not per-leaf-claimed)
+check("gate check 5b: unclaimed leaf covered by a rule-level NC report entry -> pass",
+      _gate(_gate_ir([{"status": "EXACT", "source_keys": [["rule", "r", "/a"]]}],
+                     inventory=[["rule", "r", "/a"], ["rule", "r", "/b"]],
+                     non_convertible=[{"cf_source_rule": "r", "reason": "cache leaf NC"}])),
+      expect_substr="PASS")
+# (5) an unclaimed leaf with ONLY a conversion_warning (no NC report entry) is NOT covered -> breach
+check("gate check 5c: unclaimed leaf with only a conversion_warning -> breach (warnings != coverage)",
+      _gate(_gate_ir([{"status": "EXACT", "source_keys": [["rule", "r", "/a"]]}],
+                     inventory=[["rule", "r", "/a"], ["rule", "r", "/b"]],
+                     conversion_warnings=["a warning about /b"])),
+      expect_substr="silently dropped")
+# (5) an unclaimed leaf with NO claim AND no report entry -> breach (a genuine silent drop)
+check("gate check 5d: unclaimed leaf with no claim and no report -> breach",
+      _gate(_gate_ir([{"status": "EXACT", "source_keys": [["rule", "r", "/a"]]}],
+                     inventory=[["rule", "r", "/a"], ["rule", "r", "/b"]])),
+      expect_substr="silently dropped")
 
 print("== LOSSY items from the LEDGER (Step-6 Block 3b / Option A): claim-derived, no undercount/double ==")
 _DC_L = {"hostname": "l.example.com", "apex_domain": "example.com", "origin_type": "custom",

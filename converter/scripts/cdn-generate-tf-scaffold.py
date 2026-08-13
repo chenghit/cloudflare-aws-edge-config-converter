@@ -56,10 +56,6 @@ def has_viewer_response_ops(ir):
     return any(len(b.get("viewer_response_ops", [])) > 0 for b in ir["cache_behaviors"])
 
 
-def _default_beh(ir):
-    return next(b for b in ir["cache_behaviors"] if b["path_pattern"] == "*")
-
-
 def _op_runs_on_behavior(scope, bp):
     """True if a viewer op scoped to pattern `scope` can execute for a request that
     behavior `bp` actually SERVES. CloudFront routes each request to the first
@@ -98,12 +94,6 @@ def _behavior_needs_cff(ir, beh, ops_key):
 
 
 # ── HCL generation helpers ───────────────────────────────────────────────────
-
-def hcl_string(val):
-    if val is None:
-        return "null"
-    return f'"{val}"'
-
 
 def hcl_bool(val):
     return "true" if val else "false"

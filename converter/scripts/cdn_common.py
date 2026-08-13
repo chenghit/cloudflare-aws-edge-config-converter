@@ -239,6 +239,27 @@ def patterns_overlap(a, b):
     return go(0, 0)
 
 
+def _bad_source_key(k):
+    """Return a human reason string if `k` is NOT a well-formed source key, else None.
+    The contract (see make_empty_ir) is a (kind, id, pointer) TRIPLE: `kind` and
+    `pointer` are non-empty strings; `id` is a string but MAY be empty — a rule without
+    an id is legal (two empty-id units collide and are caught by the duplicate check,
+    not here). Exception-agnostic and SHARED so the write-side API (ValueError) and the
+    finalize ledger gate enforce the SAME shape from one definition."""
+    if not isinstance(k, (list, tuple)):
+        return f"source key must be a list/tuple, got {type(k).__name__}: {k!r}"
+    if len(k) != 3:
+        return f"source key must be a (kind, id, pointer) triple, got {len(k)} parts: {k!r}"
+    kind, sid, ptr = k
+    if not kind or not isinstance(kind, str):
+        return f"source key kind must be a non-empty string, got {kind!r}"
+    if not isinstance(sid, str):
+        return f"source key id must be a string, got {sid!r}"
+    if not ptr or not isinstance(ptr, str):
+        return f"source key pointer must be a non-empty string, got {ptr!r}"
+    return None
+
+
 # STATUS → exit code (SCRIPT_STANDARDS). BLOCKED is a completed run with an
 # undeployable artifact, not a script failure → exit 0 (the block carries the
 # don't-deploy signal). OK also 0; ERROR 1; FATAL 2; PARTIAL 3.

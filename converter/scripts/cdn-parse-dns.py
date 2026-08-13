@@ -129,7 +129,6 @@ def main():
 
     # Check B: SaaS-Fallback-Origin.txt
     saas_fallback_path = os.path.join(os.path.dirname(dns_path), "SaaS-Fallback-Origin.txt")
-    saas_origin = None
     if os.path.exists(saas_fallback_path):
         try:
             with open(saas_fallback_path) as f:
@@ -137,7 +136,6 @@ def main():
             if saas_data.get("success") and isinstance(saas_data.get("result"), dict):
                 origin = saas_data["result"].get("origin", "")
                 if origin:
-                    saas_origin = origin
                     saas_reasons.append(f"SaaS-Fallback-Origin.txt: {origin}")
         except (json.JSONDecodeError, KeyError):
             pass

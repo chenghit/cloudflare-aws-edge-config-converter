@@ -11,8 +11,8 @@ This is the FIRST wired channel. It proves the provenance spine the rest of L2 b
     still agrees;
   - the generator-input and split-ownership regressions the reviewer asked for.
 
-Reconciliation (_reconcile_ledger) is deliberately NOT exercised end-to-end here: only the
-NC channel is wired, so a full domain's other leaves have no claim yet.
+The reconciler was removed in the round-2 bucket-B cleanup; the ledger contract is now enforced
+by the finalize gate (no silent drops: every leaf has a claim OR a rule-level NC report entry).
 
 Run: python3 test_nc_provenance.py   (exit 0 = all pass). Pure; no deps.
 """
@@ -86,6 +86,20 @@ def _ref(source_id, segs=None, kind="rule", status=None, reason=None):
     ref always carries an explicit status now); pass status/reason for the LOSSY cases."""
     return {"source_kind": kind, "source_id": source_id, "owned_key_segments": segs,
             "outcome_status": status or _pre.OUTCOME_EXACT, "outcome_reason": reason}
+
+
+def _owned_artifacts(ir, id_substr=None):
+    """Reconstruct the (removed) _logical_artifacts view {artifact_id -> owner source-key tuples}
+    from the LEDGER: a claim's source_keys own its artifact_ids (the coordinator populates the two
+    together from the same resolved keys, so their union is the artifact's owner set). `id_substr` selects a KIND
+    via the id string — ':cff:' (cff_op), ':kvs:ip:' / ':kvs:error:' / ':kvs:redirect:' (kvs),
+    ':native:' (native_effect). Ownership now lives on the claim; this is the authoritative view."""
+    owners = {}
+    for c in ir.get("_claims", []):
+        for a in c.get("artifact_ids", []):
+            if id_substr is None or id_substr in a:
+                owners.setdefault(a, set()).update(tuple(k) for k in c["source_keys"])
+    return owners
 
 
 print("== resolver: whole-unit vs subset ==")
@@ -167,13 +181,6 @@ check("whole-unit NC claims EVERY inventory leaf of the unit",
       f"inv={inv_rd} claimed={rd_claim_keys}")
 check("whole-unit NC claim keys are disjoint",
       len(rd_claim_keys) == len(set(rd_claim_keys)))
-
-print("== generator input to emit_non_convertible (report id not emptied) ==")
-ir = _ir_with_inventory([("rule", "g", "/a")])
-_pre.emit_non_convertible(ir, (k for k in [("rule", "g", "/a")]), "no equiv", "d")
-check("generator: claim recorded", len(ir["_claims"]) == 1)
-check("generator: cf_source_rule not emptied",
-      ir["cache_behaviors"][0]["non_convertible"][0]["cf_source_rule"] == "g")
 
 print("== claim_non_convertible: subset vs whole-unit + disjointness ==")
 ir = _ir_with_inventory([("rule", "u", "/x"), ("rule", "u", "/y")])
@@ -428,6 +435,18 @@ ir = _pd(mt={"managed_request_headers": [{"enabled": True}, {"enabled": True}]})
 munits = sorted(k[1] for k in ir["_inventory"] if k[0] == "managed_transform")
 check("#8 two id-less managed transforms -> distinct mt_req#index units",
       munits == ["mt_req#0", "mt_req#1"])
+# add_visitor_location_headers (an enabled MT with no CloudFront equivalent) must NOT silently vanish:
+# an NC claim on its /$action leaf AND a non_convertible report entry (bucket-B silent-drop fix).
+_irVL = _pd(mt={"managed_request_headers": [{"id": "add_visitor_location_headers", "enabled": True}]})
+_vlC = [c for c in _irVL["_claims"] if c["status"] == "NON_CONVERTIBLE"
+        and any(k[1] == "add_visitor_location_headers" for k in c["source_keys"])]
+_vlR = [e for b in _irVL["cache_behaviors"] for e in b.get("non_convertible", [])
+        if e.get("cf_source_rule") == "add_visitor_location_headers"]
+check("#8 add_visitor_location_headers -> ONE NC claim on its /$action leaf (not a silent drop)",
+      len(_vlC) == 1 and [list(k) for k in _vlC[0]["source_keys"]]
+      == [["managed_transform", "add_visitor_location_headers", "/$action"]])
+check("#8 add_visitor_location_headers -> non_convertible report entry (surfaced to the user)",
+      len(_vlR) == 1 and "no CloudFront-equivalent" in (_vlR[0].get("reason") or ""))
 
 print("== FINDING (spine) 9: bulk aggregation op keeps ALL owner refs (pre-strip) ==")
 # Build the bulk op directly (process_domain strips provenance at the end); assert the
@@ -805,10 +824,10 @@ check("#19 each bulk claim references BOTH the shared CFF artifact AND its own K
       f"got {[c['artifact_ids'] for c in _by_item.values()]}")
 check("#19 the two claims reference DIFFERENT KVS artifacts (per-item)",
       _by_item["L#0"]["artifact_ids"] != _by_item["L#1"]["artifact_ids"])
-_cff19 = [a for a in _ir19["_logical_artifacts"] if a["kind"] == "cff_op"]
+_cff19 = _owned_artifacts(_ir19, ":cff:")
 check("#19 exactly ONE shared CFF artifact", len(_cff19) == 1)
 check("#19 shared CFF artifact owned by BOTH items (union of keys)",
-      sorted(set(k[1] for k in _cff19[0]["owner_keys"])) == ["L#0", "L#1"])
+      sorted(set(k[1] for k in next(iter(_cff19.values())))) == ["L#0", "L#1"])
 check("#19 each bulk claim is EXACT (bulk item is EXACT)",
       all(c["status"] == "EXACT" for c in _by_item.values()))
 
@@ -823,6 +842,24 @@ _pre._append_kvs_entry(_ir19b, "redirect:foo", "v",
                        [_ref("X#0", [["source_url"]], kind="bulk_redirect")])
 check("#19 NC key that also owns a converted artifact -> FATAL",
       _raises_ledger(lambda: _pre._coordinate_artifacts_and_claims(_ir19b)) is not None)
+
+# 2c dedup (bucket B): a rule applied to N behaviors records N cross-overlap-only effect OBJECTS for
+# the SAME source leaf; the coordinator must mint ONE NC claim per leaf, not one per object.
+_ir2cd = _pre.make_empty_ir(DC)
+_pre.find_or_create_behavior(_ir2cd, "*", DC, "o.net")
+_ir2cd["_inventory"] = [["rule", "rN", "/edge_ttl/mode"]]
+_mk2cd = lambda: {"kind": "ttl_respect_origin", "_source_kind": "rule", "_source_id": "rN",
+                  "_owned_key_segments": [["edge_ttl", "mode"]]}
+_ir2cd["_native_overlap_nc"] = [{"effect": _mk2cd(), "behavior": "*a"},
+                                {"effect": _mk2cd(), "behavior": "*b"}]
+_ir2cd["_native_applied"] = []
+_pre._coordinate_artifacts_and_claims(_ir2cd)
+_nc2cd = [c for c in _ir2cd["_claims"] if c["status"] == "NON_CONVERTIBLE"
+          and any(k[1] == "rN" for k in c["source_keys"])]
+check("2c dedup: 2 cross-overlap effects on ONE source leaf -> exactly ONE NC claim",
+      len(_nc2cd) == 1, f"got {len(_nc2cd)}")
+check("2c dedup: the single NC claim owns exactly that source leaf",
+      bool(_nc2cd) and sorted(tuple(k) for k in _nc2cd[0]["source_keys"]) == [("rule", "rN", "/edge_ttl/mode")])
 
 # An ip: KVS entry is registered ONLY when a WIRED viewer op references its list. Add a
 # wired op (set_request_header) referencing the list to each fixture so the shared KVS
@@ -871,7 +908,7 @@ check("#19 mixed-status shared artifact: EXACT key stays EXACT",
 check("#19 mixed-status shared artifact: LOSSY key stays LOSSY",
       _byk19[("rule", "rL", "/headers/L/value")] == "LOSSY_WITH_WARNING")
 check("#19 mixed-status shared artifact owned by BOTH keys' units",
-      sorted(set(k[1] for a in _ir19d["_logical_artifacts"] for k in a["owner_keys"])) == ["rE", "rL"])
+      sorted(set(k[1] for owners in _owned_artifacts(_ir19d).values() for k in owners)) == ["rE", "rL"])
 # the two keys are in SEPARATE claims (different status → different group)
 check("#19 mixed-status keys land in separate claims",
       len([c for c in _ir19d["_claims"]]) == 2)
@@ -899,7 +936,7 @@ _DC_B = {"hostname": "blog.example.com", "apex_domain": "example.com", "origin_t
 
 
 def _laids(ir):
-    return set(a["artifact_id"] for a in ir["_logical_artifacts"])
+    return set(_owned_artifacts(ir))   # all artifact ids, from the ledger
 
 
 # Two domains sharing an IP list — flattened logical ids must be globally unique.
@@ -925,8 +962,8 @@ _brA = _pre.process_domain("shop.example.com", _DC_A, {}, {},
                            {"L": [{"redirect": {"source_url": "shop.example.com/a", "target_url": "https://x"}}]}, {})
 _brB = _pre.process_domain("blog.example.com", _DC_B, {}, {},
                            {"L": [{"redirect": {"source_url": "blog.example.com/a", "target_url": "https://x"}}]}, {})
-_cffA = [a["artifact_id"] for a in _brA["_logical_artifacts"] if a["kind"] == "cff_op"]
-_cffB = [a["artifact_id"] for a in _brB["_logical_artifacts"] if a["kind"] == "cff_op"]
+_cffA = list(_owned_artifacts(_brA, ":cff:"))
+_cffB = list(_owned_artifacts(_brB, ":cff:"))
 check("#20 two domains' bulk CFF ids do not collide",
       _cffA and _cffB and not (set(_cffA) & set(_cffB)),
       f"A={_cffA} B={_cffB}")
@@ -937,7 +974,7 @@ _ce = {"custom_error": [{"id": "ce123456", "enabled": True,
     "action_parameters": {"content": "<h1>x</h1>", "content_type": "text/html", "status_code": 503}}]}
 _irCE = _pre.process_domain("shop.example.com", _DC_A, _ce, {}, {}, {})
 check("#20 inline custom-error registers NO error: logical artifact this turn",
-      not any(":kvs:error:" in a["artifact_id"] for a in _irCE["_logical_artifacts"]))
+      not _owned_artifacts(_irCE, ":kvs:error:"))
 check("#20 inline custom-error produces NO converted (EXACT/LOSSY) claim this turn",
       not any(c["status"] != "NON_CONVERTIBLE" and any("error:" in a for a in c["artifact_ids"])
               for c in _irCE["_claims"]))
@@ -1081,9 +1118,9 @@ check("#22 mixed EXACT/NC keys are DISJOINT and in inventory", _disjoint_and_in_
 _ir22c = _pd22({"request_header": [{"id": "rh", "enabled": True, "expression": "true",
     "action": "rewrite", "action_parameters": {"headers": {"X-A": {"operation": "set", "value": "1"}}}}]},
     bulk={"L": [{"redirect": {"source_url": "shop.example.com/a", "target_url": "https://x"}}]})
-_aids22 = [a["artifact_id"] for a in _ir22c["_logical_artifacts"]]
-check("#22 generic op + bulk redirect -> all logical artifact ids unique",
-      len(_aids22) == len(set(_aids22)))
+_aids22 = sorted(_owned_artifacts(_ir22c))   # distinct artifact ids referenced by claims
+check("#22 generic op + bulk redirect -> all artifact ids distinct, no collision",
+      len(_aids22) == len(set(_aids22)) and len(_aids22) >= 2, f"got {_aids22}")
 check("#22 generic op + bulk redirect -> disjoint and in inventory", _disjoint_and_in_inv(_ir22c))
 
 # browser_ttl emits a set_response_header op (now wired). Its claim MUST be LOSSY (from the
@@ -1162,8 +1199,8 @@ def _pd24(all_rules, iplists=None):
 
 
 def _ip_kvs_owner_ids(ir):
-    return sorted(set(k[1] for a in ir["_logical_artifacts"] if ":kvs:ip:" in a["artifact_id"]
-                      for k in a["owner_keys"]))
+    return sorted(set(k[1] for owners in _owned_artifacts(ir, ":kvs:ip:").values()
+                      for k in owners))
 
 
 # WIRED header + UNWIRED custom-error, SHARING $blk. The shared ip: KVS entry's
@@ -1207,7 +1244,7 @@ _ir24c = _pd24({"custom_error": [{"id": "ce3", "enabled": True,
     "action_parameters": {"content": "<h1>y</h1>", "content_type": "text/html", "status_code": 503}}]},
     iplists={"blk": ["1.1.1.1"]})
 check("#24 custom-error-only list -> ip: KVS NOT a registered artifact",
-      not any(":kvs:ip:" in a["artifact_id"] for a in _ir24c["_logical_artifacts"]))
+      not _owned_artifacts(_ir24c, ":kvs:ip:"))
 check("#24 custom-error-only list -> ip: KVS NOT collected at all (inline rule NC'd, produced nothing)",
       not any(e["key"].startswith("ip:") for e in _ir24c["metadata"]["kvs_data"]))
 
@@ -1233,7 +1270,9 @@ def _claims_for(ir, unit):
 
 
 def _native_arts(ir):
-    return [a for a in ir["_logical_artifacts"] if a["kind"] == "native_effect"]
+    # rebuild {artifact_id, owner_keys} native-effect artifacts from the ledger
+    return [{"artifact_id": aid, "owner_keys": [list(k) for k in owners]}
+            for aid, owners in _owned_artifacts(ir, ":native:").items()]
 
 
 # (1) LAST-WINS: two *-scope edge_ttl overrides — the LOSER is EXACT exact_noop (no
@@ -2009,7 +2048,7 @@ print("== FINDING (spine) 33: unparseable expression NC / non-string literal val
 # ── finding 1: a NON-EMPTY but UNPARSEABLE expression must NC, not become EXACT ──
 # The round-14 gate only required a non-empty string; a value like " ", "(", "foo(" passed it
 # but does NOT parse — the generator degrades it to an empty value + leak marker, so the
-# LEDGER was wrongly EXACT. value_expression_unmappable now returns a reason on parse failure.
+# LEDGER was wrongly EXACT. The parse gate now returns a reason on parse failure (not None).
 for _e in (" ", "(", "foo(", "concat(", "))"):
     _r = _proc.process_response_header_transform(
         _hdr_rule("X-Custom", {"operation": "set", "expression": _e}), {}, "response")
@@ -2025,11 +2064,11 @@ check("#33 parseable expression (http.host) still converts (LOSSY on response)",
       _status_of(_proc.process_response_header_transform(
           _hdr_rule("X-Custom", {"operation": "set", "expression": "http.host"}), {}, "response"))
       == "LOSSY_WITH_WARNING")
-# the unmappable helper itself: parse failure yields a reason (was: None = "convertible").
-check("#33 value_expression_unmappable('foo(') returns a reason (parse failure, not None)",
-      isinstance(_cep.value_expression_unmappable("foo("), str))
-check("#33 value_expression_unmappable('http.host') is None (a real, mappable field)",
-      _cep.value_expression_unmappable("http.host") is None)
+# the tree-native field-source core: a real mappable field -> None (no false NC). Parse-failure ->
+# NC is covered end-to-end by the processor cases above; the old string wrapper was
+# removed in the round-2 bucket-C cleanup.
+check("#33 find_unmappable_fields(http.host) is None (a real, mappable field)",
+      _cep.find_unmappable_fields(_cep.parse_dynamic_expression("http.host"), "cff") is None)
 
 # ── finding 2: a static literal `value` must be a STRING (empty ok); non-string -> NC ──
 for _v in (123, True, ["a"], 1.5, {"x": 1}):

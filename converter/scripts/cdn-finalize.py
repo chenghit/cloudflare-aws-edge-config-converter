@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdn_expr_parser import orp_header_union
 from cdn_common import (QUOTA_RAISE, QUOTA_REDESIGN, derive_cert_domain,
-                        emit_result, pattern_contains)
+                        emit_result, pattern_contains, _bad_source_key)
 from cdn_rhp_capabilities import CSP_DEFAULT_QUOTA, CSP_MAX_LEN, validate_csp_quota
 
 
@@ -232,17 +232,23 @@ _LEDGER_VALID_STATUSES = frozenset({"EXACT", "LOSSY_WITH_WARNING", "NON_CONVERTI
 
 
 def finalize_ledger_gate(all_irs):
-    """L2 finalize CONSISTENCY gate (Block 3b) — a LIGHT ledger/report check, NOT the full reconciler
-    (`_reconcile_ledger` stays OFF; this does NOT require the deferred artifact-ownership channels).
-    Returns a reason string on the FIRST breach (→ FATAL: a converter bug, not a config problem), else
-    None. Three invariants:
-      1. every DecisionClaim status is a real outcome (EXACT / LOSSY_WITH_WARNING / NON_CONVERTIBLE) —
-         an unknown/invalid status is a producer bug and must fail loud (also backstops the Block-2
-         completeness helper, which fails closed on non-EXACT);
-      2. every READ source-inventory leaf is covered by >= 1 claim — no silently-dropped source. EXACT
-         leaves ARE claimed today via their outcome channel (verified), so this holds without the
-         reconciler; a genuine orphan is a drop bug;
-      3. NC / LOSSY claims are SURFACED in the report (a non_convertible entry / a LOSSY warning),
+    """L2 finalize CONSISTENCY gate (Block 3b) — a LIGHT ledger/report check. Returns a reason string
+    on the FIRST breach (→ FATAL: a converter bug, not a config problem), else None. It ABSORBS the
+    ledger-contract checks the retired `_reconcile_ledger` used to guard (key shape / duplicate
+    inventory / one-leaf-one-claim), reusing the shared `_bad_source_key` shape contract so the
+    write-side API and this read-side gate can't drift. Six invariants, in reader-friendly order:
+      1. every DecisionClaim status is a real outcome (EXACT / LOSSY_WITH_WARNING / NON_CONVERTIBLE);
+      2. every inventory source key is a well-formed (kind, id, pointer) triple;
+      3. every claim source key is a well-formed triple;
+      4. no inventory leaf is inventoried twice (a duplicate would merge two units in the ledger);
+      5. every inventory leaf has an OUTCOME (no silent drop) via one of TWO legitimate channels: a
+         DecisionClaim, or a rule-level non_convertible REPORT entry (many cache-rule leaves are
+         reported at the rule level without a per-leaf claim — the leaf-level laddering is optional
+         future work, see docs/cleanup-inventory.md). A CLAIMED leaf must be claimed EXACTLY ONCE (one
+         leaf, one fate); an UNCLAIMED leaf is legal ONLY if its unit is surfaced in the
+         non_convertible report; unclaimed AND unreported = a silent drop. conversion_warnings do NOT
+         count as coverage — only a claim or an NC report entry does;
+      6. NC / LOSSY claims are SURFACED in the report (a non_convertible entry / a LOSSY reason),
          never recorded in the ledger ONLY (a user-invisible outcome).
     Does NOT touch ignored-feature or completeness semantics — those are separate report axes."""
     for ir in all_irs:
@@ -253,18 +259,48 @@ def finalize_ledger_gate(all_irs):
             if c.get("status") not in _LEDGER_VALID_STATUSES:
                 return (f"{host}: claim {i} has invalid ledger status {c.get('status')!r} "
                         f"(must be one of {sorted(_LEDGER_VALID_STATUSES)})")
-        # (2) every read inventory leaf is covered by a claim (no silent drop)
-        inv = {tuple(k) for k in ir.get("_inventory", [])}
-        covered = {tuple(k) for c in claims for k in c.get("source_keys", [])}
-        orphans = sorted(inv - covered)
-        if orphans:
-            return (f"{host}: {len(orphans)} source-inventory leaf/leaves have NO outcome claim "
-                    f"(silently dropped): {orphans[:5]}")
-        # (3) NC claims must reach the non_convertible report SECTION; LOSSY claims must carry a REASON
-        #     so they can be surfaced in the ledger-derived Lossy section (report + summary lossy_items).
-        #     LOSSY is NO LONGER required to carry a conversion_warning — the report/summary now DERIVE
-        #     LOSSY from the LEDGER (Option A), so a claim-only viewer-op LOSSY is correctly surfaced; a
-        #     reason-less LOSSY is the only ledger bug left here (it can't be listed meaningfully).
+        # (2) inventory source-key shape (shared contract)
+        for k in ir.get("_inventory", []):
+            bad = _bad_source_key(k)
+            if bad:
+                return f"{host}: malformed inventory source key — {bad}"
+        # (3) claim source-key shape
+        for i, c in enumerate(claims):
+            for k in c.get("source_keys", []):
+                bad = _bad_source_key(k)
+                if bad:
+                    return f"{host}: claim {i} has a malformed source key — {bad}"
+        # (4) no duplicate inventory key (would silently merge two units' leaves)
+        inv_seen = set()
+        for k in ir.get("_inventory", []):
+            tk = tuple(k)
+            if tk in inv_seen:
+                return f"{host}: duplicate inventory source key {list(tk)} (a leaf inventoried twice)"
+            inv_seen.add(tk)
+        # (5) NO SILENT DROP: every inventory leaf must have an outcome via a claim OR a rule-level
+        #     non_convertible report entry (the two legitimate channels today — see the docstring).
+        #     A CLAIMED leaf must be claimed exactly once (one leaf, one fate); an UNCLAIMED leaf is
+        #     fine ONLY if its unit is reported NC; unclaimed AND unreported is a genuine silent drop.
+        cover = {}
+        for c in claims:
+            for k in c.get("source_keys", []):
+                tk = tuple(k)
+                cover[tk] = cover.get(tk, 0) + 1
+        doubles = sorted(k for k in inv_seen if cover.get(k, 0) > 1)
+        if doubles:
+            return (f"{host}: {len(doubles)} source-inventory leaf/leaves covered by MORE THAN ONE "
+                    f"claim (one leaf, one fate): {[list(k) for k in doubles[:5]]}")
+        # conversion_warnings deliberately NOT consulted — only a claim or an NC report entry covers a
+        # leaf. reported_ids = the source ids surfaced in the non_convertible report.
+        reported_ids = {e.get("cf_source_rule")
+                        for b in ir.get("cache_behaviors", []) for e in b.get("non_convertible", [])}
+        silent = sorted(k for k in inv_seen
+                        if cover.get(k, 0) == 0 and k[1] not in reported_ids)
+        if silent:
+            return (f"{host}: {len(silent)} source-inventory leaf/leaves have NO outcome claim AND no "
+                    f"non_convertible report entry (silently dropped): {[list(k) for k in silent[:5]]}")
+        # (6) NC claims must reach the non_convertible report; LOSSY claims must carry a REASON so the
+        #     ledger-derived Lossy section (report + summary lossy_items) can surface them (Option A).
         nc_claims = [c for c in claims if c.get("status") == "NON_CONVERTIBLE"]
         nc_report = [e for b in ir.get("cache_behaviors", []) for e in b.get("non_convertible", [])]
         if nc_claims and not nc_report:
@@ -740,7 +776,6 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains, csp_quo
         if no_ops_behs:
             cff_no_ops.append((hostname, no_ops_behs))
     if cff_no_ops:
-        domains_str = ", ".join(h for h, _ in cff_no_ops)
         # Show sample paths from first domain
         sample = cff_no_ops[0][1]
         paths = ", ".join(f"`{p}`" for p in sample[:5])
@@ -824,8 +859,6 @@ def generate_report(all_irs, manifest, shadow_warnings, skipped_domains, csp_quo
     # Deployment steps
     domains_with_kvs = [ir["metadata"]["hostname"] for ir in all_irs
                         if any(ir["metadata"].get("kvs_requirements", {}).values())]
-    domains_with_le = [ir["metadata"]["hostname"] for ir in all_irs
-                       if ir["metadata"].get("lambda_edge", {}).get("origin_response")]
     domain_list = [ir["metadata"] for ir in all_irs]
 
     # Group hosts by the cert coverage each needs (same-level SAN). One zone can

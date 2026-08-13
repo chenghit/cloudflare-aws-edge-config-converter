@@ -9,7 +9,7 @@ from cdn_expr_parser import (
     parse_expression, parse_expression_full, extract_orp_headers,
     extract_kvs_triggers, extract_host_filter, CF_FIELD_MAP,
     extract_path_pattern_single, iter_condition_children,
-    condition_unmappable_fields, value_expression_unmappable, validate_condition_semantics,
+    condition_unmappable_fields, validate_condition_semantics,
     lower_literal_value, lower_dynamic_value, header_name_is_valid,
     header_mutation_capability_reason, HEADER_OPS_ACCEPTED_FOR_VALIDATION_BY_PHASE,
     LOWERED_EMPTY_NONE, LOWERED_EMPTY_DELETE_HEADER, LOWERED_EMPTY_CLEAR_QUERY,
@@ -55,10 +55,6 @@ IP_SRC_NON_CONVERTIBLE_PHASES = {
     "http_request_cache_settings",   # Cache Rules
     "http_request_compress",         # Compression Rules
 }
-
-
-def _is_ip_src_field(field):
-    return field in ("ip.src", "ip.src.in")
 
 
 def _condition_uses_ip_src(condition):
@@ -1575,29 +1571,6 @@ def process_cloud_connector(rule, ip_lists, phase):
             "origin_host": host,
         },
     }
-
-
-def process_bulk_redirect_items(redirect_items, list_name):
-    """Process bulk redirect list items into KVS entries."""
-    kvs_entries = []
-    for item in redirect_items:
-        rd = item.get("redirect", {})
-        source = rd.get("source_url", "")
-        target = rd.get("target_url", "")
-        status = rd.get("status_code", 301)
-        preserve_qs = rd.get("preserve_query_string", False)
-        include_subdomains = rd.get("include_subdomains", False)
-
-        kvs_entries.append({
-            "source_url": source,
-            "target_url": target,
-            "status_code": status,
-            "preserve_query_string": preserve_qs,
-            "include_subdomains": include_subdomains,
-            "list_name": list_name,
-        })
-
-    return kvs_entries
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
