@@ -139,9 +139,10 @@ logic) — a safety net, since the local WCU is already exact.
   `$cf.*` IP intelligence lists) have no importable AWS equivalent. The offending
   branch is **pruned** and recorded in the report with its closest AWS managed rule
   group; the rest of the rule still converts (→ *partial*). A rate rule whose whole
-  condition prunes away becomes an unconditional rate limit (rate limiting is
-  always convertible). Never silently drop, never leave a `MISSING_*` placeholder
-  matching nothing.
+  condition prunes away becomes an unconditional rate limit (the rate-limiting part
+  of an otherwise-normal rule stays convertible); but a rate rule whose COUNTER
+  semantics AWS can't reproduce is non-convertible outright (§8). Never silently
+  drop, never leave a `MISSING_*` placeholder matching nothing.
 - **AWS rejects a same-type statement as a DIRECT child** — `AndStatement` directly
   inside `AndStatement`, `OrStatement` inside `OrStatement` (an intermediate `NOT`
   or different type is fine; min 2 statements per AND/OR; real depth cap is 100, not
@@ -164,6 +165,17 @@ shared counter would throttle a client spreading across paths at a fraction of e
 rule's threshold). See `workspace/roadmap-waf-rate-limit-features.md` for how to
 wire in smaller periods / `mitigation_timeout` if AWS ever ships them.
 
+Some rate rules are **non-convertible outright**: their counter can't be reproduced by
+an AWS `RateBasedStatement`, so the whole rule is reported, never converted to a wrong
+threshold. Those are `requests_to_origin` (Cloudflare counts only origin-bound /
+cache-miss requests, but a CloudFront-scoped WebACL runs before the cache and counts
+every request), `counting_expression` (a separate counting expression has no AWS
+equivalent), and any `characteristics` set outside `{ip.src, cf.colo.id}` or missing
+`ip.src` (other keys need RBR `CUSTOM_KEYS`, which the tool does not generate; the
+generator always aggregates on IP). Disabled rate/custom rules are excluded from the IR
+entirely (they never run in Cloudflare), and count validation reconciles the ACTIVE
+source rule count against the IR.
+
 ## Code map — where each decision lives
 
 All paths under `converter/scripts/`. Use this to find the code behind a model
@@ -174,6 +186,7 @@ decision instead of guessing; grep within the file for specifics.
 | Named IP / ASN / hostname list resolution; IP-access rules → conditions | `waf-analyze-ip.py` |
 | Custom-rule expression → condition tree; convertibility + pruning | `waf-analyze-custom.py`, `waf_expr_parser.py`, `waf_common.py` (`classify_convertibility`, `is_managed_list_value`) |
 | Rate-limit window scaling; `mitigation_timeout` dropped | `waf-analyze-rate.py` (`calculate_rate_limit`) |
+| Rate counter-semantics NC gate (requests_to_origin / counting_expression / characteristics); disabled-rule skip; active-count reconcile | `waf-analyze-rate.py`, `waf-analyze-custom.py`, `waf-count-validate.py` |
 | Merge the 3 analyzer IRs | `waf-merge-ir.py` |
 | Two WebACLs (website/api), injected header/trailer rules | `waf-generate-cfn.py` (`build_one_webacl`, `build_anti_ddos_rule`, `build_always_on_challenge_rule`) |
 | skip → Count + labels; consumer `NOT(LabelMatch)` wrap | `waf-generate-cfn.py` (`conditions_to_statement`, rate/custom builders) |

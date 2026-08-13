@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-08-13
+
+### WAF + CDN converter: correctness fixes (fail closed on bad input, faithful semantics)
+
+WAF conversion no longer silently drops protection or emits a wrong rule:
+- Disabled Cloudflare rules are excluded (they never run), not converted into live AWS rules.
+- `log` action maps to AWS Count (was defaulting to Block); an unmappable action fails loud, never a silent Block.
+- Rate rules whose counter semantics AWS can't reproduce are reported NON_CONVERTIBLE instead of converted to a wrong threshold: `requests_to_origin` (a CloudFront-scoped WebACL runs before the cache and counts every request), `counting_expression`, and any aggregation whose characteristics aren't a subset of `{ip.src, cf.colo.id}` containing `ip.src`.
+- A present-but-malformed backup file (bad JSON, `success:false`, wrong result shape, or a list declaring items with a missing/short items file) is FATAL, not read as empty.
+- `backup/cloudflare_backup.sh` reports PARTIAL and exits non-zero on a real API failure (network/auth/malformed), instead of always printing "all backups completed successfully"; features not on your plan stay skips.
+
+CDN conversion:
+- A legal OR-split / `*.ext` cache rule whose branches cover some paths cleanly and others only partially no longer aborts the whole domain; it converts with a LOSSY (partial-coverage) outcome.
+- The `COMPLETE_EXACT` / `PARTIAL_WITH_NC` signal now accounts for cache rules reported non-convertible at the rule level, so a run that lists NC items is never labeled `COMPLETE_EXACT`.
+
 ## 2026-08-08
 
 ### CDN converter: per-distribution ACM certificate discovery (fixes multi-level subdomains)

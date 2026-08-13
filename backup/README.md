@@ -106,7 +106,7 @@ Common errors:
 - **Token expired/revoked**: Token no longer valid
 - **Permission denied**: Token lacks required read permissions
 
-The script will continue backing up other resources after non-fatal errors and report a count at the end.
+The script continues after a non-fatal error, but a real failure (network, auth/permission, or a malformed response) is recorded and the run ends with a **PARTIAL** summary and a **non-zero exit code**, so automation can tell an incomplete backup from a clean one. A feature that simply isn't available on your plan is a *skip*, not an error, and does not affect the exit code. Do not convert a PARTIAL backup.
 
 ## What Gets Backed Up
 
