@@ -174,6 +174,7 @@ packer 保留 Cloudflare 固定的阶段顺序（custom → rate → managed）�
 - **`mitigation_timeout`（封禁时长）会丢失。** Cloudflare 可在触发后固定封禁一段时间；AWS WAF 只在滑动窗口速率持续超限时封禁（速率下降后约 ≤30s 解封）。AWS 没有对应能力，因此这个字段不会被带过来——速率规则本身仍会转换（阈值 + 窗口），只是丢掉固定封禁时长。这是整体功能层面的限制，在此文档说明；生成的部署报告不会逐条标注。
 - **过低的阈值会被放大，不会被丢弃。** AWS 每个评估窗口（{60,120,300,600} 秒）最低速率是 10；低于此的 Cloudflare 速率会被放大到第一个合法窗口，兜底为 10/600s。略微宽松，报告中注明。
 - **计数器是 per-WebACL-实例的。** 一个 WebACL 挂到 N 个 CloudFront distribution 会跨它们共享一个计数器（符合 Cloudflare 的 zone-wide 语义）。工具不合并不同的速率规则（共享计数器会让一个跨路径分散请求的客户端以远低于各规则阈值的量被限流）。
+- **部分速率规则整条无法转换（报告为 `NON_CONVERTIBLE`）。** 当速率规则的计数语义 AWS 无法复现时，整条规则列入报告交由人工重建，而不是被转换成错误的阈值。三种情况：`requests_to_origin`（Cloudflare 只计回源、未命中缓存的请求，而 CloudFront 上的 WebACL 在缓存前运行、对所有请求计数，同一阈值会更早触发）、`counting_expression`（独立计数表达式没有 AWS 对应）、以及 characteristics 不是 `{ip.src, cf.colo.id}` 子集、或不含 `ip.src` 的聚合（header/cookie/path/ASN 等需要 RBR `CUSTOM_KEYS`，而只有 `cf.colo.id` 或空集则没有 per-source-IP 键）。这些规则会在部署 README 中逐条列出。
 
 ## 通用限制
 

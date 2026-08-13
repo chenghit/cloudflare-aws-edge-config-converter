@@ -11,6 +11,9 @@ Exit codes: 0 = OK, 1 = error.
 """
 import json, sys, os, glob, ipaddress, re
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from waf_common import load_backup_json, backup_list, fatal
+
 
 # ── IP classification ────────────────────────────────────────────────────────
 
@@ -91,14 +94,17 @@ def find_list_items(config_path, kind, name):
 
 
 def read_json_result(path):
-    """Read a JSON file and return the 'result' array."""
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, ValueError):
-        print(f"  WARN: {path} is empty or invalid JSON, treating as empty", file=sys.stderr)
-        return []
-    return data.get("result", [])
+    """Read a present backup file and return its 'result' array.
+
+    A file that IS present must be a valid, successful API response whose result
+    is a list (IP-Lists / List-Items / IP-Access-Rules) — a corrupt or
+    wrong-shaped export is FATAL (see load_backup_json / backup_list). Callers
+    handle the ABSENT case: for a list that declares num_items>0, a MISSING items
+    file is itself FATAL (see process_ip_lists), because converting with an empty
+    set would silently drop origin protection.
+    """
+    name = os.path.basename(path)
+    return backup_list(load_backup_json(path, name), path, name)
 
 
 # ── IP Lists processing ─────────────────────────────────────────────────────
@@ -129,15 +135,17 @@ def process_ip_lists(config_path):
                 continue
             items_path = find_list_items(config_path, "hostname", name)
             if not items_path:
-                result.append({
-                    "name": name, "kind": kind, "conversion": "hostname_set",
-                    "items": [], "_warning": f"List-Items-hostname-{name}.txt not found"
-                })
-                continue
+                fatal(f"hostname list '{name}' declares {num_items} item(s) but "
+                      f"List-Items-hostname-{name}.txt is missing — re-run the backup; converting "
+                      f"with an empty set would silently drop the rule's host scope")
             items = read_json_result(items_path)
             # Cloudflare hostname list items: {"hostname": {"url_hostname": "x"}}
             hostnames = [it["hostname"]["url_hostname"] for it in items
                          if isinstance(it.get("hostname"), dict) and it["hostname"].get("url_hostname")]
+            if len(hostnames) < num_items:
+                fatal(f"hostname list '{name}' declares {num_items} item(s) but only {len(hostnames)} "
+                      f"valid hostname(s) were found in List-Items-hostname-{name}.txt — incomplete "
+                      f"backup; re-run the backup")
             result.append({
                 "name": name, "kind": kind, "conversion": "hostname_set",
                 "items": hostnames
@@ -151,15 +159,16 @@ def process_ip_lists(config_path):
 
             items_path = find_list_items(config_path, "ip", name)
             if not items_path:
-                result.append({
-                    "name": name, "kind": kind, "conversion": "ip_set",
-                    "items_ipv4": [], "items_ipv6": [],
-                    "_warning": f"List-Items-ip-{name}.txt not found"
-                })
-                continue
+                fatal(f"IP list '{name}' declares {num_items} item(s) but "
+                      f"List-Items-ip-{name}.txt is missing — re-run the backup; converting with "
+                      f"an empty IP set would silently drop origin protection")
 
             items = read_json_result(items_path)
             addresses = [item.get("ip", "") for item in items if item.get("ip")]
+            if len(addresses) < num_items:
+                fatal(f"IP list '{name}' declares {num_items} item(s) but only {len(addresses)} "
+                      f"valid address(es) were found in List-Items-ip-{name}.txt — incomplete "
+                      f"backup; re-run the backup")
             v4, v6 = split_ipv4_ipv6(addresses)
             result.append({
                 "name": name, "kind": kind, "conversion": "ip_set",
@@ -173,15 +182,16 @@ def process_ip_lists(config_path):
 
             items_path = find_list_items(config_path, "asn", name)
             if not items_path:
-                result.append({
-                    "name": name, "kind": kind, "conversion": "asn_inline",
-                    "items": [],
-                    "_warning": f"List-Items-asn-{name}.txt not found"
-                })
-                continue
+                fatal(f"ASN list '{name}' declares {num_items} item(s) but "
+                      f"List-Items-asn-{name}.txt is missing — re-run the backup; converting with "
+                      f"an empty set would silently drop the rule's scope")
 
             items = read_json_result(items_path)
             asns = [item.get("asn") for item in items if item.get("asn") is not None]
+            if len(asns) < num_items:
+                fatal(f"ASN list '{name}' declares {num_items} item(s) but only {len(asns)} valid "
+                      f"ASN(s) were found in List-Items-asn-{name}.txt — incomplete backup; "
+                      f"re-run the backup")
             result.append({
                 "name": name, "kind": kind, "conversion": "asn_inline",
                 "items": asns

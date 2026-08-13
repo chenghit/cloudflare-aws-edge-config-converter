@@ -14,11 +14,29 @@ import json, sys, os, glob, math
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from waf_expr_parser import parse, extract_ip_sets, ParseError
-from waf_common import classify_convertibility, NON_CONVERTIBLE_AWS_EQUIV, extract_host_scope
+from waf_common import (classify_convertibility, NON_CONVERTIBLE_AWS_EQUIV,
+                        extract_host_scope, load_backup_json, backup_rules)
 
 # ── Rate limit calculation ───────────────────────────────────────────────────
 
 AWS_WINDOWS = [60, 120, 300, 600]
+
+# Cloudflare rate-rule actions this pipeline can map (log → AWS Count).
+KNOWN_RATE_ACTIONS = {"block", "log", "challenge", "js_challenge", "managed_challenge"}
+
+# Rate aggregation keys that map to an AWS IP-aggregated RateBasedStatement.
+# ip.src → per-source-IP (AWS AggregateKeyType=IP). cf.colo.id has no AWS
+# equivalent, but the standard Cloudflare combo ["ip.src","cf.colo.id"] means
+# "per IP, per Cloudflare data-center"; AWS has one global counter per rule
+# instance, so it collapses to a WebACL-wide per-IP counter. That difference is
+# documented globally (see docs/limitations) — it's a benign widening, so we
+# still convert. The set MUST contain ip.src: the generator always emits
+# AggregateKeyType=IP, so a cf.colo.id-only / empty / absent set would silently
+# become a per-source-IP counter with different meaning (cf.colo.id alone =
+# per-Cloudflare-datacenter). Any OTHER characteristic (header/cookie/path/ASN/
+# visitor-id) needs RBR CUSTOM_KEYS, which this tool does not generate. All of
+# these → non-convertible.
+IP_AGGREGATION_CHARACTERISTICS = {"ip.src", "cf.colo.id"}
 
 def calculate_rate_limit(requests_per_period, period):
     """Calculate AWS WAF rate limit parameters.
@@ -81,21 +99,18 @@ def main():
         print(f"OK: 0 rate-limiting rules → {out_path}")
         return
 
-    try:
-        with open(rate_path) as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, ValueError):
-        print(f"  WARN: {rate_path} is empty or invalid JSON, treating as no rate rules", file=sys.stderr)
-        data = {"result": {"rules": []}}
-
-    raw_rules = data.get("result", {}).get("rules", [])
-    if isinstance(data.get("result"), list):
-        raw_rules = data["result"]
+    data = load_backup_json(rate_path, "rate-limit rules")
+    raw_rules = backup_rules(data, rate_path, "rate-limit rules")
 
     rules = []
     non_convertible_notes = []
 
     for i, raw in enumerate(raw_rules):
+        # Disabled rules never run in Cloudflare — drop them (mirror the active
+        # config; see waf-analyze-custom.py for the same rationale).
+        if raw.get("enabled", True) is False:
+            continue
+
         action = raw.get("action", "block")
         expression = raw.get("expression", "")
         description = raw.get("description", f"rate-rule-{i+1}")
@@ -121,6 +136,53 @@ def main():
             "scope_down": {"skip_http_ratelimit": skip_http_ratelimit},
             "convertibility": "yes",
         }
+
+        # Rate-limit STRUCTURE gate. Some ratelimit parameters change the COUNTER
+        # semantics in ways an AWS RateBasedStatement can't reproduce. Converting
+        # anyway would silently mis-limit traffic, so the whole rule is marked
+        # non-convertible and reported for manual recreation (the rule stays in
+        # the array with convertibility="no" so counts still reconcile).
+        struct_nc = []  # list of (field_label, human_reason)
+        if action not in KNOWN_RATE_ACTIONS:
+            struct_nc.append((f"action:{action}",
+                              f"Unsupported Cloudflare rate-rule action: {action}"))
+        if ratelimit.get("requests_to_origin") is True:
+            struct_nc.append(("ratelimit.requests_to_origin",
+                "Cloudflare counts only origin-bound (cache-miss) requests; a CloudFront-scoped "
+                "AWS WebACL runs BEFORE the cache and counts every request, so the same threshold "
+                "would trip far sooner and throttle cached traffic. Recreate manually with an "
+                "AWS-appropriate threshold."))
+        if ratelimit.get("counting_expression"):
+            struct_nc.append(("ratelimit.counting_expression",
+                "Rate rule counts requests matching a separate counting expression; an AWS "
+                "RateBasedStatement can only count requests matching its scope-down, with no "
+                "distinct counting expression."))
+        chars = ratelimit.get("characteristics", [])
+        extra_chars = [c for c in chars if c not in IP_AGGREGATION_CHARACTERISTICS]
+        if extra_chars:
+            struct_nc.append(("ratelimit.characteristics",
+                f"Aggregates on {extra_chars}; only ip.src/cf.colo.id map to AWS IP aggregation. "
+                f"Other keys require an RBR with CUSTOM_KEYS, which this tool does not generate."))
+        elif "ip.src" not in chars:
+            # The generator always aggregates on IP (AggregateKeyType=IP). Without ip.src
+            # (cf.colo.id-only, empty, or absent) converting would silently produce a
+            # per-source-IP counter with different meaning — fail closed. Modern Cloudflare
+            # rate rules always include ip.src.
+            struct_nc.append(("ratelimit.characteristics",
+                f"Rate aggregation {chars or '(none)'} has no ip.src; AWS aggregates per source IP, "
+                f"so a cf.colo.id-only / empty / absent characteristic set can't be reproduced "
+                f"faithfully. Recreate manually."))
+        if struct_nc:
+            entry["convertibility"] = "no"
+            entry["non_convertible_reason"] = ", ".join(f for f, _ in struct_nc)
+            rules.append(entry)
+            for field_label, reason in struct_nc:
+                non_convertible_notes.append({
+                    "rule": description, "field": field_label, "reason": reason,
+                    "aws_equivalent": "AWS WAF rate-based rule (manual)",
+                    "manual_action": "Recreate this rate limit manually in AWS WAF",
+                })
+            continue
 
         # Parse expression
         try:

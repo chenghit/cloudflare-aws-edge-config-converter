@@ -1107,7 +1107,34 @@ ACTION_MAP = {
     "interactive_challenge": {"Captcha": {}},
     "captcha": {"Captcha": {}},
     "count": {"Count": {}},
+    # Cloudflare "log" observes without blocking. AWS Count is the faithful map:
+    # both are non-terminating (record the match, continue evaluating). Mapping
+    # it to Block would silently start blocking traffic Cloudflare only logged.
+    "log": {"Count": {}},
 }
+
+
+def resolve_action(action_key, rule_name, warnings):
+    """Map a Cloudflare action/mode to an AWS WAF rule Action dict.
+
+    Unknown actions are NOT defaulted to Block — that silently over-blocks. The
+    analyzers mark any rule whose action can't map convertibility='no', and the
+    generator skips those, so nothing unmappable should reach here; if one does
+    it's a bug, so fail loud rather than mis-convert. 'log' → Count carries a
+    warning so the user knows to enable AWS WAF logging to actually record the
+    matches (AWS Count does not log anywhere on its own)."""
+    if action_key == "log":
+        warnings.append(
+            f"Rule '{rule_name}': Cloudflare 'log' action → AWS WAF Count "
+            f"(non-terminating). Enable AWS WAF logging to record matched requests.")
+    action = ACTION_MAP.get(action_key)
+    if action is None:
+        print(f"ERROR: rule '{rule_name}': action '{action_key}' has no AWS WAF mapping "
+              f"(the analyzer should have marked it non-convertible)", file=sys.stderr)
+        print("\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
+              f"CONTEXT: unmappable action '{action_key}' on rule '{rule_name}' reached the generator")
+        sys.exit(2)
+    return action
 
 
 def build_managed_rules(priority_start, skip_labels_present):
@@ -1387,7 +1414,7 @@ def generate(ir):
                "inline_ip_set_ids": inline_ip_set_ids,
                "current_rule_ip_sets": rule.get("ip_sets", [])}
         stmt = conditions_to_statement(cond, ctx)
-        aws_action = ACTION_MAP.get(rule.get("mode", "block"), {"Block": {}})
+        aws_action = resolve_action(rule.get("mode", "block"), rule["name"], warnings)
         rn = unique_rule_name(rule["name"])
         custom_block.append({
             "Name": rn, "Action": aws_action, "Statement": stmt,
@@ -1426,7 +1453,7 @@ def generate(ir):
             aws_action = {"Count": {}}
         else:
             aws_act = rule.get("aws_action", action)
-            aws_action = ACTION_MAP.get(aws_act, {"Block": {}})
+            aws_action = resolve_action(aws_act, rule["name"], warnings)
 
         rn = unique_rule_name(rule["name"])
         waf_rule = {
@@ -1456,6 +1483,8 @@ def generate(ir):
         rate_stmt = {
             "RateBasedStatement": {
                 "Limit": rule.get("aws_limit", 100),
+                # Always IP: waf-analyze-rate.py marks any rate rule whose characteristics don't
+                # contain ip.src non-convertible, so every rule that reaches here is per-source-IP.
                 "AggregateKeyType": "IP",
                 "EvaluationWindowSec": rule.get("aws_evaluation_window_sec", 60),
             }
@@ -1481,7 +1510,7 @@ def generate(ir):
                 rate_stmt["RateBasedStatement"]["ScopeDownStatement"] = {
                     "AndStatement": {"Statements": scope_parts}}
 
-        aws_action = ACTION_MAP.get(rule.get("action", "block"), {"Block": {}})
+        aws_action = resolve_action(rule.get("action", "block"), rule["name"], warnings)
         rn = unique_rule_name(rule["name"])
         rate_block.append({
             "Name": rn, "Action": aws_action, "Statement": rate_stmt,
@@ -1761,7 +1790,7 @@ def generate_split(split_ir):
                "inline_ip_set_ids": inline_ip_set_ids,
                    "current_rule_ip_sets": rule.get("ip_sets", [])}
             stmt = conditions_to_statement(cond, ctx)
-            aws_action = ACTION_MAP.get(rule.get("mode", "block"), {"Block": {}})
+            aws_action = resolve_action(rule.get("mode", "block"), rule["name"], warnings)
             rn = unique_rule_name(rule["name"])
             custom_block.append({
                 "Name": rn, "Action": aws_action, "Statement": stmt,
@@ -1796,7 +1825,7 @@ def generate_split(split_ir):
                 aws_action = {"Count": {}}
             else:
                 aws_act = rule.get("aws_action", action)
-                aws_action = ACTION_MAP.get(aws_act, {"Block": {}})
+                aws_action = resolve_action(aws_act, rule["name"], warnings)
 
             rn = unique_rule_name(rule["name"])
             waf_rule = {
@@ -1820,6 +1849,8 @@ def generate_split(split_ir):
                    "current_rule_ip_sets": rule.get("ip_sets", [])}
             rate_stmt = {"RateBasedStatement": {
                 "Limit": rule.get("aws_limit", 100),
+                # Always IP: waf-analyze-rate.py marks any rate rule whose characteristics don't
+                # contain ip.src non-convertible, so every rule that reaches here is per-source-IP.
                 "AggregateKeyType": "IP",
                 "EvaluationWindowSec": rule.get("aws_evaluation_window_sec", 60),
             }}
@@ -1839,7 +1870,7 @@ def generate_split(split_ir):
                 else:
                     rate_stmt["RateBasedStatement"]["ScopeDownStatement"] = {
                         "AndStatement": {"Statements": scope_parts}}
-            aws_action = ACTION_MAP.get(rule.get("action", "block"), {"Block": {}})
+            aws_action = resolve_action(rule.get("action", "block"), rule["name"], warnings)
             rn = unique_rule_name(rule["name"])
             rate_block.append({
                 "Name": rn, "Action": aws_action, "Statement": rate_stmt,

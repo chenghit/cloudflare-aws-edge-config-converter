@@ -5,9 +5,19 @@
 
 set -euo pipefail
 
-ERRORS=0
 CF_SKIP_FILE="/tmp/.cf_skip_reason.$$"
-trap 'rm -f "$CF_SKIP_FILE"' EXIT
+CF_ERROR_FILE="/tmp/.cf_errors.$$"
+: > "$CF_ERROR_FILE"
+trap 'rm -f "$CF_SKIP_FILE" "$CF_ERROR_FILE"' EXIT
+
+# Record a REAL failure (network / auth / permission / malformed response / HTTP
+# error). Written to a FILE, not a shell variable: cf_api runs inside $(...)
+# command substitution (a subshell), so `((ERRORS++))` there is discarded and the
+# run would falsely report "all backups completed successfully". A file write
+# crosses the subshell boundary (same trick as CF_SKIP_FILE). The summary counts
+# the lines here. NOTE: "feature not configured / not available on this plan" is
+# NOT an error — that path stays a skip (CF_SKIP_FILE), never recorded here.
+record_error() { echo "$1" >> "$CF_ERROR_FILE"; }
 
 # --- Config parsing (safe, no source) ---
 
@@ -83,7 +93,7 @@ cf_api() {
     if [[ -z "$response" ]]; then
         echo "❌ Empty response: $url (network error or timeout)" >&2
         [[ "$fatal" == "--fatal" ]] && exit 1
-        ((ERRORS++)) || true
+        record_error "network error/timeout: $url"
         return 1
     fi
 
@@ -97,7 +107,7 @@ cf_api() {
         echo "$response" | head -c 500 >&2
         echo >&2
         [[ "$fatal" == "--fatal" ]] && exit 1
-        ((ERRORS++)) || true
+        record_error "non-JSON response: $url"
         return 1
     fi
 
@@ -111,7 +121,7 @@ cf_api() {
                 echo "❌ API error: $url" >&2
                 echo "   $error_msg (code $error_code)" >&2
                 [[ "$fatal" == "--fatal" ]] && exit 1
-                ((ERRORS++)) || true
+                record_error "API error $error_code: $url — $error_msg"
                 return 1
                 ;;
             *)
@@ -304,15 +314,15 @@ backup_zone() {
     # DNS records (paginated — required, skip zone if empty or failed)
     local dns_response
     if ! dns_response=$(cf_api_paginated "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records"); then
+        # cf_api already recorded the underlying failure — don't double-count.
         echo "  ⚠️  Skipping $domain: DNS records API failed" >&2
-        ((ERRORS++)) || true
         return
     fi
     local dns_count
     dns_count=$(echo "$dns_response" | jq '.result | length' 2>/dev/null) || dns_count=0
     if [[ "$dns_count" -eq 0 ]]; then
         echo "  ⚠️  Skipping $domain: no DNS records (partial setup zone?)" >&2
-        ((ERRORS++)) || true
+        record_error "no DNS records for $domain (partial setup zone?)"
         return
     fi
     echo "$dns_response" > "$folder/DNS.txt"
@@ -351,10 +361,10 @@ backup_zone() {
             if [[ "$http_code" != "200" ]]; then
                 echo "  ❌ Snippet content failed (HTTP $http_code): $snippet_name" >&2
                 echo "$content" >&2
-                ((ERRORS++)) || true
+                record_error "snippet content failed (HTTP $http_code): $snippet_name"
             elif [[ -z "$content" ]]; then
                 echo "  ❌ Snippet content empty: $snippet_name" >&2
-                ((ERRORS++)) || true
+                record_error "snippet content empty: $snippet_name"
             else
                 echo "$content" > "$folder/Snippet-$safe_name.js"
                 echo "  ✓ Snippet-$safe_name.js"
@@ -441,7 +451,7 @@ backup_account() {
                         echo "  ❌ KV value failed (HTTP $kv_http_code): $ns_title/$key_name" >&2
                         cat "$folder/KV-$safe_title/value-$safe_file.txt" >&2
                         rm -f "$folder/KV-$safe_title/value-$safe_file.txt"
-                        ((ERRORS++)) || true
+                        record_error "KV value failed (HTTP $kv_http_code): $ns_title/$key_name"
                     fi
                 done < <(echo "$keys_response" | jq -r '.result[]?.name // empty')
 
@@ -473,7 +483,7 @@ for domain in "${DOMAINS[@]}"; do
     zone_id=$(echo "$response" | jq -r '.result[0].id // empty')
     if [[ -z "$zone_id" ]]; then
         echo "❌ Domain not found: $domain"
-        ((ERRORS++)) || true
+        record_error "domain not found: $domain"
         DOMAIN_ZONE_IDS+=("")
         continue
     fi
@@ -503,8 +513,11 @@ for i in "${!DOMAINS[@]}"; do
 done
 
 echo ""
-if [[ $ERRORS -eq 0 ]]; then
+error_count=$(wc -l < "$CF_ERROR_FILE" | tr -d '[:space:]')
+if [[ "${error_count:-0}" -eq 0 ]]; then
     echo "✅ All backups completed successfully!"
 else
-    echo "⚠️  Backups completed with $ERRORS error(s). Check messages above."
+    echo "⚠️  Backups completed with $error_count error(s) — this backup is PARTIAL. Do not convert it as-is:"
+    sed 's/^/    - /' "$CF_ERROR_FILE" >&2
+    exit 1
 fi

@@ -16,7 +16,16 @@ import json, sys, os, glob, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from waf_expr_parser import parse, extract_ip_sets, ParseError
 from waf_common import (NON_CONVERTIBLE_FIELDS, NON_CONVERTIBLE_AWS_EQUIV,
-                        classify_convertibility, extract_host_scope)
+                        classify_convertibility, extract_host_scope, load_backup_json,
+                        backup_rules)
+
+# Cloudflare custom-rule actions this pipeline knows how to map. An action
+# outside this set can't be mapped to an AWS WAF rule Action, so the rule is
+# non-convertible — better to report it than to let the generator silently
+# default it to Block (which would over-block). "log" maps to AWS Count.
+KNOWN_CUSTOM_ACTIONS = {"block", "allow", "skip", "log",
+                        "challenge", "js_challenge", "managed_challenge",
+                        "interactive_challenge"}
 
 # ── Skip label derivation ────────────────────────────────────────────────────
 
@@ -77,16 +86,8 @@ def main():
         print(f"OK: 0 custom rules → {out_path}")
         return
 
-    try:
-        with open(custom_path) as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, ValueError):
-        print(f"  WARN: {custom_path} is empty or invalid JSON, treating as no custom rules", file=sys.stderr)
-        data = {"result": {"rules": []}}
-
-    raw_rules = data.get("result", {}).get("rules", [])
-    if isinstance(data.get("result"), list):
-        raw_rules = data["result"]
+    data = load_backup_json(custom_path, "WAF custom rules")
+    raw_rules = backup_rules(data, custom_path, "WAF custom rules")
 
     rules = []
     non_convertible_notes = []
@@ -100,6 +101,14 @@ def main():
     skip_all_remaining_seen = False
 
     for i, raw in enumerate(raw_rules):
+        # Disabled rules are inert in Cloudflare — never evaluated. Emitting them
+        # would add live AWS rules (and a disabled skip rule would even inject a
+        # skip:* label). Drop them entirely so the IR mirrors what actually runs.
+        # (position keeps the original index so enabled rules retain stable
+        # scope_tag names regardless of where a disabled rule sat.)
+        if raw.get("enabled", True) is False:
+            continue
+
         action = raw.get("action", "")
         expression = raw.get("expression", "")
         description = raw.get("description", f"rule-{i+1}")
@@ -111,6 +120,20 @@ def main():
             "expression": expression,
             "convertibility": "yes",
         }
+
+        # Unmappable action → non-convertible (don't let it reach the generator,
+        # which would otherwise have to guess — and guessing Block over-blocks).
+        if action not in KNOWN_CUSTOM_ACTIONS:
+            entry["convertibility"] = "no"
+            entry["non_convertible_reason"] = f"Unsupported action: {action}"
+            non_convertible_notes.append({
+                "rule": description, "field": f"action:{action}",
+                "reason": f"Unsupported Cloudflare custom-rule action: {action}",
+                "aws_equivalent": "No direct equivalent",
+                "manual_action": "Recreate this rule manually in AWS WAF",
+            })
+            rules.append(entry)
+            continue
 
         # Parse expression
         try:

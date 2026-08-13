@@ -1,4 +1,71 @@
 """Shared constants and utilities for WAF analysis scripts."""
+import json
+import sys
+
+
+# ── Backup-file loading ──────────────────────────────────────────────────────
+
+def fatal(context):
+    """Emit the standard ---RESULT--- FATAL block (SCRIPT_STANDARDS) and exit."""
+    print(f"ERROR: {context}", file=sys.stderr)
+    print("\n---RESULT---\nSPEC: 1\nSTATUS: FATAL\nACTION: FIX\n"
+          f"CONTEXT: {context}")
+    sys.exit(1)
+
+
+def load_backup_json(path, what):
+    """Load a Cloudflare backup file that IS present on disk.
+
+    Absent files are the CALLER's concern (a feature simply wasn't backed up →
+    treat as 0 rules — that's fine). But a file that IS present must be a
+    well-formed, successful Cloudflare API response (`{"success": true,
+    "result": ...}`). Silently treating a present-but-corrupt file as empty is
+    the bug this guards: it would drop real rules and let the converter emit an
+    EMPTY WAF while reporting success. A present-but-malformed file is FATAL."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, ValueError) as e:
+        fatal(f"{what} is present but not valid JSON ({path}): {e}")
+    if not isinstance(data, dict) or data.get("success") is not True or "result" not in data:
+        got = data.get("success") if isinstance(data, dict) else f"<{type(data).__name__}>"
+        fatal(f"{what} is present but not a successful Cloudflare API response "
+              f"(success={got!r}, result key {'present' if isinstance(data, dict) and 'result' in data else 'MISSING'}) "
+              f"({path}) — re-run the backup; do not convert a corrupt export")
+    return data
+
+
+def backup_rules(data, path, what):
+    """Extract and validate the rules array from a custom/rate backup (call on the dict returned
+    by load_backup_json). `result` may be a bare list of rule objects, or an object with a
+    list-typed `rules`; every rule must be an object. FATAL on any other shape — a valid envelope
+    with a wrong-shaped result (e.g. `{"result": {}}`) would otherwise be read as 0 rules and ship
+    an EMPTY WAF as success, and a bare `{"result": []}` would crash `.get("rules")` on a list."""
+    result = data["result"]
+    if isinstance(result, list):
+        rules = result
+    elif isinstance(result, dict) and isinstance(result.get("rules"), list):
+        rules = result["rules"]
+    else:
+        rules_type = type(result.get("rules")).__name__ if isinstance(result, dict) else "n/a"
+        fatal(f"{what}: result is neither a rules list nor a {{\"rules\": [...]}} object "
+              f"(result={type(result).__name__}, rules={rules_type}) ({path})")
+    if not all(isinstance(r, dict) for r in rules):
+        fatal(f"{what}: a rule entry is not an object ({path})")
+    return rules
+
+
+def backup_list(data, path, what):
+    """Validate that `result` is a list of objects — the shape of IP-Lists / List-Items /
+    IP-Access exports (call on the dict returned by load_backup_json). FATAL otherwise, for the
+    same reason as backup_rules: a wrong shape silently read as empty drops real rules/items."""
+    result = data["result"]
+    if not isinstance(result, list):
+        fatal(f"{what}: result is not a list (got {type(result).__name__}) ({path})")
+    if not all(isinstance(x, dict) for x in result):
+        fatal(f"{what}: a result entry is not an object ({path})")
+    return result
+
 
 # ── Non-convertible fields ───────────────────────────────────────────────────
 
