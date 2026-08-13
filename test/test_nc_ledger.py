@@ -733,6 +733,34 @@ check("2c dedup: 2 cross-overlap effects on ONE source leaf -> exactly ONE NC cl
 check("2c dedup: the single NC claim owns exactly that source leaf",
       bool(_nc2cd) and sorted(tuple(k) for k in _nc2cd[0]["source_keys"]) == [("rule", "rN", "/edge_ttl/mode")])
 
+# CDN #3: an OR-split / *.ext native rule records one effect OBJECT per branch, all with the SAME
+# owned leaf. When branches land differently — one WINS a slot cleanly (EXACT) and another WINS a
+# slot AND cross-overlaps a behavior it can't cover (LOSSY) — the coordinator must MERGE them into
+# ONE native fate (LOSSY dominates, artifacts union), NOT raise a spurious one-leaf-two-fates FATAL
+# on a legal rule (the bug: statuses={EXACT, LOSSY_WITH_WARNING} on one key -> LedgerError).
+_ir3 = _pre.make_empty_ir(DC)
+_pre.find_or_create_behavior(_ir3, "*", DC, "o.net")
+_ir3["_inventory"] = [["rule", "rOR", "/edge_ttl/mode"]]
+_mk3 = lambda: {"kind": "ttl_edge", "_source_kind": "rule", "_source_id": "rOR",
+                "_owned_key_segments": [["edge_ttl", "mode"]]}
+_e3clean, _e3overlap = _mk3(), _mk3()   # two branch effect OBJECTS, one source leaf
+_ir3["_native_applied"] = [
+    {"effect": _e3clean, "behavior": "/robots.txt", "slot": "edge_ttl", "is_winner": True},
+    {"effect": _e3overlap, "behavior": "*.js", "slot": "edge_ttl", "is_winner": True}]
+_ir3["_native_overlap_nc"] = [{"effect": _e3overlap, "behavior": "/api/*"}]
+_err3 = _raises_ledger(lambda: _pre._coordinate_artifacts_and_claims(_ir3))
+_c3 = [c for c in _ir3["_claims"] if any(k[1] == "rOR" for k in c["source_keys"])]
+check("#3 OR-split EXACT+LOSSY on one leaf -> no FATAL", _err3 is None, _err3 or "")
+check("#3 OR-split EXACT+LOSSY -> exactly ONE merged claim", len(_c3) == 1, f"got {len(_c3)}")
+check("#3 merged native fate is LOSSY_WITH_WARNING (LOSSY dominates EXACT)",
+      bool(_c3) and _c3[0]["status"] == "LOSSY_WITH_WARNING", f"got {_c3 and _c3[0].get('status')}")
+check("#3 merged claim unions BOTH winning branches' artifacts",
+      bool(_c3) and len(_c3[0].get("artifact_ids", [])) == 2, f"got {_c3 and _c3[0].get('artifact_ids')}")
+check("#3 merged claim owns exactly the shared source leaf",
+      bool(_c3) and sorted(tuple(k) for k in _c3[0]["source_keys"]) == [("rule", "rOR", "/edge_ttl/mode")])
+# GUARD (do not over-broaden): a genuine NC-vs-converted collision on ONE key still FATALs (#19b),
+# and a viewer-op EXACT/LOSSY split on one key still FATALs (#19c) — both remain strict below.
+
 # An ip: KVS entry is registered ONLY when a WIRED viewer op references its list. Add a
 # wired op (set_request_header) referencing the list to each fixture so the shared KVS
 # entry is legitimately in scope (matches production: _collect_kvs_ip_entries runs off a

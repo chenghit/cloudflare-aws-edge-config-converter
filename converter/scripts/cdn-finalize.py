@@ -204,26 +204,35 @@ def dedup_policies(all_irs):
 
 
 def _completeness_from_claims(all_irs):
-    """Report-level CONVERSION completeness, computed from the LEDGER (each domain's `_claims`) —
-    NOT inferred from artifact counts. Returns "COMPLETE_EXACT" iff EVERY decision claim across all
-    domains is EXACT; ANY non-EXACT claim → "PARTIAL_WITH_NC". FAIL CLOSED: only "EXACT" is a clean
-    conversion — NON_CONVERTIBLE and LOSSY_WITH_WARNING are the expected not-clean statuses, and an
-    ABSENT or UNEXPECTED status is an internal/ledger anomaly ALSO treated as not-clean (never
-    silently COMPLETE_EXACT; the preprocess ledger validator is the primary status guard, this is
+    """Report-level CONVERSION completeness, from the LEDGER (`_claims`) AND the rule-level
+    non_convertible report — NOT inferred from artifact counts. Returns "COMPLETE_EXACT" iff EVERY
+    decision claim across all domains is EXACT AND no domain carries a rule-level non_convertible
+    report entry; otherwise "PARTIAL_WITH_NC". FAIL CLOSED: only "EXACT" is a clean conversion —
+    NON_CONVERTIBLE and LOSSY_WITH_WARNING are the expected not-clean statuses, and an ABSENT or
+    UNEXPECTED claim status is an internal/ledger anomaly ALSO treated as not-clean (never silently
+    COMPLETE_EXACT; the preprocess ledger validator is the primary status guard, this is
     defense-in-depth).
 
     A SEPARATE axis from the process STATUS (SCRIPT_STANDARDS): STATUS (OK/BLOCKED/PARTIAL/FATAL) is
     the EXECUTION-layer outcome (did the run complete, is it deployable), while completeness is the
-    CONVERSION-fidelity outcome (did we convert everything exactly). They are ORTHOGONAL — a fully
+    CONVERSION-fidelity outcome (did we convert everything exactly). They are ORTHOGONAL: a fully
     EXACT conversion can still be STATUS: BLOCKED (e.g. a KVS-size / quota gate), which is a
     COMPLETE_EXACT conversion that merely can't deploy as-is. So completeness deliberately does NOT
     fold in execution/deploy warnings (quota, KVS size): those live in STATUS + the warnings list.
     Folding them here would mislabel a clean conversion "PARTIAL_WITH_NC", implying non-convertible
-    content that isn't present. NC/LOSSY presence is read from the ledger, so it can't drift from the
-    per-behavior non_convertible report or the LOSSY warnings (all three project the same claims)."""
+    content that isn't present.
+
+    BOTH channels are read because the finalize gate treats a per-leaf claim AND a rule-level
+    non_convertible report entry as the two legitimate NC channels: some cache-rule NCs
+    (status_code_ttl, complex-scope — see cdn-preprocess _mark_*_non_convertible) are recorded
+    report-only with NO claim, so a claims-only scan would mislabel such a domain COMPLETE_EXACT
+    while its own report lists NC items."""
     for ir in all_irs:
         for c in ir.get("_claims", []):
             if c.get("status") != "EXACT":   # fail closed: NC/LOSSY AND any unknown/absent status
+                return "PARTIAL_WITH_NC"
+        for beh in ir.get("cache_behaviors", []):
+            if beh.get("non_convertible"):   # rule-level NC recorded report-only (no claim)
                 return "PARTIAL_WITH_NC"
     return "COMPLETE_EXACT"
 

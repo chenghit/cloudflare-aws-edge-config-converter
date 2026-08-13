@@ -1629,6 +1629,18 @@ check("COMPLETE_EXACT is not the PARTIAL token", _fin._completeness_from_claims(
       forbid_substr="PARTIAL_WITH_NC")
 check("PARTIAL_WITH_NC is not the COMPLETE token",
       _fin._completeness_from_claims([_ir_claims("NON_CONVERTIBLE")]), forbid_substr="COMPLETE_EXACT")
+# CDN #4: a cache-rule NC recorded REPORT-ONLY (no per-leaf claim — status_code_ttl, complex scope)
+# must still make completeness PARTIAL. Reading only _claims would call this domain COMPLETE_EXACT
+# while its own non_convertible report lists NC — the finalize gate treats a claim OR a rule-level
+# report entry as the two legit NC channels, so completeness reads both.
+check("report-only cache NC (all claims EXACT) -> PARTIAL_WITH_NC",
+      _fin._completeness_from_claims([{"_claims": [{"status": "EXACT"}],
+          "cache_behaviors": [{"non_convertible": [{"cf_source_rule": "c1"}]}]}]),
+      expect_substr="PARTIAL_WITH_NC")
+check("EXACT claims + EMPTY non_convertible report -> COMPLETE_EXACT",
+      _fin._completeness_from_claims([{"_claims": [{"status": "EXACT"}],
+          "cache_behaviors": [{"non_convertible": []}]}]),
+      expect_substr="COMPLETE_EXACT")
 
 print("== MIN TLS (Step-6): CloudFront viewer min TLS floored to a uniform TLSv1.2_2021 + note ==")
 # User policy: CloudFront min TLS is uniformly >= 1.2. Every source min_tls_version maps to

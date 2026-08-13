@@ -1179,18 +1179,25 @@ def _coordinate_artifacts_and_claims(ir):
     # per-object. The winner/exact_noop paths need no such guard (their contributions fold by
     # grouping). Keep the first effect's reason (duplicates carry the same reason anyway).
     _claimed_nc_leaves = set()
+    _winner_by_key = {}   # merge OR-split/*.ext branches: one source leaf → one native fate
     for eid, e in _native_effect_by_id.items():
         won = _native_won.get(eid, set())
         overlapped = eid in _native_overlapped
         if won:
-            status = OUTCOME_LOSSY if overlapped else OUTCOME_EXACT
-            reason = (f"native {e['kind']} converts where it contains a behavior but "
-                      f"cross-overlaps another (partial coverage)") if overlapped else None
-            ref = {"source_kind": e["_source_kind"], "source_id": e["_source_id"],
-                   "owned_key_segments": e["_owned_key_segments"],
-                   "outcome_status": status, "outcome_reason": reason}
-            for aid in sorted(won):
-                _register_artifact_contributions(ir, aid, "native_effect", [ref], contributions)
+            # An OR-split / *.ext rule records one effect OBJECT per branch, all sharing the SAME
+            # owned key (the key ignores scope). Branches can land differently — one wins a slot
+            # cleanly (EXACT), another also cross-overlaps a behavior it can't cover (LOSSY). Merge
+            # per key so the leaf gets ONE native fate: LOSSY if ANY winning branch overlapped
+            # (partial coverage), else EXACT; artifacts union. Registered after the loop. This
+            # keeps the strict per-key aggregator (step 3) from seeing a spurious
+            # one-leaf-two-fates conflict on a legal rule. (Only the SAME source unit can share a
+            # key, so this merge is always intra-rule.)
+            okey = (e["_source_kind"], e["_source_id"],
+                    None if e["_owned_key_segments"] is None
+                    else tuple(tuple(s) for s in e["_owned_key_segments"]))
+            slot = _winner_by_key.setdefault(okey, {"aids": set(), "overlapped": False, "e": e})
+            slot["aids"] |= won
+            slot["overlapped"] = slot["overlapped"] or overlapped
         elif overlapped:
             # cross-overlap ONLY, nothing survived → NON_CONVERTIBLE (via the NC channel so
             # its keys are claimed NC, not left artifact-less-EXACT). The legacy
@@ -1214,6 +1221,19 @@ def _coordinate_artifacts_and_claims(ir):
             for k in _resolve_ref_to_keys(ir, ref):
                 contributions.setdefault(k, []).append((None, OUTCOME_EXACT, None))
 
+    # Register the merged winner contribution once per source leaf (OR-split / *.ext branches
+    # folded to one native fate above, so the strict per-key aggregator never sees them split).
+    for slot in _winner_by_key.values():
+        e = slot["e"]
+        status = OUTCOME_LOSSY if slot["overlapped"] else OUTCOME_EXACT
+        reason = (f"native {e['kind']} converts where it contains a behavior but cross-overlaps "
+                  f"another (partial coverage)") if slot["overlapped"] else None
+        ref = {"source_kind": e["_source_kind"], "source_id": e["_source_id"],
+               "owned_key_segments": e["_owned_key_segments"],
+               "outcome_status": status, "outcome_reason": reason}
+        for aid in sorted(slot["aids"]):
+            _register_artifact_contributions(ir, aid, "native_effect", [ref], contributions)
+
     # (3) per key: forbid NC-overlap, require status/reason agreement, fold to one row.
     # Recompute nc_keys from the CURRENT _claims — step (2c) may have added NC claims
     # (cross-overlap-only native effects), so a converted-artifact contribution on one of
@@ -1231,6 +1251,11 @@ def _coordinate_artifacts_and_claims(ir):
                 f"— an inventory leaf has exactly one fate (converter bug)")
         statuses = {s for _, s, _ in contribs}
         reasons = {(r or None) for _, _, r in contribs}
+        # STRICT: a leaf that reaches here with divergent statuses/reasons is a genuine
+        # one-leaf-two-fates conflict (a converter bug). The ONE legitimate divergence — an
+        # OR-split / *.ext native rule whose branches land EXACT on one slot and LOSSY on another
+        # — is merged UPSTREAM in step (2c) into a single native fate per leaf, so it never
+        # reaches here split. NC-vs-converted is caught above via nc_keys.
         if len(statuses) > 1 or len(reasons) > 1:
             raise LedgerError(
                 f"source key {k} has conflicting contribution outcomes "
